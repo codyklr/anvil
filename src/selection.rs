@@ -190,6 +190,77 @@ impl Selection {
             _ => false,
         }
     }
+
+    /// Number of data cells inside the selection rectangle. Zero when
+    /// the selection is empty. Useful for a "copied N cells" status
+    /// message and for tests.
+    pub fn cell_count(&self) -> u64 {
+        let Some((tl, br)) = self.normalize() else {
+            return 0;
+        };
+        let rows = br.record_index - tl.record_index + 1;
+        let cols = br.column_index as u64 - tl.column_index as u64 + 1;
+        rows * cols
+    }
+
+    /// Render the selection as a TSV-formatted `String`, using
+    /// `cell_at` to look up individual cell values. Each output row is
+    /// cells joined by `\t`; rows are joined by the platform's
+    /// standard line ending (LF on Unix, CRLF on Windows).
+    ///
+    /// Cells that contain a tab, newline, carriage return, or a
+    /// double-quote are wrapped in double-quotes with embedded
+    /// double-quotes doubled (RFC 4180-style). This preserves the
+    /// content faithfully for paste-into-spreadsheet destinations
+    /// (Excel, Numbers, Sheets) which all understand quoted TSV.
+    ///
+    /// Empty cells are emitted as the empty string — no quotes. A cell
+    /// lookup that returns `None` (out-of-bounds row/column) is also
+    /// emitted as the empty string.
+    ///
+    /// An empty selection produces an empty string.
+    pub fn copy_text_with<F>(&self, cell_at: F) -> String
+    where
+        F: Fn(u64, usize) -> Option<String>,
+    {
+        let Some((tl, br)) = self.normalize() else {
+            return String::new();
+        };
+        let line_ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        let mut out = String::new();
+        for row in tl.record_index..=br.record_index {
+            for col in tl.column_index..=br.column_index {
+                if col > tl.column_index {
+                    out.push('\t');
+                }
+                let raw = cell_at(row, col).unwrap_or_default();
+                push_tsv_cell(&mut out, &raw);
+            }
+            out.push_str(line_ending);
+        }
+        out
+    }
+}
+
+/// Push `cell` into `out` with TSV escaping applied. If the cell has
+/// no special characters we emit it raw; otherwise we quote it and
+/// double embedded quotes per RFC 4180.
+fn push_tsv_cell(out: &mut String, cell: &str) {
+    let needs_quote = cell.contains(['\t', '\n', '\r', '"']);
+    if !needs_quote {
+        out.push_str(cell);
+        return;
+    }
+    out.push('"');
+    for ch in cell.chars() {
+        if ch == '"' {
+            out.push('"');
+            out.push('"');
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('"');
 }
 
 fn clamp_signed(value: i64, lo: i64, hi: i64) -> i64 {
@@ -327,5 +398,141 @@ mod tests {
         s.set(CellPos::new(0, 0));
         s.move_cursor(1, 0, 5, 0, false);
         assert_eq!(s.cursor(), Some(CellPos::new(0, 0)));
+    }
+
+    // ---- copy_text / TSV formatter -------------------------------------
+
+    #[test]
+    fn cell_count_is_zero_for_empty_selection() {
+        let s = Selection::empty();
+        assert_eq!(s.cell_count(), 0);
+    }
+
+    #[test]
+    fn cell_count_single_cell() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(3, 5));
+        assert_eq!(s.cell_count(), 1);
+    }
+
+    #[test]
+    fn cell_count_2x3_rectangle() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(2, 4));
+        s.extend_to(CellPos::new(3, 6));
+        assert_eq!(s.cell_count(), 2 * 3);
+    }
+
+    #[test]
+    fn cell_count_normalizes_when_anchor_after_cursor() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(5, 5));
+        s.extend_to(CellPos::new(1, 1));
+        assert_eq!(s.cell_count(), 5 * 5);
+    }
+
+    #[test]
+    fn copy_text_empty_selection_returns_empty_string() {
+        let s = Selection::empty();
+        let text = s.copy_text_with(|_, _| Some("x".into()));
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn copy_text_single_cell_emits_one_line_with_trailing_line_ending() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        let text = s.copy_text_with(|_, _| Some("hello".into()));
+        let expected_ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("hello{expected_ending}"));
+    }
+
+    #[test]
+    fn copy_text_row_range_emits_rows_separated_by_line_ending() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        s.extend_to(CellPos::new(1, 2));
+        let text = s.copy_text_with(|r, c| Some(format!("r{r}c{c}")));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(
+            text,
+            format!("r0c0\tr0c1\tr0c2{ending}r1c0\tr1c1\tr1c2{ending}")
+        );
+    }
+
+    #[test]
+    fn copy_text_out_of_bounds_cell_is_empty() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        s.extend_to(CellPos::new(1, 1));
+        let text = s.copy_text_with(|r, c| {
+            // Only (0, 0) exists; everything else is "out of bounds".
+            if r == 0 && c == 0 {
+                Some("real".into())
+            } else {
+                None
+            }
+        });
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("real\t{ending}\t{ending}"));
+    }
+
+    #[test]
+    fn copy_text_quotes_cells_with_tabs() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        let text = s.copy_text_with(|_, _| Some("col1\tcol2".into()));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("\"col1\tcol2\"{ending}"));
+    }
+
+    #[test]
+    fn copy_text_quotes_cells_with_newlines() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        let text = s.copy_text_with(|_, _| Some("line1\nline2".into()));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("\"line1\nline2\"{ending}"));
+    }
+
+    #[test]
+    fn copy_text_doubles_embedded_double_quotes() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        let text = s.copy_text_with(|_, _| Some(r#"say "hi""#.into()));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("\"say \"\"hi\"\"\"{ending}"));
+    }
+
+    #[test]
+    fn copy_text_does_not_quote_plain_cells() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        s.extend_to(CellPos::new(0, 1));
+        let text = s.copy_text_with(|_, c| Some(if c == 0 { "a".into() } else { "b".into() }));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("a\tb{ending}"));
+    }
+
+    #[test]
+    fn copy_text_quotes_carriage_return() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        let text = s.copy_text_with(|_, _| Some("with\rcr".into()));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("\"with\rcr\"{ending}"));
+    }
+
+    #[test]
+    fn copy_text_column_range_emits_columns_with_tabs() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 1));
+        s.extend_to(CellPos::new(2, 3));
+        let text = s.copy_text_with(|r, c| Some(format!("r{r}c{c}")));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(
+            text,
+            format!("r0c1\tr0c2\tr0c3{ending}r1c1\tr1c2\tr1c3{ending}r2c1\tr2c2\tr2c3{ending}")
+        );
     }
 }

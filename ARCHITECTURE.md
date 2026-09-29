@@ -117,7 +117,7 @@ anvil/
 
 ### What is *current* vs *planned*
 
-**Current (Milestone 1 + selection slice of Milestone 2, in `src/`):**
+**Current (Milestone 1 + selection + clipboard slices of Milestone 2, in `src/`):**
 
 - `parser::indexing` — build record byte-offset index, collect
   `ParseWarning`s, report `record_count` and `column_count`.
@@ -130,13 +130,15 @@ anvil/
 - `selection` — GPUI-free selection model: `(record, column)` cursor +
   anchor + `CellPos` coordinate type. Selected cells are painted with
   `theme::BG_SELECTED`; arrow / Page / Home / End / Esc keys drive
-  the cursor; click and shift-click on cells drive it too.
+  the cursor; click and shift-click on cells drive it too;
+  `Selection::copy_text_with` renders TSV for clipboard paste.
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
   for horizontal virtualization. Per-cell `on_mouse_down` for
   selection.
-- `ui::view` — toolbar, drag/drop, archive picker overlay, status bar,
-  generation counter for cancellation, inline keyboard handler for
-  selection movement.
+- `ui::view` — toolbar, drag/drop, archive picker overlay, status bar
+  (with copy / error message slot), generation counter for
+  cancellation, inline keyboard handler for selection movement and
+  Cmd/Ctrl+C copy.
 
 **Planned (Milestone 2+ — these modules do not exist yet):**
 
@@ -190,6 +192,7 @@ The `MainView` owns:
 | `h_drag: Option<(f32, f32)>`        | Horizontal scrollbar drag state.        |
 | `selection: Selection` | Current cell / range selection (see below).     |
 | `task: Option<Task<()>>`            | Outstanding background task handle.     |
+| `status_message: Option<String>`    | Transient status-bar message (e.g. "copied N cells"). Cleared on every `OpenOutcome`. |
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
 Both are cheap to clone, so the uniform-list row renderer can capture
@@ -221,10 +224,11 @@ actions system.
 Keyboard navigation today is handled inline by
 `MainView::on_grid_key_down`, which inspects the `KeyDownEvent`'s
 keystroke and routes to `Selection::move_cursor`, `Selection::set`,
-or `Selection::clear`. This is enough for the arrows / Home / End /
-Page Up / Page Down / Esc family. A dedicated `commands` module will
-be extracted once the keyboard surface grows (search, filter,
-clipboard, etc.).
+`Selection::clear`, or `MainView::copy_selection_to_clipboard`.
+This is enough for the arrows / Home / End / Page Up / Page Down /
+Esc family plus Cmd/Ctrl+C. A dedicated `commands` module will be
+extracted once the keyboard surface grows (search, filter,
+go-to-row, etc.).
 
 Click handlers are wired via `cx.listener(|view, _, _, cx| ...)` for
 toolbar / overlay clicks. Per-cell clicks are wired through
@@ -233,8 +237,9 @@ via the captured `Entity<MainView>` handle, calling
 `entity.update(&mut app, |view, cx| ...)`.
 
 This is one of the bigger remaining gaps before Milestone 2 lands
-fully: search, filter, and clipboard copy will need a unified command
-path.
+fully: search, filter, go-to-row, and a `cx.bind_keys` /
+`Action`-typed binding path will benefit from a unified commands
+module.
 
 ### Drag / drop
 
@@ -255,13 +260,16 @@ keys:
 | Page Up/Down   | Move the selection by `PAGE_STEP` rows.                       |
 | Home / End     | Jump the column cursor to the first / last column.           |
 | Esc            | Clear the selection; if already empty, close the archive picker overlay. |
+| Cmd/Ctrl+C     | Copy the current selection to the clipboard as TSV; status bar reports "copied N cells" or "copy failed: ...". |
 
 Shift held during arrow / Page / Home / End extends the selection
-instead of replacing it. The grid div is not focusable in the
-traditional sense today; the `key_context` is wired so that a future
-focus handle can scope keys here without renaming them. A real
-focus handle and `cx.bind_keys` will be added when the keyboard
-surface grows (search / filter / clipboard).
+instead of replacing it. `Cmd/Ctrl+C` matches `keystroke.modifiers.secondary()`
+(Cmd on macOS, Ctrl on Linux/Windows) with no Alt/Fn; this avoids
+eating variant chords like `Alt+C`. The grid div is not focusable
+in the traditional sense today; the `key_context` is wired so that a
+future focus handle can scope keys here without renaming them. A
+real focus handle and `cx.bind_keys` will be added when the keyboard
+surface grows (search / filter / go-to-row).
 
 ## Selection model
 
@@ -289,6 +297,8 @@ order; `Selection::contains(record, column)` does an inclusive test.
 | `selection.anchor()`            | Current anchor cell (or `None`).              |
 | `selection.normalize()`         | Top-left + bottom-right of the rectangle.     |
 | `selection.contains(r, c)`      | Is `(r, c)` inside the rectangle?             |
+| `selection.cell_count()`        | Number of data cells in the rectangle (0 if empty). |
+| `selection.copy_text_with(cell_at)` | Render the selection as TSV.            |
 
 ### Invariants
 
@@ -326,6 +336,71 @@ order; `Selection::contains(record, column)` does an inclusive test.
 * The `commands` module that will own keybindings (search, filter,
   copy) is not yet extracted. Today keybindings are inlined in
   `view.rs::on_grid_key_down`.
+
+## Clipboard copy
+
+Cmd/Ctrl+C copies the current selection as a TSV string onto the
+system clipboard. The data-side formatter (`Selection::copy_text_with`)
+lives in `anvil_core`; the platform call lives in the UI crate.
+
+### Data-side formatter
+
+`Selection::copy_text_with<F>(&self, cell_at: F) -> String` where
+`cell_at: Fn(u64, usize) -> Option<String>`. The closure decouples
+the formatter from `ParsedDocument` so unit tests can use mock cells
+and the UI passes `|r, c| doc.cell(r, ColumnIndex(c)).map(...).into_string())`.
+
+The output is RFC 4180-style quoted TSV:
+
+- Cells are joined by `\t`. Rows are joined by the platform's
+  standard line ending (LF on Unix, CRLF on Windows).
+- A cell that contains a tab, newline, carriage return, or
+  double-quote is wrapped in double-quotes with embedded
+  double-quotes doubled. Plain cells are emitted raw.
+- Out-of-bounds cells (the row is shorter than the rectangle's
+  width) become empty strings rather than panicking.
+- An empty selection produces the empty string.
+
+`Selection::cell_count()` returns the rectangle's cell count and is
+used for the "copied N cells" status message.
+
+### UI wiring
+
+`MainView::copy_selection_to_clipboard(cx)` runs on the UI thread.
+It:
+
+1. Returns early if there is no selection (`cell_count == 0`).
+2. Clones the `Arc<ParsedDocument>` and `Selection` so the closure
+   does not borrow `MainView` mutably.
+3. Formats the selection via `Selection::copy_text_with`.
+4. Calls `arboard::Clipboard::new()` then `set_text`. On error,
+   captures the message but does not panic.
+5. Stores either `copied N cells` or `copy failed: ...` in
+   `MainView.status_message`, which `render_status` paints in
+   `theme::ACCENT` (or `gpui::red()` for failures) ahead of the
+   generic state line.
+6. `status_message` is cleared on every successful `OpenOutcome`
+   (Ready, NeedArchiveChoice, Error). It is not auto-expired; the
+   next user action that changes state will reset it.
+
+### Keyboard binding
+
+`on_grid_key_down` matches `key == "c"` with `modifiers.secondary()`
+(Cmd on macOS, Ctrl on Linux/Windows), no alt, no function. The
+explicit modifier check avoids eating `Alt+C` or `Fn+C` when they
+become bound by other features.
+
+### Architectural invariants preserved
+
+- The formatter lives in `anvil_core` and has no platform dependency;
+  the entire test suite (25 selection unit tests + 8 copy integration
+  tests) exercises it without launching the GUI.
+- Only the cells inside the selection rectangle are decoded; we do not
+  re-decode every cell in the visible range. For a 1M-row document
+  with a 20×10 selection, the formatter decodes 200 cells total.
+- Copy uses the borrowed `ParsedDocument` mmap through `doc.cell`;
+  the text is converted to `String` only at the clipboard boundary,
+  consistent with "owned strings only at the UI boundary".
 
 ### UI update flow
 
@@ -926,7 +1001,7 @@ of decompression + temp-file write + mmap.
 
 ### What exists today
 
-`tests/core.rs` — 44 integration tests in one file. They run without
+`tests/core.rs` — 52 integration tests in one file. They run without
 a GUI and are the primary CI signal.
 
 | Group                  | Tests                                                                 |
@@ -938,10 +1013,14 @@ a GUI and are the primary CI signal.
 | ZIP handling           | single CSV, multiple CSVs, ignores `__MACOSX`/`.DS_Store`, no supported files, path traversal rejected, duplicate names, corrupted zip, large compressed round-trip |
 | Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
+| Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
-In addition, `src/selection.rs` carries 11 unit tests for the
-selection type itself (`cargo test --release --lib selection`).
+In addition, `src/selection.rs` carries 25 unit tests for the
+selection type itself (`cargo test --release --lib selection`): the
+original 11 plus 14 covering `cell_count` and `copy_text_with`
+(empty / single / row / column ranges, special-char escaping,
+out-of-bounds cells, line-ending correctness, normalisation).
 
 There are **no** UI tests yet. `anvil --probe` exists as a manual
 smoke test for the open path.
@@ -964,6 +1043,7 @@ smoke test for the open path.
 | `zip`               | 2.4     | ZIP reading / writing                            | Required archive format                | `deflate` and `bzip2` features only; encryption not supported |
 | `tempfile`          | 3       | Auto-cleaned temporary directories              | Temp-file extraction for ZIP entries   | `Arc<TempDir>` lifecycle is part of `OpenedSource`   |
 | `thiserror`         | 1       | Error enum derive                                | Typed errors                           | None                                                  |
+| `arboard`           | 3       | Cross-platform clipboard (text only)             | Cmd/Ctrl+C clipboard copy              | `default-features = false` to skip image support; used only by the `anvil` binary |
 | `crc32fast` (dev)   | 1       | CRC32                                            | Build hand-crafted ZIPs in tests       | Test-only                                           |
 
 Notes:
@@ -979,12 +1059,14 @@ Notes:
 
 ### Functional gaps
 
-- Selection and basic keyboard navigation are wired (arrow keys,
-  Page Up/Down, Home/End, Esc). Selection model lives in
-  `anvil_core::Selection` and is exercised by 11 unit tests + 6
-  integration tests. Click-and-drag selection is not yet wired.
-- No clipboard copy, no search, no filter, no sort, no type
-  inference, no column statistics. Milestones 2–3.
+- Selection, basic keyboard navigation (arrow keys, Page Up/Down,
+  Home/End, Esc), and clipboard copy (Cmd/Ctrl+C, TSV via
+  `arboard`) are wired. `anvil_core::Selection` carries 25 unit
+  tests + 14 integration tests; the clipboard formatter and the
+  cell-count helper are covered end-to-end against real
+  `ParsedDocument`s. Click-and-drag selection is still not wired.
+- No search, no filter, no sort, no type inference, no column
+  statistics. Milestones 2–3.
 - The status bar reports a warning count but cannot navigate to the
   offending row. Milestone 4.
 - No progress UI for extraction / indexing. Milestone 5.
@@ -1089,8 +1171,12 @@ restructuring. Specifically:
   stores `(record_index, column_index)` ranges, independent of GPUI
   elements. Keyboard handling is currently inlined in
   `view.rs::on_grid_key_down`; a dedicated `commands` module will be
-  extracted once search/filter/clipboard add their keybindings.
-  Clipboard copy is not yet implemented.
+  extracted once search / filter / go-to-row add their keybindings.
+  Clipboard copy is implemented: `Selection::copy_text_with`
+  renders TSV; `MainView::copy_selection_to_clipboard` writes it
+  via `arboard`; `MainView::status_message` shows "copied N cells"
+  in the status bar. Click-and-drag selection and Cmd/Ctrl+Home/End
+  remain outstanding.
 - **Search (Milestone 2).** A `query::search` module owns the
   in-progress search: input string, options (case sensitivity,
   column scope), and an `Arc<Mutex<Vec<record_index>>>` shared

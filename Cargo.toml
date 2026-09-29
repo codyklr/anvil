@@ -36,6 +36,9 @@ tempfile = "3"
 # Errors
 thiserror = "1"
 
+# Clipboard (text-only; no image support)
+arboard = { version = "3", default-features = false }
+
 [dev-dependencies]
 crc32fast = "1"
 

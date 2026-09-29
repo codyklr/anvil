@@ -139,15 +139,15 @@ this may freeze the UI.
 - [ ] Tab / Shift-Tab navigation between cells.
 - [ ] Cmd/Ctrl+G — go-to-row input box.
 - [x] Esc — clear selection / close overlays.
-- [ ] Cmd/Ctrl+C — copy selection to clipboard.
+- [x] Cmd/Ctrl+C — copy selection to clipboard.
 
 #### Clipboard
 
-- [ ] `clipboard` integration via `arboard` or platform layer.
-- [ ] Copy single cell.
-- [ ] Copy row range.
-- [ ] Copy column range.
-- [ ] TSV formatting for pasted-into-spreadsheet destinations.
+- [x] `clipboard` integration via `arboard` or platform layer.
+- [x] Copy single cell.
+- [x] Copy row range.
+- [x] Copy column range.
+- [x] TSV formatting for pasted-into-spreadsheet destinations.
 
 #### Search
 
@@ -182,12 +182,14 @@ this may freeze the UI.
 - [ ] Unit tests for `query::filter` predicates against fixtures.
 - [ ] Test that opening a new file cancels an in-flight search /
   filter.
-- [ ] Test selection copy formatting (TSV with CRLF on Windows
+- [x] Test selection copy formatting (TSV with CRLF on Windows
   builds, LF on Unix).
 
 ### Dependencies
 
-- `arboard` (or platform-specific clipboard crate) — new.
+- `arboard = "3"` (text-only, default-features disabled) — added in
+  the clipboard slice. The crate is used only by the `anvil` binary;
+  `anvil_core` is unaffected.
 - The `Cell<'a>` API may need to expose `to_string_lossy_owned`
   consistently for clipboard/search.
 

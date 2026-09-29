@@ -60,6 +60,9 @@ pub struct MainView {
     selection: Selection,
 
     task: Option<Task<()>>,
+    /// Transient status-bar message (e.g. "copied 12 cells"). Cleared
+    /// when the user makes another selection-changing action.
+    status_message: Option<String>,
 }
 
 impl Default for MainView {
@@ -77,6 +80,7 @@ impl Default for MainView {
             h_drag: None,
             selection: Selection::empty(),
             task: None,
+            status_message: None,
         }
     }
 }
@@ -119,6 +123,7 @@ impl MainView {
                 self.show_picker = false;
                 self.scroll_x = 0.0;
                 self.selection.clear();
+                self.status_message = None;
                 self.state = ViewState::Ready;
             }
             OpenOutcome::NeedArchiveChoice(source) => {
@@ -126,11 +131,13 @@ impl MainView {
                 self.selected_entry = None;
                 self.show_picker = true;
                 self.selection.clear();
+                self.status_message = None;
                 self.state = ViewState::Ready;
             }
             OpenOutcome::Error(message) => {
                 self.model = None;
                 self.selection.clear();
+                self.status_message = Some(format!("error: {message}"));
                 self.state = ViewState::Error(message);
             }
         }
@@ -300,6 +307,20 @@ impl MainView {
                 )
             })
             .child(div().flex_1())
+            .when_some(self.status_message.clone(), |this, msg| {
+                // Highlight a copy-failed message red; otherwise the
+                // default accent is enough to draw attention.
+                let is_failure = msg.starts_with("copy failed");
+                this.child(
+                    div()
+                        .text_color(if is_failure {
+                            gpui::red()
+                        } else {
+                            theme::ACCENT.into()
+                        })
+                        .child(msg),
+                )
+            })
             .child(state)
     }
 
@@ -513,7 +534,15 @@ impl MainView {
             return;
         }
         let key = event.keystroke.key.as_str();
-        let shift = event.keystroke.modifiers.shift;
+        let modifiers = event.keystroke.modifiers;
+        let shift = modifiers.shift;
+
+        // Cmd/Ctrl+C: copy the selection to the clipboard. The
+        // "secondary" modifier is Cmd on macOS and Ctrl elsewhere.
+        if key == "c" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+            self.copy_selection_to_clipboard(cx);
+            return;
+        }
 
         // Movement deltas in (row, col). `None` means the key is not a
         // movement key; we then check for "clear selection" / "select
@@ -544,6 +573,38 @@ impl MainView {
                 cx.notify();
             }
         }
+    }
+
+    /// Format the current selection as TSV and put it on the system
+    /// clipboard. A status-bar message reports success or failure.
+    /// Does nothing (and shows no message) when there is no selection.
+    fn copy_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let count = self.selection.cell_count();
+        if count == 0 {
+            // Nothing to copy. We still notify so that any prior
+            // "copied ..." message is cleared.
+            self.status_message = None;
+            cx.notify();
+            return;
+        }
+        let doc = model.doc.clone();
+        let selection = self.selection.clone();
+        let text = selection.copy_text_with(|r, c| {
+            doc.cell(r, anvil_core::ColumnIndex(c))
+                .map(|cell| cell.into_string())
+        });
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => {
+                self.status_message = Some(format!("copied {count} cell{}", plural(count)));
+            }
+            Err(err) => {
+                self.status_message = Some(format!("copy failed: {err}"));
+            }
+        }
+        cx.notify();
     }
 
     fn move_selection(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
@@ -784,4 +845,12 @@ fn format_count(n: u64) -> String {
         out.push(*b as char);
     }
     out
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }

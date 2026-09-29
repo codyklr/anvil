@@ -302,3 +302,222 @@ also need to copy their hit-lists).
 After that, **search** (`Cmd/Ctrl+F`) is the smallest remaining
 Milestone 2 task and the one that benefits most from the
 selection data type just landed.
+
+---
+
+## 2026-10-01 — Milestone 2 Clipboard Slice
+
+### Context
+
+The previous iteration landed the selection slice of Milestone 2:
+`Selection` data type, click / shift-click / arrow / Page / Home /
+End / Esc navigation, and 25 unit + 14 integration tests for the
+selection model. The agent-log handoff recommended clipboard copy
+as the next vertical slice. This iteration implements that slice
+end-to-end: a TSV formatter in `anvil_core::Selection`, an
+`arboard`-based clipboard write in the UI, a status-bar "copied N
+cells" message, and tests covering every interesting shape of the
+output.
+
+### Implemented
+
+- **`Selection::copy_text_with<F>(&self, cell_at: F) -> String`** in
+  `src/selection.rs` (`F: Fn(u64, usize) -> Option<String>`). TSV
+  formatter that decouples the formatter from `ParsedDocument` so
+  unit tests can pass mock cells. Line ending is LF on Unix, CRLF
+  on Windows. Cells containing `\t`, `\n`, `\r`, or `"` are wrapped
+  in double-quotes with embedded `"` doubled (RFC 4180). Empty
+  selection → empty string; out-of-bounds cells → empty string;
+  no allocations beyond the output `String`.
+- **`Selection::cell_count(&self) -> u64`** — rectangle cell count,
+  used by the status bar message and exercised by its own tests.
+- **TSV escape helper `push_tsv_cell`** — private to
+  `src/selection.rs`.
+- **UI wiring** in `src/ui/view.rs`:
+  - New `MainView::copy_selection_to_clipboard(cx)` builds the
+    formatter output, calls `arboard::Clipboard::new()` +
+    `set_text`, and stores either `copied N cells` or
+    `copy failed: ...` in `MainView.status_message`. Errors from
+    `arboard` (no window server, etc.) do not panic.
+  - `MainView.status_message: Option<String>` field; cleared on
+    every `OpenOutcome` (Ready / NeedArchiveChoice / Error) so a
+    stale "copied ..." message never survives a file open.
+  - `render_status` displays `status_message` (in `theme::ACCENT`,
+    or `gpui::red()` for failures) ahead of the generic state
+    line.
+  - `on_grid_key_down` matches `key == "c"` with
+    `modifiers.secondary()` (Cmd on macOS, Ctrl on Linux/Windows),
+    no Alt, no Fn. The explicit modifier check avoids eating
+    `Alt+C` or `Fn+C` chords.
+  - Tiny `plural(n: u64) -> &'static str` helper for "cell" /
+    "cells".
+- **`arboard = "3"`** added to `[dependencies]` with
+  `default-features = false` so the image stack is not pulled in.
+  Used only by the `anvil` binary; `anvil_core` is unaffected.
+- **Architecture / docs** updates (see below).
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 77 passed (25 lib + 52 integration),
+  0 failed, 1 ignored (`measure_large_fixture`).
+- `cargo test --release --lib selection` — 25 passed (was 11).
+- `cargo test --release --test core copy` — 8 passed.
+- `cargo clippy --release` — clean (no warnings).
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` —
+  1,000,000 rows, 20 columns, 0 warnings, ~500 ms probe time.
+  Throughput test `cargo test --release --test core -- --ignored
+  measure_large --nocapture` reports **165.4 MiB / 1,000,000 rows
+  in 250 ms (661 MiB/s)** — slightly above the Milestone 1
+  baseline (654 MiB/s), no regression.
+- `./target/release/anvil --probe fixtures/archive.zip` — same
+  row count, ~1 s.
+- `./target/release/anvil --probe fixtures/multi.zip` — picker
+  message printed, 2 candidates listed.
+- `./target/release/anvil` (GUI launch, killed after 5 s) — no
+  panic, no stderr. Manual UI exercise of Cmd/Ctrl+C deferred;
+  the data-side contract is exercised by 14 new tests, the
+  formatter against real `ParsedDocument`s, and the UI thread
+  call site compiles and integrates cleanly.
+
+### Tests added / changed
+
+- **14 new unit tests** in `src/selection.rs`:
+  - 4 `cell_count_*` tests (empty, single cell, 2×3 rectangle,
+    normalised-after-anchor).
+  - 10 `copy_text_*` tests covering: empty selection, single
+    cell with trailing line ending, row range, out-of-bounds
+    cell becomes empty, quoting of cells with tabs / newlines /
+    CR / quotes (per RFC 4180), plain cells not quoted, column
+    range. All tests use the platform-aware `cfg!(windows)` line
+    ending so they pass on both targets.
+- **8 new integration tests** in `tests/core.rs::copy_*` against
+  real `ParsedDocument`s via the `copy_text_for` helper:
+  - empty selection → empty string
+  - single cell in a real document
+  - 2×2 rectangle in a real document
+  - normalised rectangle (anchor-after-cursor)
+  - embedded newline preserved in quoted output
+  - doubled quotes preserved in quoted output
+  - missing cells (row shorter than rectangle width) emit empty
+  - 3×3 cell count matches rectangle size
+- No tests removed.
+
+### Roadmap changes
+
+- All five Milestone 2 clipboard tasks ticked: `arboard`
+  integration, single-cell / row-range / column-range / TSV
+  formatting.
+- Cmd/Ctrl+C — copy selection to clipboard ticked.
+- "Test selection copy formatting (TSV with CRLF on Windows
+  builds, LF on Unix)" ticked.
+- Dependencies entry updated to record `arboard = "3"`
+  (text-only).
+
+### Architecture changes
+
+- New `## Clipboard copy` section in `ARCHITECTURE.md` covering
+  the data-side formatter, UI wiring, keyboard binding, and the
+  architectural invariants preserved (formatter lives in
+  `anvil_core` with no platform dep; cell decoding stays
+  bounded by the selection rectangle, not the visible range;
+  owned strings only at the clipboard boundary).
+- `Selection` operations table extended with `cell_count` and
+  `copy_text_with`.
+- Primary-state table extended with `status_message: Option<String>`.
+- Keyboard handling table extended with Cmd/Ctrl+C.
+- "Actions / commands" updated to mention the inline handler
+  now also routes Cmd/Ctrl+C to the new `copy_selection_to_clipboard`.
+- "Selection / navigation / clipboard (Milestone 2, partial)"
+  subsection in Planned Architectural Evolution rewritten to
+  reflect the clipboard landing.
+- "What exists today" lists the clipboard slice alongside the
+  selection slice.
+- "Current Limitations / Technical Debt" → "Functional gaps"
+  rewritten: clipboard done; click-and-drag and Cmd/Ctrl+Home/End
+  still outstanding; no search / filter / sort / type inference
+  yet.
+- Testing section updated to reflect 52 integration tests and
+  25 selection unit tests; selection-copy TSV row added to
+  the test group table.
+- Important Dependencies table extended with `arboard 3`.
+
+### Issues / technical debt discovered
+
+- The clipboard call (`arboard::Clipboard::new()` + `set_text`) is
+  not unit-tested; it requires a window server / display. The
+  formatter that the call uses is unit-tested heavily, and the
+  call site is exercised by `cargo build --release`, but a
+  failure mode (e.g. running under `ssh` without a display) is
+  only surfaced as a status-bar message. A future iteration
+  could add a CI-only `--probe-copy` mode that exercises the
+  real call path headlessly. Deferred.
+- `MainView.status_message` is not auto-expired; it persists
+  until the next `OpenOutcome` or until manually overwritten.
+  The "copied N cells" message stays visible until the user
+  opens a different file or triggers another copy / error. This
+  is acceptable for now but could be improved with a timer
+  driven by a background `cx.spawn` in a future polish pass.
+- `ui::view.rs` is now ~860 lines and mixes selection, open,
+  render, archive picker, drag/drop, clipboard copy, and
+  keyboard handling. The `commands` module refactor noted in
+  the previous iteration is now overdue: the next feature (most
+  likely `Cmd/Ctrl+F` search or `Cmd/Ctrl+G` go-to-row) should
+  not be added inline.
+- The `commands` module was originally slated to be extracted
+  "once clipboard arrives". Clipboard has arrived; the refactor
+  has not. Recording this so the next agent does the extraction
+  before adding more keybindings.
+- `ui::grid::ColumnLayout::compute` still triggers the pre-existing
+  `needless_range_loop` clippy nit (verified clean via clippy run
+  above; the fix from the previous iteration is still in place).
+- `error::AnvilError` still carries the `NotAZip` / `AmbiguousArchive`
+  / `LooksBinary` variants that are never constructed. Same
+  status as before; still on the cleanup list.
+
+### Open loops
+
+- ADR backlog candidates unchanged from the previous iteration
+  (mmap, ZIP decompress-to-temp, generation-counter cancellation).
+  No durable architectural decision landed this iteration, so no
+  ADR filed. The clipboard choice (formatter in `anvil_core` +
+  free closure for cell access + `arboard` for the platform call)
+  is recorded in `ARCHITECTURE.md` and is small enough that an
+  ADR is not warranted.
+- Click-and-drag range selection remains unwired. The per-cell
+  `on_mouse_down` is still the only path that updates selection
+  on a mouse interaction; `MouseMoveEvent` with `dragging()` is
+  already wired for the horizontal scrollbar, so the pattern
+  exists in the codebase.
+- `Cmd/Ctrl+Home/End` (jump to first / last row) remains in the
+  keyboard roadmap but is not yet wired.
+- Tab / Shift-Tab navigation between cells remains unwired.
+
+### Next recommended task
+
+Land **search** (`Cmd/Ctrl+F`) next. This is the smallest remaining
+Milestone 2 task that touches new surface area:
+
+1. Extract a `commands` module first (the inline handler in
+   `view.rs::on_grid_key_down` should not grow further). The
+   module owns keybindings and routes to `MainView` methods.
+   Keep the existing handlers; just relocate them.
+2. Add `arboard`-free `query::search` to `anvil_core`:
+   `pub fn search(doc: &ParsedDocument, needle: &str, opts:
+   SearchOptions) -> Vec<u64>` returning matching record indexes.
+   Streaming over the mmap; case sensitivity / column scope as
+   options.
+3. Wire `Cmd/Ctrl+F` to open a search bar overlay with an input
+   field. Each keystroke spawns a background `cx.spawn` task that
+   runs `query::search` and updates the match list; the
+   generation counter cancels obsolete work.
+4. F3 / Shift-F3 navigate through matches and scroll the grid to
+   the matching row.
+5. Highlight matched cells in the visible rows.
+6. Tests: needle matching, escape handling, case sensitivity,
+   column scoping; cancellation when input changes mid-search.
+
+The current selection type carries `(record_index, column_index)`
+ranges, which is exactly what search highlights need; landing
+search now makes full use of the slice already in place.

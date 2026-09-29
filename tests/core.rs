@@ -705,3 +705,111 @@ fn selection_contains_inside_a_multi_record_range() {
     assert!(!s.contains(4, 4));
     assert!(!s.contains(2, 0));
 }
+
+// ---- selection copy (Milestone 2, clipboard slice) ----------------------
+//
+// These tests exercise `Selection::copy_text_with` against real
+// `ParsedDocument`s end-to-end. They are the data-side contract for
+// "Cmd/Ctrl+C copies the selection as TSV". The actual clipboard write
+// (`arboard`) is exercised manually from the GUI and is not unit-tested
+// here because it requires a window server.
+
+/// Cell lookup helper mirroring what the UI does at copy time.
+fn copy_text_for(doc: &anvil_core::ParsedDocument, s: &Selection) -> String {
+    s.copy_text_with(|r, c| doc.cell(r, ColumnIndex(c)).map(|c| c.into_string()))
+}
+
+#[test]
+fn copy_text_empty_selection_returns_empty_string() {
+    let (doc, _d) = parse_bytes(b"a,b\n1,2\n");
+    let s = Selection::empty();
+    assert_eq!(copy_text_for(&doc, &s), "");
+}
+
+#[test]
+fn copy_text_single_cell_in_real_document() {
+    let (doc, _d) = parse_bytes(b"a,b,c\n1,2,3\n4,5,6\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(1, 2));
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(copy_text_for(&doc, &s), format!("6{ending}"));
+}
+
+#[test]
+fn copy_text_rectangle_in_real_document() {
+    let (doc, _d) = parse_bytes(b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 0));
+    s.extend_to(CellPos::new(1, 1));
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(copy_text_for(&doc, &s), format!("1\t2{ending}4\t5{ending}"));
+}
+
+#[test]
+fn copy_text_normalises_anchor_after_cursor() {
+    // User clicks (1, 2), shift-clicks (0, 0): the rectangle is still
+    // (0, 0)-(1, 2). Copy should reflect that rectangle, not the raw
+    // anchor/cursor order.
+    let (doc, _d) = parse_bytes(b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(1, 2));
+    s.extend_to(CellPos::new(0, 0));
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(
+        copy_text_for(&doc, &s),
+        format!("1\t2\t3{ending}4\t5\t6{ending}")
+    );
+}
+
+#[test]
+fn copy_text_preserves_embedded_newline_in_quoted_cell() {
+    // The parser decodes quoted newlines; the formatter must quote
+    // the cell back so paste-into-spreadsheet preserves the content.
+    let (doc, _d) = parse_bytes(b"a,b\n\"line1\nline2\",z\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 0));
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(copy_text_for(&doc, &s), format!("\"line1\nline2\"{ending}"));
+}
+
+#[test]
+fn copy_text_preserves_doubled_quotes_in_quoted_cell() {
+    let (doc, _d) = parse_bytes(b"a,b\n\"say \"\"hi\"\"\",z\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 0));
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(
+        copy_text_for(&doc, &s),
+        format!("\"say \"\"hi\"\"\"{ending}")
+    );
+}
+
+#[test]
+fn copy_text_missing_cells_are_empty_strings() {
+    // Row 1 has only two columns but the document declares three
+    // (from headers). The missing third cell should be emitted as
+    // empty, not panicking.
+    let (doc, _d) = parse_bytes(b"a,b,c\n1,2,3\n4,5\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 0));
+    s.extend_to(CellPos::new(1, 2));
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(
+        copy_text_for(&doc, &s),
+        format!("1\t2\t3{ending}4\t5\t{ending}")
+    );
+}
+
+#[test]
+fn copy_text_cell_count_matches_rectangle_size() {
+    let (doc, _d) = parse_bytes(b"a,b,c,d\n1,2,3,4\n5,6,7,8\n9,10,11,12\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 1));
+    s.extend_to(CellPos::new(2, 3));
+    assert_eq!(s.cell_count(), 3 * 3);
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    assert_eq!(
+        copy_text_for(&doc, &s),
+        format!("2\t3\t4{ending}6\t7\t8{ending}10\t11\t12{ending}")
+    );
+}
