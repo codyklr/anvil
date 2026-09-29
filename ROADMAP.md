@@ -415,22 +415,34 @@ whether to elevate one.
   ownership model.
 - **Dataset comparison** — diff two files by `(record_index, column)`
   with a side-by-side view.
+- **Configurable copy format** — give Cmd/Ctrl+C a chosen output
+  format rather than hard-coded TSV. Candidate formats: TSV (default,
+  spreadsheet paste), CSV (RFC 4180 quoting), Markdown table, JSON
+  (array of objects keyed by header), and plain text (values only).
+  Surface it as a toolbar dropdown / settings menu, with a one-off
+  "Copy as ▸" override (e.g. Cmd/Ctrl+Shift+C opens the format menu).
+  Implementation: replace the delimiter assumption in
+  `Selection::copy_text_with` with a `CopyFormat` enum and a small
+  formatter per variant; include the header row for CSV / Markdown /
+  JSON when headers exist. Persist the preference (ties into the
+  config-file work in Milestone 5). The copy-confirmation flash and
+  status message should stay format-agnostic.
+- **Select-all (Cmd/Ctrl+A)** — select the whole dataset (all records
+  × all columns). Cheap with the current rectangular model: anchor
+  `(0,0)`, cursor `(record_count-1, column_count-1)`. Land this before
+  non-contiguous selection. Consider row/column selection from the
+  gutter and header clicks too.
 - **Non-contiguous multi-select** — Cmd/Ctrl-click to add separate
   cells or blocks (and Cmd/Ctrl+drag to add a rectangle) to a single
   selection. Today `Selection` is one anchor→cursor rectangle, so this
   needs the model to hold an ordered set of rectangles plus the
   existing cursor for keyboard navigation. Copy would emit the union
   in row-major order, separated per block (blank line between blocks)
-  the way spreadsheets do. Also consider select-all (Cmd/Ctrl+A).
-- **Copy / export selection as CSV** — today Cmd/Ctrl+C emits TSV
-  (correct for paste into Excel/Numbers/Sheets). Add an explicit
-  "Copy as CSV" (comma-delimited, same RFC 4180 quoting) and an
-  "Export selection to CSV…" that writes the selected rectangle (or
-  the whole filtered view) to a file via `rfd`'s save dialog. The TSV
-  formatter in `Selection::copy_text_with` should be generalised over
-  a delimiter rather than copied.
-- **Export filtered / sorted rows** — write the current view to a
-  new CSV/TSV/JSON.
+  the way spreadsheets do.
+- **Export selection / view to a file** — write the current selection
+  (or the whole filtered / sorted view) to a new CSV/TSV/JSON/Markdown
+  file via `rfd`'s save dialog, reusing the `CopyFormat` formatter
+  from the configurable-copy idea above rather than duplicating it.
 - **Saved filters / sorts / layouts** — named views the user can
   re-apply.
 - **SQL-like queries** — a small expression evaluator on top of the
