@@ -25,6 +25,9 @@ pub const BG_HEADER: Rgba = rgb(0x333337);
 pub const BG_ROW_ALT: Rgba = rgb(0x232326);
 pub const BG_ROW_HOVER: Rgba = rgb(0x2a2d2e);
 pub const BG_SELECTED: Rgba = rgb(0x094771);
+/// Brief green flash painted over the selection right after a copy, as
+/// positive confirmation that the clipboard write happened.
+pub const BG_COPIED: Rgba = rgb(0x2f8f4f);
 
 pub const BORDER: Rgba = rgb(0x3c3c3c);
 pub const BORDER_STRONG: Rgba = rgb(0x505050);

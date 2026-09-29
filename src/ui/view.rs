@@ -8,6 +8,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Context, ExternalPaths,
@@ -25,6 +26,10 @@ use super::theme;
 /// to a conservative estimate of the visible row count so the grid does
 /// not have to be measured every keypress.
 const PAGE_STEP: i64 = 20;
+
+/// How long the green "copied" flash stays over the selection before it
+/// fades back to the normal selection colour.
+const COPY_FLASH_DURATION: Duration = Duration::from_millis(450);
 
 /// Writes text to the system clipboard. Stored on `MainView` so UI
 /// tests can substitute a recorder and assert the exact TSV without
@@ -91,6 +96,16 @@ pub struct MainView {
 
     /// Clipboard sink. Defaults to `arboard`; tests inject a recorder.
     clipboard: ClipboardWriter,
+
+    /// Normalized rectangle of the most recent successful copy, painted
+    /// with `theme::BG_COPIED` until the flash timer clears it. `None`
+    /// when no flash is active.
+    copy_flash_rect: Option<(CellPos, CellPos)>,
+    /// Bumped on every copy. A flash timer only clears the rectangle if
+    /// its captured generation is still current, so copying again while
+    /// a flash is active restarts the flash instead of being cleared
+    /// early by the previous timer.
+    copy_flash_generation: u64,
 }
 
 impl MainView {
@@ -112,6 +127,8 @@ impl MainView {
             focus_handle: cx.focus_handle(),
             focus_grid_on_next_frame: false,
             clipboard: Arc::new(system_clipboard_write),
+            copy_flash_rect: None,
+            copy_flash_generation: 0,
         }
     }
 
@@ -153,6 +170,7 @@ impl MainView {
                 self.scroll_x = 0.0;
                 self.selection.clear();
                 self.status_message = None;
+                self.copy_flash_rect = None;
                 self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
@@ -162,12 +180,14 @@ impl MainView {
                 self.show_picker = true;
                 self.selection.clear();
                 self.status_message = None;
+                self.copy_flash_rect = None;
                 self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
             OpenOutcome::Error(message) => {
                 self.model = None;
                 self.selection.clear();
+                self.copy_flash_rect = None;
                 self.status_message = Some(format!("error: {message}"));
                 self.state = ViewState::Error(message);
             }
@@ -397,6 +417,7 @@ impl MainView {
                 let scroll_x = this.scroll_x;
                 let viewport_w = this.viewport_w;
                 let selection = this.selection.clone();
+                let copy_flash_rect = this.copy_flash_rect;
                 let entity = entity.clone();
                 range
                     .map(|i| {
@@ -413,6 +434,7 @@ impl MainView {
                             scroll_x,
                             viewport_w,
                             &selection,
+                            copy_flash_rect,
                             move |ev, row, col, app_cx| {
                                 let pos = CellPos::new(row, col);
                                 let extend = ev.modifiers.shift;
@@ -647,12 +669,37 @@ impl MainView {
         match (self.clipboard)(&text) {
             Ok(()) => {
                 self.status_message = Some(format!("copied {count} cell{}", plural(count)));
+                self.start_copy_flash(selection.normalize(), cx);
             }
             Err(err) => {
                 self.status_message = Some(format!("copy failed: {err}"));
             }
         }
         cx.notify();
+    }
+
+    /// Paint `rect` green and schedule its clearing after
+    /// `COPY_FLASH_DURATION`. A generation guard means a second copy
+    /// during a flash restarts the timer instead of the first timer
+    /// clearing the new flash early.
+    fn start_copy_flash(&mut self, rect: Option<(CellPos, CellPos)>, cx: &mut Context<Self>) {
+        let Some(rect) = rect else {
+            return;
+        };
+        self.copy_flash_rect = Some(rect);
+        self.copy_flash_generation = self.copy_flash_generation.wrapping_add(1);
+        let generation = self.copy_flash_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPY_FLASH_DURATION).await;
+            this.update(cx, |view, cx| {
+                if view.copy_flash_generation == generation {
+                    view.copy_flash_rect = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn move_selection(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
@@ -986,6 +1033,11 @@ mod tests {
 
         cx.update_window_entity(&view, |view, _, _| {
             assert_eq!(view.status_message.as_deref(), Some("copied 1 cell"));
+            // The green confirmation flash covers the copied cell.
+            assert_eq!(
+                view.copy_flash_rect,
+                Some((CellPos::new(0, 0), CellPos::new(0, 0)))
+            );
         });
 
         // The selection is the single cell (0, 0), whose value in the

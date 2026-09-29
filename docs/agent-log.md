@@ -673,3 +673,102 @@ now real, growing, and overdue for the refactor:
 2. Add `anvil_core::query::search(doc, needle, opts) -> Vec<u64>`.
 3. Add the search-bar overlay and background-task cancellation.
 4. Add a UI test for the search bar, using the harness now in place.
+
+---
+
+## 2026-10-03 — Copy confirmation flash (interim UX)
+
+### Context
+
+After the focus fix, Cmd/Ctrl+C worked, but the only feedback was the
+status-bar text "copied N cells". The user asked for a more immediate
+visual confirmation, e.g. the selected area blinking green. This is an
+interim UX feature; it does not change the data side.
+
+### Implemented
+
+- `theme::BG_COPIED = #2f8f4f`, a green used only for the flash.
+- `MainView.copy_flash_rect: Option<(CellPos, CellPos)>` — the
+  normalized rectangle of the most recent successful copy — plus
+  `copy_flash_generation: u64` for timer invalidation.
+- `MainView::start_copy_flash(rect, cx)` records the rectangle, bumps
+  the generation, and spawns a detached
+  `background_executor().timer(COPY_FLASH_DURATION)` task. The task
+  clears the rectangle and calls `cx.notify()` only if its captured
+  generation is still current, so copying again during a flash
+  restarts it instead of being cleared early by the previous timer.
+- `COPY_FLASH_DURATION = 450 ms`.
+- `grid::render_row` now takes `copy_flash: Option<(CellPos, CellPos)>`.
+  A cell inside the rectangle is painted `BG_COPIED` in preference to
+  `BG_SELECTED`; a full-width rectangle also tints the row gutter
+  (matching the existing full-row selection styling). The rectangle is
+  captured at copy time, so moving the selection during the flash does
+  not move the green feedback.
+- `apply` clears `copy_flash_rect` on every `OpenOutcome` so a stale
+  flash cannot survive a new document.
+- New private helper `grid::rect_contains` (inclusive rectangle test).
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 81 passed (25 lib + 4 binary + 52
+  integration), 0 failed, 1 ignored.
+- `cargo test --release --bin anvil` — 4 pass: the two UI regression
+  tests plus `rect_contains_respects_inclusive_bounds` and
+  `rect_contains_is_false_when_none`.
+- The copy UI test now also asserts `copy_flash_rect ==
+  Some(((0,0), (0,0)))` after Cmd/Ctrl+C.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil` — launches and runs 5 s without panic
+  (killed by timeout).
+
+### Tests added / changed
+
+- 2 new unit tests in `src/ui/grid.rs` for `rect_contains` (inclusive
+  bounds and `None`).
+- Extended `copy_shortcut_reaches_handler_when_grid_focused` in
+  `src/ui/view.rs` to assert the flash rectangle is set on copy.
+- No data-side tests changed.
+
+### Roadmap changes
+
+- Milestone 2 Clipboard: added and ticked “Visual copy confirmation”.
+
+### Architecture changes
+
+- `ARCHITECTURE.md` state table: added `copy_flash_rect` and
+  `copy_flash_generation`.
+- Clipboard copy section: updated the UI-wiring steps and added a
+  “Copy confirmation flash” subsection describing the timer, the
+  generation guard, and the `BG_COPIED` rendering.
+- Testing section: noted the flash assertion and the two
+  `rect_contains` unit tests; test group table gained a “Grid geometry”
+  row.
+
+### Issues / technical debt discovered
+
+- The flash is a fixed 450 ms highlight, not a true multi-pulse blink.
+  A single flash is calmer and was chosen deliberately; a pulsing
+  animation can be added later behind the same `copy_flash_rect` state
+  if desired.
+- `status_message` still does not auto-expire; the flash does. The two
+  feedback channels are now independent (message persists, flash
+  clears), which is slightly inconsistent. A future polish pass could
+  clear the message on the same timer or on the next selection change.
+- `render_row` now takes seven parameters. If it grows again, bundle
+  the render inputs into a small struct.
+
+### Open loops
+
+- Manual visual confirmation of the green flash in the running macOS
+  app was not performed (the state transition is unit-tested; the
+  actual paint is a one-line `bg(theme::BG_COPIED)` branch).
+- `view.rs` is now ~1000 lines. The `commands` extraction is still the
+  next recommended structural change.
+
+### Next recommended task
+
+Unchanged from the previous entry: extract the `commands` module, then
+land search (`Cmd/Ctrl+F`). The copy confirmation was a small interim
+feature and does not change the plan.

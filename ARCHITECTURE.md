@@ -196,6 +196,8 @@ The `MainView` owns:
 | `focus_handle: FocusHandle` | Keyboard focus target for the grid. The grid element carries `.track_focus(...)`; keyboard events are only delivered to `on_grid_key_down` while this handle is focused. |
 | `focus_grid_on_next_frame: bool` | Set when a document becomes ready. The next `render_grid` schedules a deferred `window.focus`, the safe point to move focus. |
 | `clipboard: ClipboardWriter` | `Arc<dyn Fn(&str) -> Result<(), String>>`; defaults to `arboard`, replaced by a recorder in UI tests. |
+| `copy_flash_rect: Option<(CellPos, CellPos)>` | Normalized rectangle of the most recent copy, painted green until the flash timer clears it. |
+| `copy_flash_generation: u64` | Bumped on every copy; a flash timer only clears the rectangle if its generation is still current, so re-copying restarts the flash. |
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
 Both are cheap to clone, so the uniform-list row renderer can capture
@@ -391,15 +393,35 @@ It:
 2. Clones the `Arc<ParsedDocument>` and `Selection` so the closure
    does not borrow `MainView` mutably.
 3. Formats the selection via `Selection::copy_text_with`.
-4. Calls `arboard::Clipboard::new()` then `set_text`. On error,
-   captures the message but does not panic.
+4. Calls the injected `ClipboardWriter` (default `arboard`) with the
+   text. On error, captures the message but does not panic.
 5. Stores either `copied N cells` or `copy failed: ...` in
    `MainView.status_message`, which `render_status` paints in
    `theme::ACCENT` (or `gpui::red()` for failures) ahead of the
    generic state line.
-6. `status_message` is cleared on every successful `OpenOutcome`
-   (Ready, NeedArchiveChoice, Error). It is not auto-expired; the
-   next user action that changes state will reset it.
+6. On success, calls `start_copy_flash`: it records the normalized
+   selection rectangle in `copy_flash_rect`, bumps
+   `copy_flash_generation`, and spawns a detached
+   `background_executor().timer(COPY_FLASH_DURATION)` task that clears
+   the rectangle (and calls `cx.notify`) if its generation is still
+   current. Copying again during a flash bumps the generation, so the
+   new flash is not cleared early by the previous timer.
+7. `status_message` is cleared on every `OpenOutcome`, and
+   `copy_flash_rect` is cleared there too. Neither is auto-expired
+   beyond the flash timer; the next user action that changes state
+   resets the message.
+
+### Copy confirmation flash
+
+As immediate positive feedback, the copied cells flash green
+(`theme::BG_COPIED = #2f8f4f`) for `COPY_FLASH_DURATION` (450 ms)
+before returning to the normal selection colour. `grid::render_row`
+takes `copy_flash: Option<(CellPos, CellPos)>`; a cell inside the
+rectangle is painted `BG_COPIED` in preference to `BG_SELECTED`, and
+a full-width rectangle also tints the row gutter. The flash rectangle
+is captured at copy time, so moving the selection during the 450 ms
+does not move the green feedback; it still marks what was copied.
+This is a UI-layer concern only — `anvil_core` is unchanged.
 
 ### Keyboard binding
 
@@ -1031,13 +1053,16 @@ regression tests:
 document, lets `render_grid` schedule the production deferred focus,
 and asserts arrow keys move the cursor.
 * `copy_shortcut_reaches_handler_when_grid_focused` — same setup, then
-dispatches Cmd/Ctrl+C and asserts the status message and the exact TSV
-written to an injected clipboard recorder (the real clipboard is
-never touched).
+dispatches Cmd/Ctrl+C and asserts the status message, the green flash
+rectangle, and the exact TSV written to an injected clipboard recorder
+(the real clipboard is never touched).
 
 Both were confirmed to fail when `.track_focus(&self.focus_handle)` is
 removed from the grid, so they genuinely guard the focus-routing
 invariant described under Keyboard handling.
+
+`src/ui/grid.rs` has two unit tests for `rect_contains`, the inclusive
+rectangle test used for the copy flash (inside / edge / outside / `None`).
 
 | Group                  | Tests                                                                 |
 |------------------------|-----------------------------------------------------------------------|
@@ -1049,7 +1074,8 @@ invariant described under Keyboard handling.
 | Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
-| UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler and writes the expected TSV (via an injected recorder) |
+| UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
+| Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
 In addition, `src/selection.rs` carries 25 unit tests for the

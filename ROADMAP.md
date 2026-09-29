@@ -148,6 +148,8 @@ this may freeze the UI.
 - [x] Copy row range.
 - [x] Copy column range.
 - [x] TSV formatting for pasted-into-spreadsheet destinations.
+- [x] Visual copy confirmation: the copied cells flash green for
+  ~450 ms (`theme::BG_COPIED`) in addition to the status-bar message.
 
 #### Search
 

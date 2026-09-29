@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use gpui::{div, prelude::*, px, rgb, IntoElement, MouseDownEvent, Pixels};
 
-use anvil_core::{ColumnIndex, ParsedDocument, Selection};
+use anvil_core::{CellPos, ColumnIndex, ParsedDocument, Selection};
 
 use super::theme;
 
@@ -109,6 +109,20 @@ const AVG_CHAR_WIDTH: f32 = 7.0;
 const MAX_AUTO_WIDTH: f32 = 360.0;
 const SAMPLE_ROWS: u64 = 200;
 
+/// Is `(record, column)` inside the inclusive `(top-left, bottom-right)`
+/// rectangle? `None` is never inside.
+fn rect_contains(rect: Option<(CellPos, CellPos)>, record: u64, column: usize) -> bool {
+    match rect {
+        Some((tl, br)) => {
+            record >= tl.record_index
+                && record <= br.record_index
+                && column >= tl.column_index
+                && column <= br.column_index
+        }
+        None => false,
+    }
+}
+
 /// A read-only view over one document that the grid renders.
 #[derive(Clone)]
 pub struct GridModel {
@@ -189,6 +203,10 @@ pub fn render_header(model: &GridModel, scroll_x: f32, viewport_w: f32) -> impl 
 ///
 /// `selection` is consulted to choose the per-cell background: cells
 /// inside the selection rectangle are filled with `theme::BG_SELECTED`.
+/// `copy_flash` is the rectangle of the most recent copy; while set,
+/// those cells are filled with `theme::BG_COPIED` instead, which is the
+/// short green "copied" confirmation.
+///
 /// `mouse_down` is wired on every visible cell so that clicking a cell
 /// invokes the handler with the row, column, the event (so the shift
 /// modifier can be inspected), and a `&mut App` (so the handler can
@@ -199,6 +217,7 @@ pub fn render_row<F>(
     scroll_x: f32,
     viewport_w: f32,
     selection: &Selection,
+    copy_flash: Option<(CellPos, CellPos)>,
     mouse_down: F,
 ) -> impl IntoElement
 where
@@ -214,13 +233,16 @@ where
             .map(|c| c.into_string())
             .unwrap_or_default();
         let is_selected = selection.contains(index, col);
+        let is_flashed = rect_contains(copy_flash, index, col);
         let handler = mouse_down.clone();
         let mut cell_div = div()
             .flex_shrink_0()
             .w(model.layout.width_of(col))
             .px(theme::CELL_PAD_X)
             .truncate();
-        if is_selected {
+        if is_flashed {
+            cell_div = cell_div.bg(theme::BG_COPIED);
+        } else if is_selected {
             cell_div = cell_div.bg(theme::BG_SELECTED);
         }
         if text.is_empty() {
@@ -249,7 +271,17 @@ where
             tl.column_index == 0 && br.column_index >= model.layout.widths.len().saturating_sub(1)
         })
         .unwrap_or(false);
-    let bg = if row_selected {
+    let row_flashed = copy_flash
+        .map(|(tl, br)| {
+            index >= tl.record_index
+                && index <= br.record_index
+                && tl.column_index == 0
+                && br.column_index >= model.layout.widths.len().saturating_sub(1)
+        })
+        .unwrap_or(false);
+    let bg = if row_flashed {
+        theme::BG_COPIED
+    } else if row_selected {
         theme::BG_SELECTED
     } else if index % 2 == 1 {
         theme::BG_ROW_ALT
@@ -284,4 +316,26 @@ where
                     .children(cells),
             ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_contains_respects_inclusive_bounds() {
+        let rect = Some((CellPos::new(1, 1), CellPos::new(3, 4)));
+        assert!(rect_contains(rect, 1, 1));
+        assert!(rect_contains(rect, 3, 4));
+        assert!(rect_contains(rect, 2, 3));
+        assert!(!rect_contains(rect, 0, 1));
+        assert!(!rect_contains(rect, 1, 0));
+        assert!(!rect_contains(rect, 4, 1));
+        assert!(!rect_contains(rect, 1, 5));
+    }
+
+    #[test]
+    fn rect_contains_is_false_when_none() {
+        assert!(!rect_contains(None, 0, 0));
+    }
 }
