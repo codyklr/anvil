@@ -137,8 +137,10 @@ this may freeze the UI.
 - [x] Page Up / Page Down step the selection by `PAGE_STEP` rows.
 - [x] Home / End jump the column cursor to the first / last column.
 - [ ] Cmd/Ctrl+Home/End jump to first / last row.
-- [ ] Wire a dedicated `commands` module (currently handled inline in
-  `view.rs::on_grid_key_down`).
+- [x] Wire a dedicated `commands` module for keystroke-to-action
+  mapping (`ui/commands.rs`); `view.rs::on_grid_key_down` delegates
+  execution to `MainView::run_action`. GPUI-native `actions!` /
+  `cx.bind_keys` rebinding remains a possible later enhancement.
 - [ ] Tab / Shift-Tab navigation between cells.
 - [ ] Cmd/Ctrl+G — go-to-row input box.
 - [x] Esc — clear selection / close overlays.

@@ -19,13 +19,9 @@ use gpui::{
 use anvil_core::{ArchiveSource, CellPos, LoadResult, LoadedDocument, Selection};
 
 use super::archive_picker;
+use super::commands::{self, Action};
 use super::grid::{self, GridModel};
 use super::theme;
-
-/// How many rows a Page Up / Page Down jump moves the cursor by. Tied
-/// to a conservative estimate of the visible row count so the grid does
-/// not have to be measured every keypress.
-const PAGE_STEP: i64 = 20;
 
 /// How long the green "copied" flash stays over the selection before it
 /// fades back to the normal selection colour.
@@ -710,44 +706,30 @@ impl MainView {
         if self.model.is_none() {
             return;
         }
-        let key = event.keystroke.key.as_str();
-        let modifiers = event.keystroke.modifiers;
-        let shift = modifiers.shift;
-
-        // Cmd/Ctrl+C: copy the selection to the clipboard. The
-        // "secondary" modifier is Cmd on macOS and Ctrl elsewhere.
-        if key == "c" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
-            self.copy_selection_to_clipboard(cx);
-            return;
+        if let Some(action) = commands::action_for(&event.keystroke) {
+            self.run_action(action, cx);
         }
+    }
 
-        // Movement deltas in (row, col). `None` means the key is not a
-        // movement key; we then check for "clear selection" / "select
-        // all".
-        let movement: Option<(i64, i64)> = match key {
-            "up" => Some((-1, 0)),
-            "down" => Some((1, 0)),
-            "left" => Some((0, -1)),
-            "right" => Some((0, 1)),
-            "pageup" => Some((-PAGE_STEP, 0)),
-            "pagedown" => Some((PAGE_STEP, 0)),
-            "home" => Some((0, i64::MIN)),
-            "end" => Some((0, i64::MAX)),
-            _ => None,
-        };
-
-        if let Some((dr, dc)) = movement {
-            self.move_selection(dr, dc, shift, cx);
-            return;
-        }
-
-        if key == "escape" {
-            if !self.selection.is_empty() {
-                self.selection.clear();
-                cx.notify();
-            } else if self.show_picker {
-                self.show_picker = false;
-                cx.notify();
+    /// Execute a keyboard [`Action`] decoded by `super::commands`. The
+    /// binding table lives in `commands`; this is where it meets view
+    /// state. New shortcuts add an `Action` variant and an arm here.
+    fn run_action(&mut self, action: Action, cx: &mut Context<Self>) {
+        match action {
+            Action::MoveCursor {
+                row_delta,
+                column_delta,
+                extend,
+            } => self.move_selection(row_delta, column_delta, extend, cx),
+            Action::Copy => self.copy_selection_to_clipboard(cx),
+            Action::Escape => {
+                if !self.selection.is_empty() {
+                    self.selection.clear();
+                    cx.notify();
+                } else if self.show_picker {
+                    self.show_picker = false;
+                    cx.notify();
+                }
             }
         }
     }

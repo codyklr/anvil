@@ -103,8 +103,9 @@ anvil/
 │   ├── ui/
 │   │   ├── mod.rs              # ui re-exports + describe_delimiter
 │   │   ├── app.rs              # GPUI Application + window creation
+│   │   ├── commands.rs         # pure keystroke -> logical Action mapping
 │   │   ├── view.rs             # MainView: toolbar, grid, status, picker,
-│   │   │                       # drag/drop, open orchestration
+│   │   │                       # drag/drop, open orchestration + actions
 │   │   ├── grid.rs             # virtualized layout, header + row renderers
 │   │   ├── archive_picker.rs   # archive entry presentation helpers
 │   │   └── theme.rs            # palette + sizing constants
@@ -117,7 +118,7 @@ anvil/
 
 ### What is *current* vs *planned*
 
-**Current (Milestone 1 + selection + clipboard slices of Milestone 2, in `src/`):**
+**Current (Milestone 1 + selection, clipboard, drag, and commands slices of Milestone 2, in `src/`):**
 
 - `parser::indexing` — build record byte-offset index, collect
   `ParseWarning`s, report `record_count` and `column_count`.
@@ -135,10 +136,13 @@ anvil/
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
   for horizontal virtualization. Per-cell `on_mouse_down` for
   selection.
+- `ui::commands` — pure `Keystroke` → `Action` binding table
+  (`MoveCursor`, `Copy`, `Escape`), with unit tests; no window or view
+  state dependencies.
 - `ui::view` — toolbar, drag/drop, archive picker overlay, status bar
   (with copy / error message slot), generation counter for
-  cancellation, inline keyboard handler for selection movement and
-  Cmd/Ctrl+C copy.
+  cancellation, and `MainView::run_action` which executes intents
+  decoded by `ui::commands`.
 
 **Planned (Milestone 2+ — these modules do not exist yet):**
 
@@ -149,10 +153,12 @@ anvil/
   statistics for the column inspector.
 - `diagnostics` — richer diagnostics surfaced in a panel and as
   navigation targets (jump to bad row).
-- `commands` — a unified keybinding module (search, filter,
-  clipboard, sort). Today keybindings live inline in
-  `view.rs::on_grid_key_down`; a small refactor will lift them out
-  once the surface grows.
+- GPUI-native typed keybindings (`actions!`, `cx.bind_keys`) — the
+  current `ui::commands` module centralizes key-to-intent mapping but
+  still receives raw `Keystroke`s from `on_key_down`. GPUI typed
+  actions could later add user-rebindable shortcuts, menu integration,
+  and generated shortcut help. Shift-navigation needs distinct
+  actions or a modifier-aware binding strategy.
 - `tasks` — a uniform background-task wrapper if the existing
   per-feature `cx.spawn` pattern stops scaling.
 - `docs/adr/` — ADRs for non-trivial decisions, numbered
@@ -225,30 +231,35 @@ the model without aliasing `MainView` mutably.
 
 ### Actions / commands
 
-There is **no** GPUI `Action` layer yet (no `actions!` macro, no
-`cx.bind_keys`). The toolbar `Open…` button and the file picker
-(`rfd`) are the only explicit actions wired through GPUI's typed
-actions system.
+There is **no GPUI typed `Action` layer** yet (no `actions!` macro or
+`cx.bind_keys`). The toolbar `Open…` button and file picker (`rfd`)
+remain the only actions wired through GPUI's typed-action system.
 
-Keyboard navigation today is handled inline by
-`MainView::on_grid_key_down`, which inspects the `KeyDownEvent`'s
-keystroke and routes to `Selection::move_cursor`, `Selection::set`,
-`Selection::clear`, or `MainView::copy_selection_to_clipboard`.
-This is enough for the arrows / Home / End / Page Up / Page Down /
-Esc family plus Cmd/Ctrl+C. A dedicated `commands` module will be
-extracted once the keyboard surface grows (search, filter,
-go-to-row, etc.).
+Keyboard bindings are now centralized in `src/ui/commands.rs`:
+
+- `commands::action_for(&Keystroke) -> Option<Action>` is a pure
+  keystroke-to-intent mapping. It handles arrow / Page / Home / End
+  movement (including Shift extension), Cmd/Ctrl+C, and Esc.
+- `Action` is a small UI-layer enum (`MoveCursor`, `Copy`, `Escape`),
+  not a GPUI `Action` type. `PAGE_STEP` lives alongside the binding
+  table. The module has unit tests that need no window.
+- `MainView::on_grid_key_down` delegates to `action_for`; its
+  `run_action` method executes the intent against view state (selection,
+  clipboard, overlay). This keeps `commands` independent of `MainView`
+  internals while removing the raw key-string match from `view.rs`.
+
+This is the deliberately small extraction that makes new bindings
+(search, filter, go-to-row, select-all) easy to add and test. It does
+not yet provide user-rebindable shortcuts, menu integration, or a
+shortcut cheatsheet. A later GPUI-native layer (`actions!` +
+`cx.bind_keys`) can consume the same intents; Shift-navigation will
+need distinct typed actions or a modifier-aware binding strategy.
 
 Click handlers are wired via `cx.listener(|view, _, _, cx| ...)` for
 toolbar / overlay clicks. Per-cell clicks are wired through
 `Div::on_mouse_down(MouseButton::Left, ...)` and route into the view
 via the captured `Entity<MainView>` handle, calling
 `entity.update(&mut app, |view, cx| ...)`.
-
-This is one of the bigger remaining gaps before Milestone 2 lands
-fully: search, filter, go-to-row, and a `cx.bind_keys` /
-`Action`-typed binding path will benefit from a unified commands
-module.
 
 ### Drag / drop
 
@@ -283,17 +294,19 @@ Recognised keys:
 | Key            | Action                                                       |
 |----------------|--------------------------------------------------------------|
 | Arrow keys     | Move the selection by one cell.                              |
-| Page Up/Down   | Move the selection by `PAGE_STEP` rows.                       |
+| Page Up/Down   | Move the selection by `commands::PAGE_STEP` rows.              |
 | Home / End     | Jump the column cursor to the first / last column.           |
 | Esc            | Clear the selection; if already empty, close the archive picker overlay. |
 | Cmd/Ctrl+C     | Copy the current selection to the clipboard as TSV; status bar reports "copied N cells" or "copy failed: ...". |
 
-Shift held during arrow / Page / Home / End extends the selection
-instead of replacing it. `Cmd/Ctrl+C` matches `keystroke.modifiers.secondary()`
-(Cmd on macOS, Ctrl on Linux/Windows) with no Alt/Fn; this avoids
-eating variant chords like `Alt+C`. The `key_context` scopes future
-`Action`-based bindings; `cx.bind_keys` will be added when the
-keyboard surface grows (search / filter / go-to-row).
+`commands::action_for` maps each `Keystroke` to a logical
+`commands::Action`; `MainView::run_action` executes it. Shift held
+during arrow / Page / Home / End becomes `MoveCursor { extend: true }`.
+Cmd/Ctrl+C matches `keystroke.modifiers.secondary()` (Cmd on macOS,
+Ctrl on Linux/Windows) with no Alt/Fn; this avoids eating variant
+chords like `Alt+C`. The existing `key_context("Grid")` remains ready
+for a future GPUI `actions!` / `cx.bind_keys` layer if we add
+user-rebindable shortcuts or menu integration.
 
 ## Selection model
 
@@ -1103,8 +1116,11 @@ wiring is removed, and the auto-scroll test when the global-listener
 `auto_scroll_step` call is removed — so they genuinely guard each
 behaviour.
 
-`src/ui/grid.rs` has two unit tests for `rect_contains`, the inclusive
-rectangle test used for the copy flash (inside / edge / outside / `None`).
+`src/ui/commands.rs` has nine pure unit tests for keystroke mapping
+(copy chord per platform, plain/Alt+C, arrow/Shift-arrow, Page keys,
+Home/End, Esc, and unbound keys). `src/ui/grid.rs` has two unit tests
+for `rect_contains`, the inclusive rectangle test used for the copy
+flash (inside / edge / outside / `None`).
 
 | Group                  | Tests                                                                 |
 |------------------------|-----------------------------------------------------------------------|
@@ -1116,6 +1132,7 @@ rectangle test used for the copy flash (inside / edge / outside / `None`).
 | Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
+| Commands (binary)     | `commands::action_for` maps chords to `Action` intents (9 unit tests) |
 | UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
 | UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |

@@ -3,12 +3,14 @@
 //! Modules:
 //!  - `app`: top-level GPUI application + window lifecycle
 //!  - `view`: the main inspection view (toolbar, grid, status bar)
+//!  - `commands`: keyboard chord -> action binding table
 //!  - `grid`: virtualized table renderer
 //!  - `archive_picker`: in-archive file selector helpers
 //!  - `theme`: small collection of colours / metrics
 
 pub mod app;
 pub mod archive_picker;
+mod commands;
 pub mod grid;
 pub mod theme;
 pub mod view;

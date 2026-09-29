@@ -1000,3 +1000,101 @@ table row expanded.
 
 Extract the `commands` module, then land search (`Cmd/Ctrl+F`). The
 selection model and drag interaction are now complete for Milestone 2.
+
+---
+
+## 2026-10-06 — Extract keyboard commands module
+
+### Context
+
+The previous handoff recommended extracting keyboard routing before
+adding search or filter. `MainView::on_grid_key_down` contained the
+raw key-string match for movement, Cmd/Ctrl+C, and Esc. This iteration
+lifts the key-to-intent mapping into `src/ui/commands.rs` without
+changing visible behavior.
+
+### Implemented
+
+- New `src/ui/commands.rs` defines a small UI-layer `Action` enum:
+  `MoveCursor { row_delta, column_delta, extend }`, `Copy`, and
+  `Escape`.
+- Pure `commands::action_for(&Keystroke) -> Option<Action>` is now the
+  single binding table. `PAGE_STEP` moved into this module.
+- `MainView::on_grid_key_down` now delegates to `action_for`; the new
+  `MainView::run_action` executes the intent against selection,
+  clipboard, and overlay state. Existing focus guard and behavior are
+  preserved.
+- **Design choice:** this is the lightweight extraction, not GPUI's
+  `actions!` / `cx.bind_keys` typed-action layer. The pure mapping
+  preserves modifier-aware Shift extension without introducing
+  separate GPUI actions for every shifted movement chord. Typed,
+  user-rebindable shortcuts and menu generation remain a later option.
+- Nine command-mapping unit tests cover the platform-specific
+  Cmd/Ctrl copy chord, plain and Alt+C, arrows and Shift+arrow, Page
+  Up/Down, Home/End, Esc, and unbound keys.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 93 passed (25 lib + 16 binary + 52
+  integration), 0 failed, 1 ignored.
+- All seven pre-existing binary tests still pass (four UI tests for
+  focus/navigation, copy, drag-select, and drag auto-scroll; plus three
+  geometry/direction helper tests).
+- Nine new `commands` unit tests pass without a window.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- Existing keyboard UI tests continue to exercise the dispatch path,
+  so the extraction is verified end-to-end, not only at the pure
+  mapping layer.
+
+### Tests added / changed
+
+- Nine unit tests in `src/ui/commands.rs`.
+- Existing UI tests unchanged and passing.
+
+### Roadmap changes
+
+- Milestone 2 Keyboard navigation: "Wire a dedicated `commands`
+  module" ticked. The checkbox note distinguishes the current pure
+  binding module from a future GPUI typed-action layer.
+
+### Architecture changes
+
+- `ARCHITECTURE.md` repository tree now includes `ui/commands.rs`.
+- "What is current vs planned" marks `ui::commands` current and
+  removes it from the planned modules list.
+- Actions / commands section documents `action_for`, `Action`,
+  `run_action`, and the remaining GPUI typed-action option.
+- Keyboard handling section updated to reference the command mapping
+  and `commands::PAGE_STEP`.
+- Testing section records the nine command tests and test-table row.
+
+### Issues / technical debt discovered
+
+- `commands::Action` is intentionally a local intent enum, not a GPUI
+  `Action`; there is still no `actions!` / `cx.bind_keys` layer. This
+  means the shortcuts are not user-rebindable and cannot yet generate
+  menu items or a shortcut cheatsheet.
+- `Escape` remains attached to the grid's key context and guarded by
+  `model.is_some()`. The archive picker has no grid rendered while it
+  is open, so Escape-to-close-picker is not actually reachable through
+  this handler; fixing overlay-level key routing is separate work.
+- `view.rs` still executes the action handlers; future actions should
+  continue to be small dispatch arms, with parsing/binding centralized
+  in `commands.rs`.
+
+### Open loops
+
+- GPUI typed actions / user-rebindable bindings if shortcut
+  customization or generated menus become a requirement.
+- Search, filter, go-to-row, select-all, and configurable copy-format
+  bindings are still unimplemented.
+
+### Next recommended task
+
+Proceed with `query::search` and `Cmd/Ctrl+F`, using
+`commands::Action` as the dispatch entry. Add the search UI, background
+scan with generation-based obsolescence, F3/Shift-F3 navigation, and
+visible-match highlighting. The action mapping and test infrastructure
+are now ready for the feature.
