@@ -156,6 +156,31 @@ this may freeze the UI.
 - [x] Visual copy confirmation: the copied cells flash green for
   ~450 ms (`theme::BG_COPIED`) in addition to the status-bar message.
 
+#### Multi-document tabs
+
+- [x] `DocumentSnapshot` per-document state (document, selection,
+  scroll, search, copy flash) plus `documents: Vec<DocumentSnapshot>`
+  and `active: Option<usize>` on `MainView`. Live per-document
+  fields mirror the active snapshot so render/test code keeps one
+  set of names.
+- [x] Horizontal tab strip above the grid; click to switch, × to
+  close, zero-height when no documents are open.
+- [x] Multi-file drop: every dropped path becomes its own tab.
+- [x] `switch_to` / `close_active_at` with correct active-index
+  adjustment for closing active / earlier / last tabs.
+- [x] Opening a new file no longer replaces the existing document;
+  it adds a tab.
+- [x] Archive picker: picking one entry adds a tab; a new
+  "Open all N files as tabs" button (`choose_all_entries`) loads
+  every usable entry sequentially in the background, adding tabs
+  as each completes and aborting if `generation` has moved on.
+- [x] Errors from background open tasks surface in the status bar
+  and do not tear down the current tab.
+- [ ] Dockable side panel / tree view (a flat tab strip landed here;
+  a future slice can reuse `DocumentSnapshot`).
+- [ ] Tab reordering and a tooltip for truncated labels.
+- [ ] Remember recently-closed tabs.
+
 #### Search
 
 - [x] Cmd/Ctrl+F opens search bar.
@@ -200,6 +225,11 @@ this may freeze the UI.
   / Shift+Enter cycle matches; Esc closes; F3 / Shift-F3 cycle matches
   without opening the bar; opening a new document clears the search
   state).
+- [x] UI regression tests for multi-document tabs (`apply(Ready)`
+  creates a tab; two sequential opens create two tabs; errors with
+  an open tab keep it; tab switch restores per-document selection /
+  scroll; closing the active / earlier / last tab adjusts `active`;
+  `choose_all_entries` adds one tab per ZIP entry).
 
 ### Dependencies
 
@@ -435,9 +465,10 @@ whether to elevate one.
 - **Additional archive formats** — `gz`, `tar.gz`, `7z`, `tar.zst`,
   `parquet` (parquet would require a new source path that bypasses
   the parser).
-- **Multiple datasets / tabs** — keep several documents open at once
-  and switch with a tab bar. Requires revisiting `MainView`'s
-  ownership model.
+- **Dockable side panel / document tree** — the multi-document model
+  landed as a flat tab strip (see Milestone 2). A future dockable
+  side panel or nested tree view can reuse `DocumentSnapshot`
+  unchanged; only the presentation differs.
 - **Dataset comparison** — diff two files by `(record_index, column)`
   with a side-by-side view.
 - **Configurable copy format** — give Cmd/Ctrl+C a chosen output

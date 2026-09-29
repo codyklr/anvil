@@ -151,12 +151,15 @@ anvil/
 - `ui::commands` — pure `Keystroke` → `Action` binding table
   (`MoveCursor`, `Copy`, `Escape`, `OpenSearch`, `NextMatch`), with
   unit tests; no window or view state dependencies.
-- `ui::view` — toolbar, drag/drop, archive picker overlay, search
-  bar overlay, status bar (with copy / error / match-count slot),
-  generation counter for cancellation, `MainView::run_action` which
-  executes intents decoded by `ui::commands`, and
-  `MainView::on_search_key_down` which handles typed characters,
-  Backspace, Enter, Shift+Enter, and Esc while the bar is open.
+- `ui::view` — toolbar, tab strip, drag/drop, archive picker
+  overlay, search bar overlay, status bar (with copy / error /
+  match-count slot), generation counter for cancellation,
+  `MainView::run_action` which executes intents decoded by
+  `ui::commands`, and `MainView::on_search_key_down` which handles
+  typed characters, Backspace, Enter, Shift+Enter, and Esc while
+  the bar is open. `MainView` owns the multi-document tab list
+  (`documents: Vec<DocumentSnapshot>` + `active: Option<usize>`);
+  see "Multi-document / tabs" below.
 
 **Planned (Milestone 2+ — these modules do not exist yet):**
 
@@ -196,20 +199,26 @@ There is exactly one window today. Closing it exits the application
 
 ### Primary state / model ownership
 
-The `MainView` owns:
+The `MainView` owns a **multi-document tab list** plus the live
+per-document fields for whichever tab is active. The tab list is the
+source of truth for "which documents are open"; the live fields are a
+mirror of the active snapshot so render and test code can keep
+reading a single set of names.
 
 | Field              | Purpose                                               |
 |--------------------|-------------------------------------------------------|
+| `documents: Vec<DocumentSnapshot>` | Every open document, in tab order. |
+| `active: Option<usize>` | Index into `documents` of the active tab, or `None`. |
 | `generation: u64`  | Bumped on every open; obsolete results are dropped.   |
-| `model: Option<GridModel>` | The currently rendered document.              |
-| `state: ViewState` | `Empty`, `Loading`, `Ready`, or `Error`.              |
-| `archive: Option<Arc<ArchiveSource>>` | Set after a ZIP load, for the picker. |
-| `selected_entry: Option<String>`     | Currently selected archive entry.      |
-| `show_picker: bool` | Whether the archive-entry overlay is shown.          |
-| `scroll_x: f32`, `viewport_w: f32` | Horizontal scroll bookkeeping.         |
-| `v_scroll: UniformListScrollHandle` | Vertical scroll handle for the grid.   |
+| `state: ViewState` | `Empty`, `Loading`, `Ready`, or `Error`; only shown when no tab is active. |
+| `archive: Option<Arc<ArchiveSource>>` | Active tab's ZIP source, for the picker. (Mirror.) |
+| `selected_entry: Option<String>`     | Active tab's archive entry. (Mirror.) |
+| `show_picker: bool` | Whether the archive-entry overlay is shown. |
+| `model: Option<GridModel>` | Active tab's rendered document. (Mirror.) |
+| `scroll_x: f32`, `viewport_w: f32` | Horizontal scroll bookkeeping. (Mirror / per-frame.) |
+| `v_scroll: UniformListScrollHandle` | Vertical scroll handle for the active tab. (Mirror.) |
 | `h_drag: Option<(f32, f32)>`        | Horizontal scrollbar drag state.        |
-| `selection: Selection` | Current cell / range selection (see below).     |
+| `selection: Selection` | Active tab's cell / range selection. (Mirror.) |
 | `drag_selecting: bool` | Armed on a grid cell mouse-down, disarmed on mouse-up. Drag-select only extends the selection while set. |
 | `list_bounds: Option<Bounds<Pixels>>` | Window-space bounds of the scrollable grid, recorded by the overlay canvas each frame; used to detect a drag past the vertical edges. |
 | `pointer_pos: Option<Point<Pixels>>` | Last pointer position (window coords), updated by the overlay canvas's global mouse-move listener. |
@@ -217,18 +226,28 @@ The `MainView` owns:
 | `task: Option<Task<()>>`            | Outstanding background task handle.     |
 | `status_message: Option<String>`    | Transient status-bar message (e.g. "copied N cells"). Cleared on every `OpenOutcome`. |
 | `focus_handle: FocusHandle` | Keyboard focus target for the grid. The grid element carries `.track_focus(...)`; keyboard events are only delivered to `on_grid_key_down` while this handle is focused. |
-| `focus_grid_on_next_frame: bool` | Set when a document becomes ready. The next `render_grid` schedules a deferred `window.focus`, the safe point to move focus. |
+| `focus_grid_on_next_frame: bool` | Set when a document becomes ready or a tab is switched. The next `render_grid` schedules a deferred `window.focus`. |
 | `clipboard: ClipboardWriter` | `Arc<dyn Fn(&str) -> Result<(), String>>`; defaults to `arboard`, replaced by a recorder in UI tests. |
-| `copy_flash_rect: Option<(CellPos, CellPos)>` | Normalized rectangle of the most recent copy, painted green until the flash timer clears it. |
-| `copy_flash_generation: u64` | Bumped on every copy; a flash timer only clears the rectangle if its generation is still current, so re-copying restarts the flash. |
-| `search_open: bool` | Whether the search bar overlay is visible. |
-| `search_query: String` | Current needle typed into the search bar. |
-| `search_matches: Vec<u64>` | Record indexes that match the latest query; reset to empty on every keystroke while a new search is in flight. |
-| `search_active: i64` | Index into `search_matches` of the active match (`-1` when there are none). |
-| `search_generation: u64` | Bumped on every keystroke; a background task only applies its result if the view's generation still matches, so obsolete searches are discarded. |
+| `copy_flash_rect: Option<(CellPos, CellPos)>` | Active tab's normalized copy rectangle, painted green until the flash timer clears it. (Mirror.) |
+| `copy_flash_generation: u64` | Bumped on every copy. (Mirror.) |
+| `search_open: bool` | Whether the search bar overlay is visible. (Mirror.) |
+| `search_query: String` | Current needle typed into the search bar. (Mirror.) |
+| `search_matches: Vec<u64>` | Record indexes that match the latest query. (Mirror.) |
+| `search_active: i64` | Index into `search_matches` of the active match (`-1` when there are none). (Mirror.) |
+| `search_generation: u64` | Bumped on every keystroke; a background task only applies its result if the view's generation still matches. (Mirror.) |
 | `search_task: Option<Task<()>>` | Outstanding background search task. |
-| `search_focus_handle: FocusHandle` | Keyboard focus target for the search bar overlay; independent of the grid handle so the bar can swallow keystrokes. |
+| `search_focus_handle: FocusHandle` | Keyboard focus target for the search bar overlay; independent of the grid handle. |
 | `focus_search_on_next_frame: bool` | Set when the search bar opens; the next `Render::render` schedules a deferred `window.focus` for the bar. |
+
+`DocumentSnapshot` owns the per-document state that survives a tab
+switch: the parsed `Arc<ParsedDocument>`, the archive / entry pair
+for ZIP-backed tabs, the selection, the horizontal scroll offset, the
+vertical scroll handle, the search state, and the copy-flash state.
+`MainView::snapshot_active` copies the live fields into
+`documents[active]`; `MainView::load_active` copies the other way.
+`switch_to`, `close_active_at`, and `apply` are the only callers that
+change `active`, so the mirror is always consistent at the point
+render observes it.
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
 Both are cheap to clone, so the uniform-list row renderer can capture
@@ -286,9 +305,72 @@ via the captured `Entity<MainView>` handle, calling
 ### Drag / drop
 
 `MainView::on_file_drop` is wired via `div().on_drop(...)`. GPUI
-delivers an `ExternalPaths` whose `.paths()` we treat as a single
-input — only the first path is opened. If multiple paths are dropped
-the others are silently ignored.
+delivers an `ExternalPaths`; every dropped path is opened and each
+becomes its own tab. Dropping a directory or duplicate path is not
+yet special-cased — the open task fails and the status bar shows the
+error.
+
+### Multi-document / tabs
+
+Anvil keeps every successfully opened file (and every chosen ZIP
+entry) as a separate document. The tab strip renders above the grid
+and below the toolbar; it is zero-height when no documents are open.
+The state model is:
+
+- `documents: Vec<DocumentSnapshot>` — one entry per tab, in tab
+  order. The `DocumentSnapshot` owns the parsed document, the
+  optional archive / entry pair for ZIP-backed tabs, and all the
+  per-document UI state (selection, scroll, search, copy flash).
+- `active: Option<usize>` — the active tab index, or `None`.
+- The live per-document fields on `MainView` (`model`, `selection`,
+  `scroll_x`, `search_*`, `copy_flash_*`, `v_scroll`, `archive`,
+  `selected_entry`) mirror `documents[active]`.
+
+Two helpers keep the mirror consistent:
+
+- `snapshot_active` copies the live fields into `documents[active]`.
+  It is called before any change of `active` (`apply`, `switch_to`,
+  `close_active_at`) and before `close_search` so the snapshot sees
+  the user's latest actions.
+- `load_active` copies `documents[active]` into the live fields. It
+  is called after every change of `active`; with `active == None` it
+  falls back to `clear_live_per_document`.
+
+Opening:
+
+- `begin_open` spawns a background task; its `OpenOutcome::Ready` is
+  delivered to `apply`, which snapshots the previous tab, pushes a
+  new `DocumentSnapshot`, and makes it active.
+- Multi-file drops call `begin_open` once per path, so each path
+  becomes its own tab.
+- A ZIP with one usable entry auto-opens as a tab (via `load`'s
+  `best_candidate` rule). A ZIP with several equally-ranked entries
+  shows the archive picker; picking one adds that entry as a tab.
+- The picker also offers "Open all N files as tabs", implemented by
+  `choose_all_entries`. That loops over the usable entries on the
+  background executor and calls `apply` for each; tabs appear
+  progressively and the loop aborts if `generation` has moved on.
+
+Closing / switching:
+
+- `switch_to(index)` snapshots the current tab, moves `active`, and
+  loads the new snapshot. It also sets `focus_grid_on_next_frame` so
+  the grid takes keyboard focus.
+- `close_active_at(index)` removes the snapshot and adjusts `active`
+  to the neighbour (or `None`). Closing the last tab resets `state`
+  to `Empty` so the welcome screen returns.
+
+Status / error behaviour:
+
+- With at least one tab open, the active document is always rendered;
+  `Empty` / `Loading` / `Error` only take over when `active == None`.
+- An error from a background open task sets `status_message` and does
+  not tear down the current tab. When no tab is open it also sets
+  `state = Error`, so the welcome area shows the failure.
+
+Tabs are a UI-layer concern only: `anvil_core` has no notion of a tab
+list. Each `DocumentSnapshot` holds an `Arc<ParsedDocument>`, so
+documents are not duplicated; the tab bar just indexes into them.
 
 ### Keyboard handling
 
@@ -1120,8 +1202,9 @@ carries 25 unit tests. `src/query.rs` carries 22 unit tests for
 helper.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
-`TestAppContext` (`gpui` `test-support` dev-dependency) with nine UI
-regression tests plus unit tests for the pure helpers:
+`TestAppContext` (`gpui` `test-support` dev-dependency) with
+twenty-three UI regression tests plus unit tests for the pure
+helpers:
 
 * `arrow_keys_move_selection_when_grid_focused` — injects a ready
 document, lets `render_grid` schedule the production deferred focus,
@@ -1158,6 +1241,25 @@ match index; Shift+Enter wraps backward.
 active match without touching the bar's open state or query.
 * `opening_new_document_clears_search_state` — `close_search` clears
 all search state, mirroring what `apply` does on a new document.
+* `apply_ready_creates_one_tab` — a single `apply(Ready)` pushes one
+snapshot and makes it active.
+* `two_sequential_applies_create_two_tabs` — two `apply(Ready)`
+calls (the multi-file-drop path) create two tabs.
+* `error_with_open_tab_keeps_the_tab` — an error on a second open
+does not clear the already-open tab; the message goes to the status
+bar.
+* `push_two_documents_switches_to_last` — pushing a snapshot makes
+it the active tab.
+* `switching_tabs_restores_per_document_state` — selection and
+horizontal scroll survive a round-trip through another tab.
+* `closing_active_tab_picks_neighbour` — closing the active tab
+selects a neighbour.
+* `closing_earlier_non_active_tab_shifts_active` — closing an
+earlier inactive tab shifts the active index down.
+* `closing_last_tab_leaves_empty_state` — closing the only tab
+resets to the empty document list.
+* `open_all_entries_adds_a_tab_per_entry` — `choose_all_entries` on
+a real three-entry ZIP adds three tabs.
 
 The focus tests were confirmed to fail when `.track_focus(&self.focus_handle)`
 is removed from the grid, the drag test when the cell `on_mouse_move`
@@ -1187,6 +1289,7 @@ outside / `None`).
 | UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
 | UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
 | UI / search (binary)   | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state |
+| UI / tabs (binary)     | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; `choose_all_entries` adds one tab per ZIP entry |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
@@ -1240,33 +1343,40 @@ Notes:
 
 - Selection (click / shift-click / click-and-drag with edge
   auto-scroll), basic keyboard navigation (arrow keys, Page Up/Down,
-  Home/End, Esc), clipboard copy (Cmd/Ctrl+C, TSV via `arboard`), and
+  Home/End, Esc), clipboard copy (Cmd/Ctrl+C, TSV via `arboard`),
   search (Cmd/Ctrl+F for the bar, F3 / Shift-F3 for navigation,
-  Enter / Shift+Enter inside the bar, Esc to close) are wired.
-  Keyboard handling requires the grid to hold focus; UI regression
-  tests guard the focus path, drag-select, auto-scroll, and every
-  search-bar transition. `anvil_core::Selection` carries 25 unit
-  tests + 14 integration tests; `anvil_core::query::search` carries
-  13 unit tests + 8 integration tests; the clipboard formatter and
-  cell-count helper are covered end-to-end against real
-  `ParsedDocument`s.
+  Enter / Shift+Enter inside the bar, Esc to close), and
+  multi-document tabs (drop several files, open every ZIP entry as a
+  tab, switch / close tabs) are wired. Keyboard handling requires the
+  grid to hold focus; UI regression tests guard the focus path,
+  drag-select, auto-scroll, every search-bar transition, and the
+  tab lifecycle. `anvil_core::Selection` carries 25 unit tests + 14
+  integration tests; `anvil_core::query::search` carries 22 unit
+  tests + 8 integration tests; the clipboard formatter and cell-count
+  helper are covered end-to-end against real `ParsedDocument`s.
 - The search bar's UI does not yet expose `case_sensitive` /
   `column` toggles — `SearchOptions` carries them, but the bar shows
   only the query input. Column-scoped search via header click is
   unimplemented. Both are follow-up UI work; the data-side supports
   them today.
+- The tab strip is a flat horizontal row; there is no dockable side
+  panel, no tree view, and no tab reordering. Long labels are
+  truncated with an ellipsis but there is no tooltip. Recorded as a
+  follow-up.
+- Closing a tab does not prompt for unsaved state (there is none yet)
+  and does not remember recently-closed tabs.
 - No filter, no sort, no type inference, no column statistics.
   Milestones 2–3.
 - The status bar reports a warning count but cannot navigate to the
   offending row. Milestone 4.
 - No progress UI for extraction / indexing. Milestone 5.
 - No themes, no light mode. Milestone 5.
-- UI coverage is now nine UI regression tests (focus, copy, drag,
-  auto-scroll, search bar) plus the two `rect_contains` unit tests
-  and two `render_row` smoke tests (substring highlight path
-  exercised; non-match row path exercised); there is still no
-  automated test of drag/drop or the toolbar. `--probe` remains
-  the only headless data-path harness.
+- UI coverage is now twenty-three UI regression tests (focus, copy,
+  drag, auto-scroll, search bar, tab lifecycle) plus the two
+  `rect_contains` unit tests, two `render_row` smoke tests, and the
+  fourteen command-mapping unit tests; there is still no automated
+  test of drag/drop event delivery or the toolbar. `--probe`
+  remains the only headless data-path harness.
 
 ### Performance gaps
 
@@ -1282,10 +1392,13 @@ Notes:
 - `error::AnvilError` has variants (`NotAZip`, `AmbiguousArchive`,
   `LooksBinary`) that are defined but never constructed. They should
   either be wired up or removed in a follow-up.
-- `ui::view.rs` is ~680 lines and mixes layout, render, event
-  handling, and task orchestration. Splitting it (e.g. into
-  `toolbar.rs`, `status.rs`, `overlay.rs`) is desirable but not
-  urgent.
+- `ui::view.rs` is ~2700 lines and mixes layout, render, event
+  handling, task orchestration, the multi-document tab list, and
+  the search bar. Splitting it (e.g. into `toolbar.rs`, `tabs.rs`,
+  `status.rs`, `overlay.rs`, `documents.rs`) is increasingly
+  desirable; the search and multi-document slices have each added
+  to it. Not urgent, but the next large feature should consider a
+  split first.
 - `loader.rs::best_candidate` and `ArchiveSource::single_usable`
   duplicate the "one usable entry" question. They agree today;
   consolidate when the loader gains new auto-open rules.
@@ -1371,6 +1484,13 @@ change architecture and update this file.
 The architecture is designed so Milestones 2–5 can be added without
 restructuring. Specifically:
 
+- **Multi-document / tabs (landed).** The tab strip is the first
+  consumed step of the "multiple datasets" idea in the roadmap's
+  Future Ideas. A future dockable side panel or nested tree view
+  can reuse the same `DocumentSnapshot` list; only the presentation
+  changes. Tab reordering, recently-closed tabs, and remembering
+  per-document state across app restarts are all extensions of the
+  current model rather than rewrites.
 - **Selection / navigation / clipboard (Milestone 2, partial).**
   `Selection` (in `anvil_core::selection`) lives on `MainView` and
   stores `(record_index, column_index)` ranges, independent of GPUI

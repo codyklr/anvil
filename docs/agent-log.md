@@ -1635,3 +1635,192 @@ The same generation-cancel pattern from search transfers
 verbatim; the same `BG_MATCH`-style row tint applies; the
 `find_ranges` helper could also be used to highlight the matched
 substring within a filtered value (overkill for filter; deferred).
+
+## 2026-10-10 — Multi-document tabs
+
+### Context
+
+The user asked for an IDE-style way to see and switch between all the
+files that have been opened: "for zip files, we want to show all
+available files in a file manager type window ... or a tab menu at the
+top ... this should be the case for any files put in the window as
+well that aren't the original file." That is a multi-document model,
+not just a fancier archive picker, so this iteration lands the model
+and a flat tab strip on top of it.
+
+### Implemented
+
+- `DocumentSnapshot` — one per open tab. Owns the `Arc<ParsedDocument>`,
+  the optional `Arc<ArchiveSource>` / entry name for ZIP-backed tabs,
+  and the per-document UI state: `selection`, `scroll_x`, `v_scroll`,
+  `search_open / search_query / search_matches / search_active /
+  search_generation`, `copy_flash_rect / copy_flash_generation`. Also
+  exposes `tab_label()` (basename for direct files, `archive:entry`
+  for ZIP entries, truncated at 40 chars with an ellipsis).
+- `MainView` gains `documents: Vec<DocumentSnapshot>` and
+  `active: Option<usize>`. The live per-document fields (`model`,
+  `selection`, `scroll_x`, `v_scroll`, `search_*`, `copy_flash_*`,
+  `archive`, `selected_entry`) are now a mirror of `documents[active]`.
+- `snapshot_active` copies live -> snapshot; `load_active` copies
+  snapshot -> live (or clears to defaults when `active == None`).
+  They are the only mutators of the mirror besides `clear_live_per_document`.
+- `apply(OpenOutcome::Ready)` snapshots the previous tab and pushes a
+  new `DocumentSnapshot` as the active tab. Opening a file no longer
+  replaces the previous document.
+- `switch_to(index)` snapshots, moves `active`, loads. It sets
+  `focus_grid_on_next_frame` so keyboard focus follows the tab.
+- `close_active_at(index)` removes the snapshot and adjusts `active`
+  correctly for closing the active tab, an earlier inactive tab, an
+  later inactive tab, or the last tab. Closing the last tab resets
+  `state` to `ViewState::Empty`.
+- `render_tab_bar` — a horizontal strip above the grid and below the
+  toolbar. Each tab is a click-to-switch region with a separate ×
+  close cell (`.on_mouse_down` so it does not also select the tab).
+  Zero-height when no documents are open.
+- `on_file_drop` now iterates every dropped path and calls
+  `begin_open` once per path, so a multi-file drop creates one tab
+  per file.
+- Archive picker gains an "Open all N files as tabs" button
+  (`choose_all_entries`). It loops over the usable entries on the
+  background executor, calling `apply` for each; tabs appear
+  progressively and the loop aborts when `generation` has moved on.
+- `render_center` now short-circuits to `render_grid` whenever
+  `active.is_some()`, so `Empty` / `Loading` / `Error` only take over
+  when no tab is open. A background-task error on a second open sets
+  `status_message` and (only when no tab is open) `state = Error`;
+  it never tears down the visible document.
+- `NeedArchiveChoice` no longer clears the current tab's selection /
+  scroll / search; the picker is a transient overlay.
+- `close_search` now snapshots first so the active tab's search
+  state stays consistent when the bar is dismissed.
+- `theme::TAB_BAR_HEIGHT = 28px`.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 148 passed (47 lib + 41 binary + 60
+  integration), 0 failed, 1 ignored. The binary suite grew from 32
+  to 41 with nine new tab tests.
+- `cargo clippy --release --all-targets` — clean (modulo the
+  pre-existing future-incompat notes).
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, 20 cols, 0 warnings, 344 ms.
+- `./target/release/anvil --probe fixtures/multi.zip` — 2 candidates
+  listed.
+- `./target/release/anvil` — launches, runs 5 s without panic.
+- Manual GUI confirmation of tab switching / close-click is deferred;
+  the state machine is covered by the nine new UI tests, including a
+  real three-entry ZIP for `choose_all_entries`.
+
+### Tests added / changed
+
+- New UI tests in `src/ui/view.rs`:
+  - `apply_ready_creates_one_tab`
+  - `two_sequential_applies_create_two_tabs`
+  - `error_with_open_tab_keeps_the_tab`
+  - `push_two_documents_switches_to_last`
+  - `switching_tabs_restores_per_document_state`
+  - `closing_active_tab_picks_neighbour`
+  - `closing_earlier_non_active_tab_shifts_active`
+  - `closing_last_tab_leaves_empty_state`
+  - `open_all_entries_adds_a_tab_per_entry` (builds a real 3-entry
+    ZIP, calls `choose_all_entries`, asserts 3 tabs)
+- The existing `inject_doc` helper now pushes a `DocumentSnapshot`
+  and goes through `load_active`, so the 20+ existing UI tests
+  exercise the new model.
+- No data-side tests changed.
+
+### Roadmap changes
+
+- Milestone 2 gains a "Multi-document tabs" subsection with the
+  landed items ticked and three follow-ups recorded (dockable side
+  panel / tree view; tab reordering + tooltips; recently-closed tabs).
+- Milestone 2 Tests gains the multi-document UI regression item.
+- Future Ideas: "Multiple datasets / tabs" rephrased to the remaining
+  "Dockable side panel / document tree" work, since the flat tab
+  strip now exists.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Primary-state table rewritten around `documents` / `active` and
+    the mirror fields, plus a paragraph on `DocumentSnapshot` and
+    the snapshot/load helpers.
+  - New "Multi-document / tabs" section covering the state model,
+    `snapshot_active` / `load_active`, the open / switch / close
+    flows, `choose_all_entries`, and the status/error behaviour.
+  - "Drag / drop" updated: every path opens, not just the first.
+  - "What is current vs planned" `ui::view` entry mentions the tab
+    strip and links to the new section.
+  - Planned Evolution gains a "Multi-document / tabs (landed)"
+    bullet.
+  - Testing section updated to twenty-three UI tests, with the nine
+    new tests listed and a "UI / tabs (binary)" table row.
+  - Functional gaps note the tab strip's limits (flat row, no
+    docking, no reordering) and the updated UI test count.
+  - Architectural debt now records the `view.rs` line-count growth
+    (~2700) and suggests a split as the next large feature's
+    prerequisite.
+
+### Issues / technical debt discovered
+
+- `view.rs` is now ~2700 lines; the tab list adds another
+  responsibility to an already-large file. A split (e.g. `tabs.rs`,
+  `documents.rs`, `search.rs`, `toolbar.rs`, `status.rs`) is becoming
+  worthwhile before the next feature.
+- The tab strip is flat: no dockable side panel, no reordering, no
+  tooltip for truncated labels. The user's phrasing offered both a
+  side panel and a tab menu; the tab menu landed first as the smaller
+  of the two.
+- `search_task` stays on `MainView` rather than the snapshot, so an
+  in-flight search that finishes after a tab switch writes its result
+  to the (now different) live fields. Today the generation check
+  mostly masks this because `search_generation` is also live, but a
+  pending search could theoretically land on the wrong tab. A future
+  slice should move `search_task` into the snapshot or capture the
+  tab index with the task.
+- `copy_flash_generation` has the same shape: the flash timer compares
+  against the live generation, so switching tabs during the 450 ms
+  flash leaves the snapshot's `copy_flash_rect` set. Harmless visually
+  (the flash reappears if the user returns) but not intentional.
+- `DocumentSnapshot` is `Clone` because `load_active` cloned it; the
+  clone is only needed for that one access pattern and could be
+  avoided by restructuring the borrow. Minor.
+- `choose_all_entries` loads every entry in sequence. For a ZIP with
+  hundreds of entries this is a lot of I/O and memory; a threshold or
+  a confirmation step would be a sensible follow-up.
+- Dropping a directory or an unreadable path is not special-cased;
+  the open task fails and the status bar shows the error. Acceptable
+  for now.
+
+### Open loops
+
+- Move `search_task` / `copy_flash_generation` semantics fully into
+  the snapshot.
+- Dockable side panel / tree view as an alternative presentation of
+  the same `DocumentSnapshot` list.
+- Tab reordering and truncated-label tooltips.
+- `Cmd/Ctrl+Home/End` and `Tab / Shift-Tab` remain unimplemented from
+  the earlier keyboard-navigation list.
+- Case-sensitive / column-scoped search UI toggles remain
+  unimplemented on the data side.
+
+### Next recommended task
+
+The user's request is only half-done: the tab bar shows and switches
+between open documents, but ZIPs with several entries still require
+the picker (with the new "Open all" button) rather than showing
+entries in the tab strip at the moment the ZIP is dropped. The next
+slice should decide between:
+
+1. Auto-opening every usable entry when a ZIP is dropped (with a
+   size threshold), so the tab strip is the single surface for file
+   navigation; or
+2. A persistent archive-contents panel that lists entries and opens
+   them on click, leaving the picker for the initial drop only.
+
+Either way, the work is now smaller because `choose_all_entries` and
+`DocumentSnapshot` already exist. I would also strongly consider
+splitting `view.rs` first, as its size is now the main risk to further
+UI changes.

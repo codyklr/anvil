@@ -52,6 +52,7 @@ pub const ACCENT: Rgba = rgb(0x0e639c);
 pub const WARN: Rgba = rgb(0xd7ba7d);
 
 pub const TOOLBAR_HEIGHT: Pixels = px(38.);
+pub const TAB_BAR_HEIGHT: Pixels = px(28.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
 pub const HEADER_HEIGHT: Pixels = px(24.);
 pub const ROW_HEIGHT: Pixels = px(22.);

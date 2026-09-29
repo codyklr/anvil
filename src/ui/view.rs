@@ -17,7 +17,8 @@ use gpui::{
 };
 
 use anvil_core::{
-    search_records, ArchiveSource, CellPos, LoadResult, LoadedDocument, SearchOptions, Selection,
+    search_records, ArchiveSource, CellPos, LoadResult, LoadedDocument, ParsedDocument,
+    SearchOptions, Selection,
 };
 
 use super::archive_picker;
@@ -38,6 +39,87 @@ const AUTO_SCROLL_TICK: Duration = Duration::from_millis(30);
 /// clobbering the real clipboard.
 #[allow(clippy::type_complexity)]
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// Per-document state captured when a tab is no longer active and
+/// restored when the user switches back to it. The fields mirror
+/// the corresponding live fields on `MainView` so render and test
+/// code can keep reading from one place.
+#[derive(Clone)]
+struct DocumentSnapshot {
+    /// Arc-shared parsed document; multiple snapshots can share a
+    /// doc only when the user opens the same file twice (today that
+    /// does not happen — each open is a fresh parse — but the Arc
+    /// is the right shape for the future).
+    doc: Arc<ParsedDocument>,
+    /// Set when this document came from a ZIP entry; the picker
+    /// overlay consults it.
+    archive: Option<Arc<ArchiveSource>>,
+    /// The archive entry this document was loaded from.
+    entry_name: Option<String>,
+    /// Cell / range selection.
+    selection: Selection,
+    /// Horizontal scroll position in pixels.
+    scroll_x: f32,
+    /// Vertical scroll handle. Each snapshot owns its own so tabs
+    /// scroll independently. The live `MainView.v_scroll` is a clone
+    /// of the active snapshot's handle.
+    v_scroll: UniformListScrollHandle,
+    /// Whether the search bar is visible for this tab.
+    search_open: bool,
+    /// The needle typed into the search bar.
+    search_query: String,
+    /// Sorted record indexes that match the latest query. Reset on
+    /// every keystroke while a new search is in flight.
+    search_matches: Vec<u64>,
+    /// Index into `search_matches` of the active match, or `-1`.
+    search_active: i64,
+    /// Bumped on every keystroke; obsolete search tasks compare
+    /// their captured generation against this and discard themselves.
+    search_generation: u64,
+    /// Rectangle of the most recent successful copy, painted green
+    /// until the flash timer clears it.
+    copy_flash_rect: Option<(CellPos, CellPos)>,
+    copy_flash_generation: u64,
+}
+
+impl DocumentSnapshot {
+    fn from_doc(
+        doc: Arc<ParsedDocument>,
+        archive: Option<Arc<ArchiveSource>>,
+        entry_name: Option<String>,
+    ) -> Self {
+        Self {
+            doc,
+            archive,
+            entry_name,
+            selection: Selection::empty(),
+            scroll_x: 0.0,
+            v_scroll: UniformListScrollHandle::new(),
+            search_open: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_active: -1,
+            search_generation: 0,
+            copy_flash_rect: None,
+            copy_flash_generation: 0,
+        }
+    }
+
+    /// Short label for the tab strip. Truncated to a sane length.
+    fn tab_label(&self) -> String {
+        let raw = match (&self.archive, &self.entry_name) {
+            (Some(a), Some(e)) => format!("{}:{}", a.archive_name(), e),
+            (None, _) => self.doc.opened.display_label(),
+            _ => self.doc.opened.display_label(),
+        };
+        if raw.chars().count() > 40 {
+            let truncated: String = raw.chars().take(37).collect();
+            format!("{truncated}…")
+        } else {
+            raw
+        }
+    }
+}
 
 /// Default `ClipboardWriter`: `arboard` (text only). Errors are turned
 /// into strings so the status bar can display them.
@@ -64,6 +146,18 @@ enum ViewState {
 }
 
 pub struct MainView {
+    /// Multi-document state. Every successfully opened file (and
+    /// every chosen ZIP entry) gets its own `DocumentSnapshot`. The
+    /// active tab's snapshot is mirrored into the "live" per-document
+    /// fields below so render and test code can keep reading them
+    /// directly.
+    documents: Vec<DocumentSnapshot>,
+    /// Index into `documents` of the active tab, or `None` when no
+    /// document is open. Switching tabs snapshots the current live
+    /// state into `documents[active]` and loads the new snapshot's
+    /// state into the live fields.
+    active: Option<usize>,
+
     generation: u64,
     model: Option<GridModel>,
     state: ViewState,
@@ -163,6 +257,8 @@ pub struct MainView {
 impl MainView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            documents: Vec::new(),
+            active: None,
             generation: 0,
             model: None,
             state: ViewState::Empty,
@@ -196,6 +292,129 @@ impl MainView {
         }
     }
 
+    // ---- multi-document / tabs -----------------------------------------
+
+    /// Copy the current live per-document state into the snapshot at
+    /// `active`. Called before mutating live state (e.g. when a new
+    /// document is loaded) or before switching tabs so the snapshot
+    /// reflects the user's latest actions.
+    fn snapshot_active(&mut self) {
+        let Some(active) = self.active else { return };
+        let Some(snap) = self.documents.get_mut(active) else {
+            return;
+        };
+        snap.selection = self.selection.clone();
+        snap.scroll_x = self.scroll_x;
+        snap.v_scroll = self.v_scroll.clone();
+        snap.search_open = self.search_open;
+        snap.search_query = self.search_query.clone();
+        snap.search_matches = self.search_matches.clone();
+        snap.search_active = self.search_active;
+        snap.search_generation = self.search_generation;
+        snap.copy_flash_rect = self.copy_flash_rect;
+        snap.copy_flash_generation = self.copy_flash_generation;
+        snap.archive = self.archive.clone();
+        snap.entry_name = self.selected_entry.clone();
+    }
+
+    /// Reset all live per-document fields to the "no document"
+    /// defaults. Used when there is no active document (empty
+    /// state) so render code observes a consistent view.
+    fn clear_live_per_document(&mut self) {
+        self.model = None;
+        self.archive = None;
+        self.selected_entry = None;
+        self.selection = Selection::empty();
+        self.scroll_x = 0.0;
+        self.v_scroll = UniformListScrollHandle::new();
+        self.search_open = false;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_active = -1;
+        self.search_generation = 0;
+        self.copy_flash_rect = None;
+        self.copy_flash_generation = 0;
+    }
+
+    /// Copy `documents[new_active]` into the live per-document fields.
+    /// Called after switching tabs so the next render reflects the
+    /// new tab.
+    fn load_active(&mut self) {
+        let Some(active) = self.active else {
+            self.clear_live_per_document();
+            return;
+        };
+        let Some(snap) = self.documents.get(active).cloned() else {
+            self.clear_live_per_document();
+            return;
+        };
+        self.model = Some(GridModel::new(snap.doc.clone()));
+        self.archive = snap.archive;
+        self.selected_entry = snap.entry_name;
+        self.selection = snap.selection;
+        self.scroll_x = snap.scroll_x;
+        self.v_scroll = snap.v_scroll;
+        self.search_open = snap.search_open;
+        self.search_query = snap.search_query;
+        self.search_matches = snap.search_matches;
+        self.search_active = snap.search_active;
+        self.search_generation = snap.search_generation;
+        self.copy_flash_rect = snap.copy_flash_rect;
+        self.copy_flash_generation = snap.copy_flash_generation;
+    }
+
+    /// Switch to the tab at `index`. No-op if it is already active
+    /// or out of range.
+    fn switch_to(&mut self, index: usize, cx: &mut Context<Self>) {
+        if Some(index) == self.active {
+            return;
+        }
+        if index >= self.documents.len() {
+            return;
+        }
+        self.snapshot_active();
+        self.active = Some(index);
+        self.load_active();
+        // Focus the grid so the keyboard surface is ready. The same
+        // deferred-focus path is used as after a fresh open.
+        self.focus_grid_on_next_frame = true;
+        cx.notify();
+    }
+
+    /// Close the tab at `index`. The active tab may shift to a
+    /// neighbour (or `None` if this was the last tab).
+    fn close_active_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.documents.len() {
+            return;
+        }
+        let was_active = self.active == Some(index);
+        self.documents.remove(index);
+        let new_active = match self.active {
+            None => None,
+            Some(active) if active > index => Some(active - 1),
+            Some(active) if active == index => {
+                // Active tab was closed; pick a neighbour.
+                if self.documents.is_empty() {
+                    None
+                } else {
+                    Some(index.min(self.documents.len() - 1))
+                }
+            }
+            Some(active) => Some(active),
+        };
+        self.active = new_active;
+        self.load_active();
+        if self.documents.is_empty() {
+            // No tabs left — the centre panel falls back to the
+            // empty state so the welcome screen reappears.
+            self.state = ViewState::Empty;
+        }
+        if was_active && new_active.is_some() {
+            self.focus_grid_on_next_frame = true;
+        }
+        cx.notify();
+    }
+
     // ---- opening ---------------------------------------------------------
 
     fn begin_open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -227,16 +446,17 @@ impl MainView {
                     archive,
                     entry,
                 } = *loaded;
-                self.model = Some(GridModel::new(Arc::new(document)));
-                self.archive = archive;
-                self.selected_entry = entry;
+                // Capture the previous tab's live state before
+                // rebuilding the live fields around the new document.
+                self.snapshot_active();
+                let doc = Arc::new(document);
+                self.documents
+                    .push(DocumentSnapshot::from_doc(doc.clone(), archive, entry));
+                self.active = Some(self.documents.len() - 1);
+                self.load_active();
                 self.show_picker = false;
-                self.scroll_x = 0.0;
-                self.selection.clear();
                 self.drag_selecting = false;
                 self.status_message = None;
-                self.copy_flash_rect = None;
-                self.close_search();
                 self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
@@ -244,21 +464,29 @@ impl MainView {
                 self.archive = Some(source);
                 self.selected_entry = None;
                 self.show_picker = true;
-                self.selection.clear();
+                // Keep the current tab's selection / scroll / search
+                // state intact; the picker is a transient overlay.
                 self.drag_selecting = false;
                 self.status_message = None;
-                self.copy_flash_rect = None;
-                self.close_search();
                 self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
             OpenOutcome::Error(message) => {
-                self.model = None;
-                self.selection.clear();
-                self.copy_flash_rect = None;
-                self.close_search();
+                // Surface the error in the status bar; do not tear
+                // down the currently-open tab. (Before multi-document
+                // support this arm replaced the single document with
+                // an error state; in a multi-document world a
+                // background-task error should not clobber the user's
+                // other open files.)
                 self.status_message = Some(format!("error: {message}"));
-                self.state = ViewState::Error(message);
+                // When no tab is open we still want to show the error
+                // page (and not a stale "Loading..." from a previous
+                // task). When at least one tab is open, the active
+                // tab wins and the error lives only in the status
+                // bar; the renderer enforces that.
+                if self.documents.is_empty() {
+                    self.state = ViewState::Error(message);
+                }
             }
         }
         cx.notify();
@@ -286,6 +514,55 @@ impl MainView {
                 view.apply(outcome, cx);
             })
             .ok();
+        });
+        self.task = Some(task);
+    }
+
+    /// Extract and index every usable archive entry, adding each as
+    /// its own tab. Entries are processed sequentially on the
+    /// background executor so we never hold more than one extraction
+    /// in memory at a time; tabs appear progressively as each entry
+    /// finishes. Bumping `generation` before the loop means a
+    /// subsequent open (or a close-all) aborts the remaining work.
+    fn choose_all_entries(&mut self, cx: &mut Context<Self>) {
+        let Some(archive) = self.archive.clone() else {
+            return;
+        };
+        let entries: Vec<String> = archive
+            .candidates
+            .iter()
+            .filter(|c| c.usable)
+            .map(|c| c.entry_name.clone())
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.state = ViewState::Loading(format!("loading {} archive entries", entries.len()));
+        self.show_picker = false;
+        cx.notify();
+
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            for entry in entries {
+                let archive = archive.clone();
+                let outcome = executor
+                    .spawn(async move { extract_and_index(&archive, &entry) })
+                    .await;
+                let stop = this
+                    .update(cx, |view, cx| {
+                        if view.generation != generation {
+                            return true;
+                        }
+                        view.apply(outcome, cx);
+                        false
+                    })
+                    .unwrap_or(true);
+                if stop {
+                    break;
+                }
+            }
         });
         self.task = Some(task);
     }
@@ -374,6 +651,83 @@ impl MainView {
                         .child("Archive…"),
                 )
             })
+    }
+
+    /// Horizontal strip of tabs above the grid. Each tab shows a
+    /// short label for an open document. Click a tab to switch;
+    /// click the × to close. When no documents are open, the bar
+    /// is empty (no row rendered).
+    ///
+    /// Tabs live as a normal flex child of the root, below the
+    /// toolbar and above the center area. They never overlap the
+    /// grid the way the search bar used to.
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.documents.is_empty() {
+            return div().h(px(0.));
+        }
+        let mut tabs: Vec<AnyElement> = Vec::with_capacity(self.documents.len());
+        for (index, snap) in self.documents.iter().enumerate() {
+            let is_active = Some(index) == self.active;
+            let label = snap.tab_label();
+            let on_select_index = index;
+            let on_close_index = index;
+
+            let active_bg = theme::BG_PANEL;
+            let inactive_bg = theme::BG_TOOLBAR;
+            let active_fg = theme::TEXT_STRONG;
+            let inactive_fg = theme::TEXT_DIM;
+            let bg = if is_active { active_bg } else { inactive_bg };
+            let fg = if is_active { active_fg } else { inactive_fg };
+
+            // Tab body — clickable to switch active.
+            tabs.push(
+                div()
+                    .id(("doc-tab", index))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .h(px(f32::from(theme::TAB_BAR_HEIGHT)))
+                    .px_2()
+                    .bg(bg)
+                    .border_r_1()
+                    .border_color(theme::BORDER)
+                    .cursor_pointer()
+                    .hover(|s| if is_active { s } else { s.bg(theme::BG_PANEL) })
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.switch_to(on_select_index, cx);
+                    }))
+                    .child(div().text_color(fg).child(label))
+                    .child(
+                        div()
+                            .id(("doc-tab-close", index))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme::TEXT_DIM)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme::TEXT_STRONG))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |view, _, _, cx| {
+                                    view.close_active_at(on_close_index, cx);
+                                }),
+                            )
+                            .child("×"),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(f32::from(theme::TAB_BAR_HEIGHT)))
+            .w_full()
+            .bg(theme::BG_TOOLBAR)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .children(tabs)
     }
 
     fn render_status(&self) -> impl IntoElement {
@@ -887,6 +1241,10 @@ impl MainView {
     /// its current selection; the search rectangle stops being
     /// highlighted.
     fn close_search(&mut self) {
+        // Snapshot first so the active tab's persisted search state
+        // is consistent — the live fields are about to be reset to
+        // "no search", which is what the snapshot now records.
+        self.snapshot_active();
         self.search_open = false;
         self.search_query.clear();
         self.search_matches.clear();
@@ -1253,11 +1611,12 @@ impl MainView {
             );
         }
 
+        let usable_count = usable.len();
         let mut children: Vec<AnyElement> = vec![
             div()
                 .text_color(theme::TEXT_STRONG)
                 .text_lg()
-                .child(format!("{} files in archive", usable.len()))
+                .child(format!("{usable_count} files in archive"))
                 .into_any_element(),
             div()
                 .text_xs()
@@ -1269,6 +1628,30 @@ impl MainView {
                 .into_any_element(),
         ];
         children.extend(rows);
+
+        // "Open all" turns every usable entry into its own tab (they
+        // load sequentially in the background). Handy for exports
+        // that ship several CSVs together, which is the common
+        // Anvil input shape.
+        if usable_count > 1 {
+            children.push(
+                div()
+                    .id("archive-open-all")
+                    .mt_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_sm()
+                    .bg(theme::ACCENT)
+                    .text_color(theme::TEXT_STRONG)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x1177bb)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.choose_all_entries(cx);
+                    }))
+                    .child(format!("Open all {usable_count} files as tabs"))
+                    .into_any_element(),
+            );
+        }
 
         if !rejected.is_empty() {
             children.push(
@@ -1312,6 +1695,14 @@ impl MainView {
     }
 
     fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // In a multi-document world, the active document always wins
+        // when it is set. The Empty / Loading / Error states only
+        // take over when no document is open yet; once the user has
+        // at least one tab, errors on background tasks surface only
+        // in the status bar.
+        if self.active.is_some() {
+            return self.render_grid(window, cx);
+        }
         match &self.state {
             ViewState::Empty => div()
                 .flex()
@@ -1373,8 +1764,16 @@ impl MainView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(first) = paths.paths().first() {
-            self.begin_open(first.clone(), cx);
+        // Every dropped path becomes its own tab. The first one
+        // sets `Loading` state visibly; subsequent ones load in the
+        // background and arrive as additional tabs once their
+        // background tasks complete.
+        let paths = paths.paths();
+        if paths.is_empty() {
+            return;
+        }
+        for path in paths {
+            self.begin_open(path.clone(), cx);
         }
     }
 }
@@ -1406,6 +1805,10 @@ impl Render for MainView {
             .text_color(theme::TEXT)
             .on_drop(cx.listener(Self::on_file_drop))
             .child(self.render_toolbar(cx))
+            // Tab strip below the toolbar so users can see and
+            // switch between all open documents. Empty (zero-height)
+            // when no documents are open.
+            .child(self.render_tab_bar(cx))
             .child(
                 div()
                     .relative()
@@ -1537,9 +1940,22 @@ mod tests {
         let written: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = written.clone();
         cx.update_window_entity(view, |view, window, cx| {
-            view.model = Some(GridModel::new(Arc::new(doc)));
+            // Push the document as a fresh tab; mirrors what `apply`
+            // does when an `OpenOutcome::Ready` arrives so render code
+            // sees a consistent live state. The selection lives on the
+            // new snapshot.
+            let arc_doc = Arc::new(doc);
+            view.documents
+                .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
+            view.active = Some(view.documents.len() - 1);
+            view.load_active();
             view.state = ViewState::Ready;
             view.selection.set(CellPos::new(0, 0));
+            // The selection we just set lives on the live field; copy
+            // it into the snapshot so the tab is internally consistent.
+            if let Some(snap) = view.documents.get_mut(view.active.unwrap()) {
+                snap.selection = view.selection.clone();
+            }
             view.status_message = None;
             view.clipboard = Arc::new(move |text: &str| {
                 sink.lock()
@@ -2013,6 +2429,311 @@ mod tests {
             assert_eq!(view.search_query, "");
             assert_eq!(view.search_matches, Vec::<u64>::new());
             assert_eq!(view.search_active, -1);
+        });
+    }
+
+    // ---- multi-document / tabs --------------------------------------
+
+    /// Pushing two documents into the tab list (the way a
+    /// multi-file drop or two sequential opens would) keeps both
+    /// snapshots and switches the live fields to the most recent.
+    #[gpui::test]
+    async fn push_two_documents_switches_to_last(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        // Add a second document directly via the public helpers used
+        // by `apply`: push a snapshot and load it as the active one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("second.csv");
+        std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let second = anvil_core::index_opened(opened);
+        cx.update_window_entity(&view, |view, _, _| {
+            let arc_doc = std::sync::Arc::new(second);
+            view.documents
+                .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
+            view.active = Some(view.documents.len() - 1);
+            view.load_active();
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 2);
+            assert_eq!(view.active, Some(1));
+        });
+    }
+
+    /// Switching tabs snapshots the active doc's selection /
+    /// scroll_x and restores them when the user comes back.
+    #[gpui::test]
+    async fn switching_tabs_restores_per_document_state(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        // Set selection on the active tab (the sample fixture has 3
+        // rows × 3 cols, so (1, 1) is in bounds).
+        cx.update_window_entity(&view, |view, _, _| {
+            view.selection.set(CellPos::new(1, 1));
+            view.scroll_x = 42.0;
+        });
+
+        // Push a second tab; active becomes that tab. We snapshot
+        // first (the same call `apply` makes on a fresh open) so the
+        // first tab's selection lives in its snapshot for the
+        // round-trip.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("second.csv");
+        std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let second = anvil_core::index_opened(opened);
+        cx.update_window_entity(&view, |view, _, _| {
+            view.snapshot_active();
+            let arc_doc = std::sync::Arc::new(second);
+            view.documents
+                .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
+            view.active = Some(view.documents.len() - 1);
+            view.load_active();
+        });
+
+        // The live selection / scroll_x should be the defaults for
+        // the new tab, not the old tab's values.
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_ne!(view.selection.cursor(), Some(CellPos::new(1, 1)));
+            assert_eq!(view.scroll_x, 0.0);
+        });
+
+        // Switch back to tab 0 — the selection comes back.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.switch_to(0, cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.active, Some(0));
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
+            assert_eq!(view.scroll_x, 42.0);
+        });
+    }
+
+    /// Closing the active tab via `close_active_at` shifts
+    /// `active` to a neighbour.
+    #[gpui::test]
+    async fn closing_active_tab_picks_neighbour(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        // Add three tabs total.
+        for i in 0..2 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(format!("extra{i}.csv"));
+            std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
+            let opened = anvil_core::source::local::open_local(&path).expect("open");
+            let extra = anvil_core::index_opened(opened);
+            cx.update_window_entity(&view, |view, _, _| {
+                let arc_doc = std::sync::Arc::new(extra);
+                view.documents
+                    .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
+                view.active = Some(view.documents.len() - 1);
+                view.load_active();
+            });
+        }
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 3);
+            assert_eq!(view.active, Some(2));
+        });
+
+        // Close the active tab. The new active should be the last
+        // available tab.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.close_active_at(2, cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 2);
+            assert_eq!(view.active, Some(1));
+        });
+    }
+
+    /// Closing a non-active tab earlier than the active one shifts
+    /// the active index down by one.
+    #[gpui::test]
+    async fn closing_earlier_non_active_tab_shifts_active(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        // Add two more tabs; active ends up at index 2.
+        for i in 0..2 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(format!("extra{i}.csv"));
+            std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
+            let opened = anvil_core::source::local::open_local(&path).expect("open");
+            let extra = anvil_core::index_opened(opened);
+            cx.update_window_entity(&view, |view, _, _| {
+                let arc_doc = std::sync::Arc::new(extra);
+                view.documents
+                    .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
+                view.active = Some(view.documents.len() - 1);
+                view.load_active();
+            });
+        }
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.active, Some(2));
+        });
+
+        // Close tab 0 (an earlier, inactive tab). Active should
+        // shift from 2 to 1.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.close_active_at(0, cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 2);
+            assert_eq!(view.active, Some(1));
+        });
+    }
+
+    /// Closing the last remaining tab empties the document list and
+    /// `active` becomes `None`.
+    #[gpui::test]
+    async fn closing_last_tab_leaves_empty_state(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.close_active_at(0, cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.documents.is_empty());
+            assert!(view.active.is_none());
+            assert!(view.model.is_none());
+        });
+    }
+
+    /// Multi-file drop: every dropped path becomes its own tab. This
+    /// drives the real `apply(OpenOutcome::Ready)` path twice — the
+    /// same code that runs after `begin_open`'s background task — so
+    /// the tab-push / switch logic is exercised end-to-end.
+    #[gpui::test]
+    async fn two_sequential_applies_create_two_tabs(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+
+        for name in ["one.csv", "two.csv"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"a,b\n1,2\n3,4\n").expect("write");
+            let opened = anvil_core::source::local::open_local(&path).expect("open");
+            let doc = anvil_core::index_opened(opened);
+            let loaded = LoadedDocument {
+                document: doc,
+                archive: None,
+                entry: None,
+            };
+            cx.update_window_entity(&view, |view, _, cx| {
+                view.apply(OpenOutcome::Ready(Box::new(loaded)), cx);
+            });
+        }
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 2);
+            assert_eq!(view.active, Some(1));
+            assert!(view.model.is_some());
+        });
+    }
+
+    /// A single open arrives as one tab with the loaded document live.
+    #[gpui::test]
+    async fn apply_ready_creates_one_tab(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("only.csv");
+        std::fs::write(&path, b"a,b\n1,2\n3,4\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let loaded = LoadedDocument {
+            document: doc,
+            archive: None,
+            entry: None,
+        };
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.apply(OpenOutcome::Ready(Box::new(loaded)), cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 1);
+            assert_eq!(view.active, Some(0));
+            assert!(view.model.is_some());
+            assert!(matches!(view.state, ViewState::Ready));
+        });
+    }
+
+    /// After an error with no tabs open, the centre panel shows the
+    /// error page. With a tab already open, an error on a background
+    /// task must NOT clobber the visible document.
+    #[gpui::test]
+    async fn error_with_open_tab_keeps_the_tab(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ok.csv");
+        std::fs::write(&path, b"a,b\n1,2\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let loaded = LoadedDocument {
+            document: doc,
+            archive: None,
+            entry: None,
+        };
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.apply(OpenOutcome::Ready(Box::new(loaded)), cx);
+        });
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.apply(OpenOutcome::Error("boom".into()), cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            // Tab is still open and still rendering.
+            assert_eq!(view.documents.len(), 1);
+            assert!(view.model.is_some());
+            // Error is in the status message, not the centre panel.
+            assert!(view
+                .status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("boom")));
+        });
+    }
+
+    /// `choose_all_entries` adds one tab per usable archive entry.
+    /// The entries load sequentially on the background executor; by
+    /// the time `run_until_parked` returns, all tabs are present.
+    #[gpui::test]
+    async fn open_all_entries_adds_a_tab_per_entry(cx: &mut TestAppContext) {
+        use std::io::Write;
+
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+
+        // Build a ZIP with three CSVs.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("multi.zip");
+        {
+            let file = std::fs::File::create(&path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for name in ["a.csv", "b.csv", "c.csv"] {
+                zip.start_file(name, opts).expect("start file");
+                zip.write_all(b"x,y\n1,2\n3,4\n").expect("write entry");
+            }
+            zip.finish().expect("finish zip");
+        }
+        let opened = anvil_core::open_path(&path).expect("open zip");
+        let archive = match opened {
+            anvil_core::OpenResult::Archive(a) => Arc::new(a),
+            _ => panic!("expected an archive"),
+        };
+        assert_eq!(archive.total_candidates(), 3);
+
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.archive = Some(archive);
+            view.show_picker = true;
+            view.choose_all_entries(cx);
+        });
+        cx.run_until_parked();
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 3);
+            assert_eq!(view.active, Some(2));
+            assert!(!view.show_picker, "picker should close after Open all");
         });
     }
 }
