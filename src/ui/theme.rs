@@ -1,0 +1,52 @@
+//! Small set of colours and metrics used across the UI.
+//!
+//! Designed to be information-dense and easy on the eyes for extended
+//! sessions. Dark is the default; we keep the palette in one place so a
+//! light mode can be added later without touching every view.
+
+use gpui::{px, Pixels, Rgba};
+
+/// `gpui::rgb` is not `const`, so we reproduce it here to keep the palette
+/// as compile-time constants.
+const fn rgb(hex: u32) -> Rgba {
+    Rgba {
+        r: ((hex >> 16) & 0xff) as f32 / 255.0,
+        g: ((hex >> 8) & 0xff) as f32 / 255.0,
+        b: (hex & 0xff) as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
+pub const BG: Rgba = rgb(0x1e1e1e);
+pub const BG_PANEL: Rgba = rgb(0x252526);
+pub const BG_TOOLBAR: Rgba = rgb(0x2d2d30);
+pub const BG_STATUS: Rgba = rgb(0x2d2d30);
+pub const BG_HEADER: Rgba = rgb(0x333337);
+pub const BG_ROW_ALT: Rgba = rgb(0x232326);
+pub const BG_ROW_HOVER: Rgba = rgb(0x2a2d2e);
+pub const BG_SELECTED: Rgba = rgb(0x094771);
+
+pub const BORDER: Rgba = rgb(0x3c3c3c);
+pub const BORDER_STRONG: Rgba = rgb(0x505050);
+
+pub const TEXT: Rgba = rgb(0xd4d4d4);
+pub const TEXT_DIM: Rgba = rgb(0x9d9d9d);
+pub const TEXT_STRONG: Rgba = rgb(0xffffff);
+pub const TEXT_EMPTY: Rgba = rgb(0x666666);
+
+pub const ACCENT: Rgba = rgb(0x0e639c);
+pub const WARN: Rgba = rgb(0xd7ba7d);
+
+pub const TOOLBAR_HEIGHT: Pixels = px(38.);
+pub const STATUS_HEIGHT: Pixels = px(24.);
+pub const HEADER_HEIGHT: Pixels = px(24.);
+pub const ROW_HEIGHT: Pixels = px(22.);
+pub const ROW_NUMBER_WIDTH: Pixels = px(64.);
+pub const CELL_PAD_X: Pixels = px(6.);
+
+/// Default column width when we have no sampled width.
+pub const DEFAULT_COLUMN_WIDTH: Pixels = px(140.);
+pub const MIN_COLUMN_WIDTH: Pixels = px(48.);
+/// Maximum number of columns whose width we actually measure. Beyond this
+/// we use the default and let virtualization hide the cost.
+pub const MAX_MEASURED_COLUMNS: usize = 4096;

@@ -1,0 +1,48 @@
+[package]
+name = "anvil-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Anvil: high-performance CSV/data viewer for inspection work"
+license = "MIT"
+
+[lib]
+name = "anvil_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "anvil"
+path = "src/main.rs"
+
+[[bin]]
+name = "gen_fixture"
+path = "src/bin/gen_fixture.rs"
+
+[dependencies]
+# UI (used by the `anvil` binary)
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+rfd = { version = "0.17", default-features = false }
+
+# Data access
+memchr = "2"
+memmap2 = "0.9"
+
+# Archive
+zip = { version = "2.4", default-features = false, features = ["deflate", "bzip2"] }
+
+# Temp files for archive extraction
+tempfile = "3"
+
+# Errors
+thiserror = "1"
+
+[dev-dependencies]
+crc32fast = "1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
