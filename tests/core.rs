@@ -77,7 +77,7 @@ fn parses_tsv_via_delimiter_detection() {
 
 #[test]
 fn parses_semicolon_and_pipe() {
-    for delim in [b';', b'|'] {
+    for delim in *b";|" {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"a");
         bytes.push(delim);

@@ -184,12 +184,18 @@ this may freeze the UI.
   filter.
 - [x] Test selection copy formatting (TSV with CRLF on Windows
   builds, LF on Unix).
+- [x] UI regression tests for grid focus / keyboard routing — arrow
+  keys reach the grid and Cmd/Ctrl+C routes to the copy handler
+  (`src/ui/view.rs`, GPUI `TestAppContext`). These fail if the grid
+  stops tracking focus.
 
 ### Dependencies
 
 - `arboard = "3"` (text-only, default-features disabled) — added in
   the clipboard slice. The crate is used only by the `anvil` binary;
   `anvil_core` is unaffected.
+- `gpui` `test-support` (dev-only) — added with the UI regression
+  tests. Enables `TestAppContext`; release builds are unaffected.
 - The `Cell<'a>` API may need to expose `to_string_lossy_owned`
   consistently for clipboard/search.
 
@@ -354,6 +360,11 @@ make what exists feel finished.
 - [ ] Memory usage measured and reported per fixture.
 - [ ] Cancellation robustness: document the contract that
   generation-based cancellation is sufficient.
+
+#### Test coverage
+
+- [ ] Extend the GPUI `TestAppContext` suite beyond grid focus:
+  drag/drop, the archive picker overlay, and toolbar clicks.
 
 #### UX
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use gpui::{
     canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Context, ExternalPaths,
-    KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollDelta,
+    FocusHandle, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollDelta,
     ScrollWheelEvent, Task, UniformListScrollHandle, Window,
 };
 
@@ -25,6 +25,20 @@ use super::theme;
 /// to a conservative estimate of the visible row count so the grid does
 /// not have to be measured every keypress.
 const PAGE_STEP: i64 = 20;
+
+/// Writes text to the system clipboard. Stored on `MainView` so UI
+/// tests can substitute a recorder and assert the exact TSV without
+/// clobbering the real clipboard.
+#[allow(clippy::type_complexity)]
+type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// Default `ClipboardWriter`: `arboard` (text only). Errors are turned
+/// into strings so the status bar can display them.
+fn system_clipboard_write(text: &str) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text.to_owned()))
+        .map_err(|err| err.to_string())
+}
 
 /// Result of the background open+index pass.
 enum OpenOutcome {
@@ -63,10 +77,24 @@ pub struct MainView {
     /// Transient status-bar message (e.g. "copied 12 cells"). Cleared
     /// when the user makes another selection-changing action.
     status_message: Option<String>,
+
+    /// Focus handle for the scrollable grid. Keyboard events (arrow
+    /// navigation, Cmd/Ctrl+C) are only delivered to `on_grid_key_down`
+    /// while this handle is focused, so the grid carries
+    /// `.track_focus(&self.focus_handle)` and the view focuses it when
+    /// a document is applied (and on any mouse-down inside the grid).
+    focus_handle: FocusHandle,
+    /// Set when a document becomes ready; the next render schedules a
+    /// deferred `window.focus`, which is the safe point to move focus
+    /// (mutating focus mid-render can re-enter the frame).
+    focus_grid_on_next_frame: bool,
+
+    /// Clipboard sink. Defaults to `arboard`; tests inject a recorder.
+    clipboard: ClipboardWriter,
 }
 
-impl Default for MainView {
-    fn default() -> Self {
+impl MainView {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             generation: 0,
             model: None,
@@ -81,11 +109,12 @@ impl Default for MainView {
             selection: Selection::empty(),
             task: None,
             status_message: None,
+            focus_handle: cx.focus_handle(),
+            focus_grid_on_next_frame: false,
+            clipboard: Arc::new(system_clipboard_write),
         }
     }
-}
 
-impl MainView {
     // ---- opening ---------------------------------------------------------
 
     fn begin_open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -124,6 +153,7 @@ impl MainView {
                 self.scroll_x = 0.0;
                 self.selection.clear();
                 self.status_message = None;
+                self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
             OpenOutcome::NeedArchiveChoice(source) => {
@@ -132,6 +162,7 @@ impl MainView {
                 self.show_picker = true;
                 self.selection.clear();
                 self.status_message = None;
+                self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
             OpenOutcome::Error(message) => {
@@ -329,6 +360,17 @@ impl MainView {
             return div().into_any_element();
         };
 
+        // A document just became ready: move keyboard focus onto the
+        // grid so arrow navigation and Cmd/Ctrl+C work without a click.
+        // Focus is moved on the next frame rather than mid-render.
+        if self.focus_grid_on_next_frame {
+            self.focus_grid_on_next_frame = false;
+            let focus_handle = self.focus_handle.clone();
+            cx.defer_in(window, move |_view, window, _cx| {
+                window.focus(&focus_handle);
+            });
+        }
+
         let viewport_w: f32 =
             f32::from(window.viewport_size().width) - f32::from(theme::ROW_NUMBER_WIDTH);
         self.viewport_w = viewport_w.max(0.0);
@@ -402,6 +444,12 @@ impl MainView {
                     .flex_1()
                     .overflow_hidden()
                     .key_context("Grid")
+                    // Keyboard events are only routed to `on_key_down`
+                    // while this element holds focus. `track_focus`
+                    // also makes a mouse-down anywhere in the grid
+                    // transfer focus, so clicking a cell then pressing
+                    // Cmd/Ctrl+C works.
+                    .track_focus(&self.focus_handle)
                     .on_key_down(cx.listener(Self::on_grid_key_down))
                     .on_scroll_wheel(cx.listener(Self::on_grid_scroll))
                     .child(list),
@@ -596,7 +644,7 @@ impl MainView {
             doc.cell(r, anvil_core::ColumnIndex(c))
                 .map(|cell| cell.into_string())
         });
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+        match (self.clipboard)(&text) {
             Ok(()) => {
                 self.status_message = Some(format!("copied {count} cell{}", plural(count)));
             }
@@ -852,5 +900,98 @@ fn plural(n: u64) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    fn sample_document() -> anvil_core::ParsedDocument {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.csv");
+        std::fs::write(&path, b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n").expect("write fixture");
+        let opened = anvil_core::source::local::open_local(&path).expect("open local");
+        anvil_core::index_opened(opened)
+    }
+
+    /// Inject a ready document and focus the grid the way `render_grid`
+    /// does after an open. Returns a recorder standing in for the system
+    /// clipboard so the copy path can be asserted without side effects.
+    fn inject(cx: &mut VisualTestContext, view: &Entity<MainView>) -> Arc<Mutex<Vec<String>>> {
+        let written: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = written.clone();
+        cx.update_window_entity(view, |view, window, cx| {
+            view.model = Some(GridModel::new(Arc::new(sample_document())));
+            view.state = ViewState::Ready;
+            view.selection.set(CellPos::new(0, 0));
+            view.status_message = None;
+            view.clipboard = Arc::new(move |text: &str| {
+                sink.lock()
+                    .expect("clipboard recorder")
+                    .push(text.to_string());
+                Ok(())
+            });
+            // Exercise the production focus path: `render_grid` sees
+            // this flag and schedules a deferred `window.focus` for the
+            // grid handle. (The `window` argument is unused on purpose
+            // so the test cannot pass by focusing manually.)
+            let _ = window;
+            view.focus_grid_on_next_frame = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        written
+    }
+
+    /// Regression: keyboard events only reach `on_grid_key_down` while
+    /// the grid's focus handle is focused. Before the focus handle was
+    /// introduced the grid was never focusable, so neither arrow
+    /// navigation nor Cmd/Ctrl+C worked. This test fails if the grid
+    /// loses `track_focus` or focus is no longer transferred to it.
+    #[gpui::test]
+    async fn arrow_keys_move_selection_when_grid_focused(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.simulate_keystrokes("down");
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
+        });
+
+        cx.simulate_keystrokes("right");
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
+        });
+    }
+
+    /// Regression for the reported "Cmd+C does nothing" bug. The
+    /// shortcut only reaches `on_grid_key_down` while the grid is
+    /// focused; this asserts the handler runs, reports a count, and
+    /// writes the expected TSV to the clipboard sink.
+    #[gpui::test]
+    async fn copy_shortcut_reaches_handler_when_grid_focused(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let written = inject(cx, &view);
+
+        let copy_keystroke = if cfg!(target_os = "macos") {
+            "cmd-c"
+        } else {
+            "ctrl-c"
+        };
+        cx.simulate_keystrokes(copy_keystroke);
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.status_message.as_deref(), Some("copied 1 cell"));
+        });
+
+        // The selection is the single cell (0, 0), whose value in the
+        // sample document is "1".
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        let captured = written.lock().expect("clipboard recorder").clone();
+        assert_eq!(captured, vec![format!("1{ending}")]);
     }
 }

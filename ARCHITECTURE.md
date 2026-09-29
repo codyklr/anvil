@@ -193,6 +193,9 @@ The `MainView` owns:
 | `selection: Selection` | Current cell / range selection (see below).     |
 | `task: Option<Task<()>>`            | Outstanding background task handle.     |
 | `status_message: Option<String>`    | Transient status-bar message (e.g. "copied N cells"). Cleared on every `OpenOutcome`. |
+| `focus_handle: FocusHandle` | Keyboard focus target for the grid. The grid element carries `.track_focus(...)`; keyboard events are only delivered to `on_grid_key_down` while this handle is focused. |
+| `focus_grid_on_next_frame: bool` | Set when a document becomes ready. The next `render_grid` schedules a deferred `window.focus`, the safe point to move focus. |
+| `clipboard: ClipboardWriter` | `Arc<dyn Fn(&str) -> Result<(), String>>`; defaults to `arboard`, replaced by a recorder in UI tests. |
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
 Both are cheap to clone, so the uniform-list row renderer can capture
@@ -250,9 +253,26 @@ the others are silently ignored.
 
 ### Keyboard handling
 
-The grid div carries `key_context("Grid")` and an `on_key_down`
-listener that delegates to `MainView::on_grid_key_down`. Recognised
-keys:
+The grid div carries `key_context("Grid")`, `.track_focus(&self.focus_handle)`,
+and an `on_key_down` listener that delegates to
+`MainView::on_grid_key_down`. **Focus is a prerequisite**: GPUI only
+delivers key events to the focused element's path, so without
+`track_focus` the listener never runs and the whole keyboard surface
+(arrows, Page Up/Down, Home/End, Esc, Cmd/Ctrl+C) is dead. This was a
+real bug for one iteration; two UI regression tests now fail if the
+grid stops tracking focus (see Testing).
+
+Focus is moved to the grid:
+
+* when a document becomes ready — `apply` sets
+  `focus_grid_on_next_frame`, and `render_grid` schedules a deferred
+  `window.focus` (focus is not mutated mid-render, which can re-enter
+  the frame); and
+* on any mouse-down inside the grid — `.track_focus` registers a
+  bubble-phase listener that focuses the grid, so clicking a cell then
+  pressing Cmd/Ctrl+C works.
+
+Recognised keys:
 
 | Key            | Action                                                       |
 |----------------|--------------------------------------------------------------|
@@ -265,11 +285,9 @@ keys:
 Shift held during arrow / Page / Home / End extends the selection
 instead of replacing it. `Cmd/Ctrl+C` matches `keystroke.modifiers.secondary()`
 (Cmd on macOS, Ctrl on Linux/Windows) with no Alt/Fn; this avoids
-eating variant chords like `Alt+C`. The grid div is not focusable
-in the traditional sense today; the `key_context` is wired so that a
-future focus handle can scope keys here without renaming them. A
-real focus handle and `cx.bind_keys` will be added when the keyboard
-surface grows (search / filter / go-to-row).
+eating variant chords like `Alt+C`. The `key_context` scopes future
+`Action`-based bindings; `cx.bind_keys` will be added when the
+keyboard surface grows (search / filter / go-to-row).
 
 ## Selection model
 
@@ -1002,7 +1020,24 @@ of decompression + temp-file write + mmap.
 ### What exists today
 
 `tests/core.rs` — 52 integration tests in one file. They run without
-a GUI and are the primary CI signal.
+a GUI and are the primary CI signal. `src/selection.rs` additionally
+carries 25 unit tests.
+
+`src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
+`TestAppContext` (`gpui` `test-support` dev-dependency) with two UI
+regression tests:
+
+* `arrow_keys_move_selection_when_grid_focused` — injects a ready
+document, lets `render_grid` schedule the production deferred focus,
+and asserts arrow keys move the cursor.
+* `copy_shortcut_reaches_handler_when_grid_focused` — same setup, then
+dispatches Cmd/Ctrl+C and asserts the status message and the exact TSV
+written to an injected clipboard recorder (the real clipboard is
+never touched).
+
+Both were confirmed to fail when `.track_focus(&self.focus_handle)` is
+removed from the grid, so they genuinely guard the focus-routing
+invariant described under Keyboard handling.
 
 | Group                  | Tests                                                                 |
 |------------------------|-----------------------------------------------------------------------|
@@ -1014,6 +1049,7 @@ a GUI and are the primary CI signal.
 | Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
+| UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler and writes the expected TSV (via an injected recorder) |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
 In addition, `src/selection.rs` carries 25 unit tests for the
@@ -1022,8 +1058,7 @@ original 11 plus 14 covering `cell_count` and `copy_text_with`
 (empty / single / row / column ranges, special-char escaping,
 out-of-bounds cells, line-ending correctness, normalisation).
 
-There are **no** UI tests yet. `anvil --probe` exists as a manual
-smoke test for the open path.
+`anvil --probe` exists as a manual smoke test for the open path.
 
 ### Planned coverage
 
@@ -1045,6 +1080,7 @@ smoke test for the open path.
 | `thiserror`         | 1       | Error enum derive                                | Typed errors                           | None                                                  |
 | `arboard`           | 3       | Cross-platform clipboard (text only)             | Cmd/Ctrl+C clipboard copy              | `default-features = false` to skip image support; used only by the `anvil` binary |
 | `crc32fast` (dev)   | 1       | CRC32                                            | Build hand-crafted ZIPs in tests       | Test-only                                           |
+| `gpui` (dev)        | 0.2.2   | Headless UI test harness (`test-support`)        | UI focus / keyboard regression tests   | Dev-only; release builds keep the minimal `gpui` surface. Pulls in a large transitive tree (reqwest, git2, image, …) so `cargo test` is heavier than `cargo build` |
 
 Notes:
 
@@ -1052,6 +1088,11 @@ Notes:
   `font-kit` feature. This avoids pulling in GPUI's HTTP / media /
   refineable features we do not use. If we add any of those features
   the `Cargo.toml` change must be reviewed.
+- The dev-dependency enables `test-support` so `TestAppContext` is
+  available in `#[gpui::test]` tests. Feature unification is per
+  build; `cargo build --release` does not enable it (verified: the
+  release build finishes without recompiling `gpui`). The cost is
+  paid only by `cargo test`.
 - No `serde`, no `tokio`, no `log`, no `tracing`. The architecture is
   deliberately small.
 
@@ -1061,18 +1102,21 @@ Notes:
 
 - Selection, basic keyboard navigation (arrow keys, Page Up/Down,
   Home/End, Esc), and clipboard copy (Cmd/Ctrl+C, TSV via
-  `arboard`) are wired. `anvil_core::Selection` carries 25 unit
-  tests + 14 integration tests; the clipboard formatter and the
-  cell-count helper are covered end-to-end against real
-  `ParsedDocument`s. Click-and-drag selection is still not wired.
+  `arboard`) are wired. Keyboard handling requires the grid to hold
+  focus; two UI regression tests guard this. `anvil_core::Selection`
+  carries 25 unit tests + 14 integration tests; the clipboard
+  formatter and cell-count helper are covered end-to-end against
+  real `ParsedDocument`s. Click-and-drag selection is still not
+  wired.
 - No search, no filter, no sort, no type inference, no column
   statistics. Milestones 2–3.
 - The status bar reports a warning count but cannot navigate to the
   offending row. Milestone 4.
 - No progress UI for extraction / indexing. Milestone 5.
 - No themes, no light mode. Milestone 5.
-- `--probe` is the only headless harness; the GPUI window has no
-  automated smoke test.
+- UI coverage is limited to two focus/keyboard tests; there is no
+  automated test of drag/drop, the archive picker, or the toolbar.
+  `--probe` remains the only headless data-path harness.
 
 ### Performance gaps
 
@@ -1160,6 +1204,12 @@ change architecture and update this file.
     owns the `Arc<TempDir>`. Dropping the `OpenedSource` removes the
     temp directory; do not store temp paths separately or skip the
     `Arc<TempDir>`.
+11. **The grid owns keyboard focus.** `MainView.focus_handle` is
+    attached to the grid via `.track_focus`, and the view focuses it
+    when a document is applied and on mouse-down. GPUI only delivers
+    key events to the focused path, so dropping `track_focus`
+    silently disables every grid shortcut. The UI regression tests
+    in `src/ui/view.rs` fail if this regresses.
 
 ## Planned Architectural Evolution
 
@@ -1173,10 +1223,12 @@ restructuring. Specifically:
   `view.rs::on_grid_key_down`; a dedicated `commands` module will be
   extracted once search / filter / go-to-row add their keybindings.
   Clipboard copy is implemented: `Selection::copy_text_with`
-  renders TSV; `MainView::copy_selection_to_clipboard` writes it
-  via `arboard`; `MainView::status_message` shows "copied N cells"
-  in the status bar. Click-and-drag selection and Cmd/Ctrl+Home/End
-  remain outstanding.
+  renders TSV; `MainView::copy_selection_to_clipboard` writes through
+  the injectable `ClipboardWriter` (default `arboard`);
+  `MainView::status_message` shows "copied N cells" in the status
+  bar. The grid tracks `MainView.focus_handle` so keyboard events
+  reach `on_grid_key_down`; two UI tests guard the focus path.
+  Click-and-drag selection and Cmd/Ctrl+Home/End remain outstanding.
 - **Search (Milestone 2).** A `query::search` module owns the
   in-progress search: input string, options (case sensitivity,
   column scope), and an `Arc<Mutex<Vec<record_index>>>` shared

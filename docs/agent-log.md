@@ -521,3 +521,155 @@ Milestone 2 task that touches new surface area:
 The current selection type carries `(record_index, column_index)`
 ranges, which is exactly what search highlights need; landing
 search now makes full use of the slice already in place.
+
+---
+
+## 2026-10-02 — Fix: grid keyboard focus (Cmd/Ctrl+C and navigation)
+
+### Context
+
+A user reported that Cmd+C did not copy in a CSV on macOS. The
+clipboard slice from the previous iteration had added the TSV
+formatter and the keybinding, and the data-side tests all passed, so
+the failure had to be in the UI event path. Investigation of GPUI's
+focus model showed the real cause: `on_key_down` only fires for
+elements in the **focused** element's path, and the grid div had
+`key_context("Grid")` and an `on_key_down` listener but **no
+`FocusHandle` and no `.track_focus(...)`**. The grid was therefore
+never focusable, and *no* grid keyboard event ever reached
+`MainView::on_grid_key_down` — this silently broke Cmd/Ctrl+C, arrow
+navigation, Page Up/Down, Home/End, and Esc. The previous agent log
+had ticked the arrow-key/Home/End tasks and explicitly deferred
+manual keyboard exercise, which is how the gap went unnoticed.
+
+### Implemented
+
+- `MainView.focus_handle: FocusHandle`, created via `MainView::new(cx)`
+  (`cx.focus_handle()`). `MainView::default()` was removed; `app.rs`
+  now builds the view with `cx.new(MainView::new)`.
+- The grid container in `render_grid` now carries
+  `.track_focus(&self.focus_handle)`. This registers the element in
+  the focus path and lets mouse-down anywhere in the grid transfer
+  focus (GPUI's documented behaviour for `track_focus`).
+- `MainView.focus_grid_on_next_frame: bool`, set in `apply` when a
+  document becomes ready. `render_grid` schedules a deferred
+  `cx.defer_in(window, ...)` focus call rather than mutating focus
+  mid-render (which can re-enter the frame).
+- **Made the clipboard sink injectable** so the UI tests can assert
+  the copy payload without writing to the real system clipboard:
+  `type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>`,
+  `MainView.clipboard`, defaulting to `system_clipboard_write`
+  (`arboard`). `copy_selection_to_clipboard` calls the field. This
+  also made the `arboard` call site testable.
+- **Added a GPUI UI-test harness** (`gpui` `test-support`
+  dev-dependency) and a `#[cfg(test)]` module in `src/ui/view.rs`.
+
+### Verified
+
+- Reproduced the bug as a test first:
+  `arrow_keys_move_selection_when_grid_focused` fails when
+  `.track_focus(&self.focus_handle)` is removed (cursor stays at
+  `(0,0)` after `down`) and passes when it is present. Re-verified
+  after switching the test to the production deferred-focus path.
+- `cargo test --release` — 79 passed (25 lib + 2 UI + 52 integration),
+  0 failed, 1 ignored.
+- `cargo test --release --bin anvil` — 2 UI tests pass:
+  `arrow_keys_move_selection_when_grid_focused`,
+  `copy_shortcut_reaches_handler_when_grid_focused`.
+- Clipboard side-effect check: set the clipboard to a sentinel with
+  `pbcopy`, ran the UI tests, confirmed the sentinel is unchanged
+  (`pbpaste`). The tests use the injected recorder, not `arboard`.
+- `cargo clippy --release --all-targets` — clean (fixed one
+  pre-existing `byte_char_slices` nit in `tests/core.rs`).
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds; verified the `test-support`
+  dev-dependency does **not** affect release builds (`gpui` is not
+  recompiled and the release binary runs).
+- `./target/release/anvil` — launches and runs for 5 s with no panic
+  (killed by timeout, exit 124).
+
+### Tests added / changed
+
+- 2 new UI tests in `src/ui/view.rs`:
+  - `arrow_keys_move_selection_when_grid_focused` — injects a ready
+    document, lets `render_grid` schedule the production deferred
+    focus, dispatches `down` / `right`, asserts the cursor moves.
+  - `copy_shortcut_reaches_handler_when_grid_focused` — dispatches
+    Cmd/Ctrl+C, asserts the status message is `copied 1 cell`, and
+    asserts the exact TSV (`1\n`, or `1\r\n` on Windows) was written
+    to the injected clipboard recorder.
+- Fixed a pre-existing clippy `byte_char_slices` warning in
+  `tests/core.rs` (`[b';', b'|']` → `*b";|"`).
+- No data-side tests changed.
+
+### Roadmap changes
+
+- Milestone 2 Tests: added and ticked “UI regression tests for grid
+  focus / keyboard routing”.
+- Milestone 2 Dependencies: recorded the dev-only `gpui`
+  `test-support` feature.
+- Milestone 5: added a “Test coverage” task to extend the GPUI test
+  suite to drag/drop, the archive picker, and toolbar clicks.
+- The arrow/Page/Home/End checkboxes remain ticked; they are now
+  genuinely verified rather than only code-present.
+
+### Architecture changes
+
+- `ARCHITECTURE.md` state table: added `focus_handle`,
+  `focus_grid_on_next_frame`, and `clipboard`.
+- “Keyboard handling” section rewritten: focus is an explicit
+  prerequisite; documents the deferred-focus and mouse-down focus
+  paths and that `on_key_down` is dead without `track_focus`.
+- New architectural invariant 11: “The grid owns keyboard focus.”
+- Testing section rewritten: documents the GPUI `TestAppContext`
+  harness, the two UI tests, and that they fail without
+  `track_focus`. Test group table gained a UI row.
+- Important Dependencies: added the dev-only `gpui` `test-support`
+  row and a note on feature unification (release builds unaffected).
+- “Selection / navigation / clipboard” planned-evolution bullet now
+  records the focus path and the injectable `ClipboardWriter`.
+
+### Issues / technical debt discovered
+
+- The previous iteration shipped keyboard navigation that never
+  worked in the GUI because no UI test exercised focus. The new
+  harness closes that class of gap for the grid, but drag/drop, the
+  archive picker, and toolbar clicks still have no automated test.
+- `gpui` `test-support` pulls in a large transitive tree (reqwest,
+  git2, image, resvg, …). It is dev-only and release builds are
+  unaffected, but `cargo test` now compiles substantially more. If
+  this becomes a CI burden, consider whether the harness should be
+  an opt-in feature.
+- `render_grid` still focuses the grid whenever
+  `focus_grid_on_next_frame` is set; once a search input or filter
+  field exists, that path must not steal focus from a text field.
+  The flag is only set on `OpenOutcome`, so today it is safe, but the
+  next text-input feature must revisit it.
+- The inline `on_grid_key_down` handler is now genuinely load-bearing
+  (it was previously dead code). The `commands` module extraction is
+  more important than before; `view.rs` is ~980 lines.
+
+### Open loops
+
+- Manual GUI verification of the actual macOS Cmd+C keystroke was not
+  performed (no automated way to drive the release app). The UI test
+  exercises the same GPUI focus + key-dispatch path with the
+  production focus scheduling, and the clipboard formatter is
+  covered by 22 data-side tests, so confidence is high; a human
+  smoke test on macOS is still worthwhile.
+- `MainView.status_message` still does not auto-expire.
+- `AnvilError` dead variants (`NotAZip`, `AmbiguousArchive`,
+  `LooksBinary`) remain unwired.
+
+### Next recommended task
+
+Proceed with **search** (`Cmd/Ctrl+F`) as previously planned — but
+first extract the `commands` module, because the keyboard handler is
+now real, growing, and overdue for the refactor:
+
+1. Move `on_grid_key_down` routing into `commands` (search, filter,
+   clipboard, navigation). Keep `MainView` methods; just relocate
+   dispatch.
+2. Add `anvil_core::query::search(doc, needle, opts) -> Vec<u64>`.
+3. Add the search-bar overlay and background-task cancellation.
+4. Add a UI test for the search bar, using the harness now in place.

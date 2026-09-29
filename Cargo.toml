@@ -41,6 +41,10 @@ arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
 crc32fast = "1"
+# Enable GPUI's headless test harness only for tests. `test-support`
+# pulls in the deterministic executor and `TestAppContext`; it is a
+# dev-only feature so release builds keep the minimal gpui surface.
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "test-support"] }
 
 [profile.dev]
 opt-level = 1

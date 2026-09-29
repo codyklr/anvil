@@ -20,7 +20,7 @@ pub fn run() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| MainView::default()),
+            |_, cx| cx.new(MainView::new),
         )
         .expect("could not open main window");
         cx.activate(true);
