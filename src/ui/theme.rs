@@ -35,6 +35,10 @@ pub const BG_MATCH: Rgba = rgb(0x4a3a00);
 /// Slightly stronger tint for the row currently selected by the
 /// search (the "active" match).
 pub const BG_MATCH_ACTIVE: Rgba = rgb(0x6b5400);
+/// Bright highlight drawn behind the literal matched substring inside
+/// each cell. Distinct from the row tint so the user can see not just
+/// "this row matches" but also "this part of the cell is the match".
+pub const BG_MATCH_TEXT: Rgba = rgb(0xc69400);
 
 pub const BORDER: Rgba = rgb(0x3c3c3c);
 pub const BORDER_STRONG: Rgba = rgb(0x505050);

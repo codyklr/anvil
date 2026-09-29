@@ -139,10 +139,15 @@ anvil/
   sensitivity is implemented with `memchr::memmem::Finder` for the
   case-sensitive path and a sliding-window ASCII lowercase for the
   case-insensitive path; the byte scan is SIMD-accelerated.
+- `query::find_ranges` — given a cell's bytes and the needle,
+  returns the byte ranges of every match. Used by the grid renderer
+  to highlight the literal matched substring inside each cell.
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
   for horizontal virtualization. Per-cell `on_mouse_down` for
   selection. Matched search rows are tinted `BG_MATCH`; the active
-  row uses `BG_MATCH_ACTIVE`.
+  row uses `BG_MATCH_ACTIVE`; the literal matched substring inside
+  each cell is drawn with a brighter `BG_MATCH_TEXT` background so
+  the user can see *where* in the row the match is.
 - `ui::commands` — pure `Keystroke` → `Action` binding table
   (`MoveCursor`, `Copy`, `Escape`, `OpenSearch`, `NextMatch`), with
   unit tests; no window or view state dependencies.
@@ -1110,8 +1115,9 @@ of decompression + temp-file write + mmap.
 
 `tests/core.rs` — 60 integration tests in one file. They run without
 a GUI and are the primary CI signal. `src/selection.rs` additionally
-carries 25 unit tests. `src/query.rs` carries 13 unit tests for
-`search` / `SearchOptions` / the `ascii_lower` helper.
+carries 25 unit tests. `src/query.rs` carries 22 unit tests for
+`search` / `SearchOptions` / `find_ranges` / the `ascii_lower`
+helper.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
 `TestAppContext` (`gpui` `test-support` dev-dependency) with nine UI
@@ -1256,9 +1262,11 @@ Notes:
 - No progress UI for extraction / indexing. Milestone 5.
 - No themes, no light mode. Milestone 5.
 - UI coverage is now nine UI regression tests (focus, copy, drag,
-  auto-scroll, search bar) plus the two `rect_contains` unit tests;
-  there is still no automated test of drag/drop or the toolbar.
-  `--probe` remains the only headless data-path harness.
+  auto-scroll, search bar) plus the two `rect_contains` unit tests
+  and two `render_row` smoke tests (substring highlight path
+  exercised; non-match row path exercised); there is still no
+  automated test of drag/drop or the toolbar. `--probe` remains
+  the only headless data-path harness.
 
 ### Performance gaps
 
@@ -1401,7 +1409,11 @@ restructuring. Specifically:
   Each match jump sets the selection cursor and calls
   `scroll_to_item_strict(.., ScrollStrategy::Top)` so the matched row
   is visible. Match rows are tinted `BG_MATCH`; the active row uses
-  the stronger `BG_MATCH_ACTIVE`. The bar's focus handle is
+  the stronger `BG_MATCH_ACTIVE`; the literal matched substring
+  inside each cell is drawn with a brighter `BG_MATCH_TEXT`
+  background so the user can see *where* in the row the match is.
+  The byte ranges come from `anvil_core::find_ranges`, called per
+  visible cell of a match row. The bar's focus handle is
   independent of the grid's, so typed characters route through
   `on_search_key_down` rather than moving the cursor. Cmd/Ctrl+F is
   a no-op when the bar is already open. The bar sits as a

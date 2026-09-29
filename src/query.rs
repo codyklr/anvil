@@ -161,6 +161,41 @@ impl<'a> FinderHandle<'a> {
     }
 }
 
+/// Returns the byte ranges of every occurrence of `needle` inside
+/// `haystack`, suitable for substring highlighting. Empty when
+/// `needle` does not occur or when either side is empty.
+///
+/// When `case_sensitive` is `true` the comparison is byte-exact and
+/// the SIMD-accelerated `memchr::memmem::find_iter` is used. When
+/// `false` ASCII case folding is used: we lowercase the entire
+/// `haystack` into a single owned buffer and run `find_iter` against
+/// that. The cost is one allocation per call; the caller (currently
+/// only the grid renderer) drives this only for visible cells in
+/// matched rows, so the cost stays bounded.
+///
+/// The ranges are in `&[u8]` byte coordinates; the caller is
+/// responsible for translating them into whatever character /
+/// unicode coordinates the renderer requires.
+pub fn find_ranges(
+    haystack: &[u8],
+    needle: &[u8],
+    case_sensitive: bool,
+) -> Vec<std::ops::Range<usize>> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return Vec::new();
+    }
+    if case_sensitive {
+        memchr::memmem::find_iter(haystack, needle)
+            .map(|start| start..start + needle.len())
+            .collect()
+    } else {
+        let lowered: Vec<u8> = haystack.iter().map(|b| ascii_lower(*b)).collect();
+        memchr::memmem::find_iter(&lowered, needle)
+            .map(|start| start..start + needle.len())
+            .collect()
+    }
+}
+
 fn cell_matches(cell: &Cell<'_>, finder: &FinderHandle<'_>) -> bool {
     finder.matches(cell.as_bytes())
 }
@@ -361,5 +396,65 @@ mod tests {
         assert_eq!(ascii_lower(b'1'), b'1');
         assert_eq!(ascii_lower(b','), b',');
         assert_eq!(ascii_lower(0xC3), 0xC3);
+    }
+
+    // ---- find_ranges -----------------------------------------------------
+
+    #[test]
+    fn find_ranges_case_sensitive_single_match() {
+        let r = find_ranges(b"hello world", b"world", true);
+        assert_eq!(r, vec![6..11]);
+    }
+
+    #[test]
+    fn find_ranges_case_sensitive_multiple_matches() {
+        let r = find_ranges(b"foo bar foo baz foo", b"foo", true);
+        assert_eq!(r, vec![0..3, 8..11, 16..19]);
+    }
+
+    #[test]
+    fn find_ranges_case_sensitive_no_match() {
+        assert!(find_ranges(b"hello", b"world", true).is_empty());
+    }
+
+    #[test]
+    fn find_ranges_case_insensitive_matches_mixed_case() {
+        let r = find_ranges(b"FOO foo FoO", b"foo", false);
+        assert_eq!(r, vec![0..3, 4..7, 8..11]);
+    }
+
+    #[test]
+    fn find_ranges_case_sensitive_respects_case() {
+        let r = find_ranges(b"FOO foo", b"foo", true);
+        assert_eq!(r, vec![4..7]);
+    }
+
+    #[test]
+    fn find_ranges_empty_needle_returns_no_ranges() {
+        let r = find_ranges(b"hello", b"", true);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn find_ranges_needle_longer_than_haystack_returns_no_ranges() {
+        let r = find_ranges(b"hi", b"hello", true);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn find_ranges_empty_haystack_returns_no_ranges() {
+        let r = find_ranges(b"", b"foo", true);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn find_ranges_overlapping_matches() {
+        // "aaaa" has two occurrences of "aa": positions 0..2 and 2..4.
+        // memchr's find_iter does not return overlapping matches, but
+        // for typical search needles (longer than 1 byte) this case
+        // is rare in real CSV data. We assert the documented
+        // behaviour: non-overlapping.
+        let r = find_ranges(b"aaaa", b"aa", true);
+        assert_eq!(r, vec![0..2, 2..4]);
     }
 }

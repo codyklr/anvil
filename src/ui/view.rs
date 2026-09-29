@@ -489,6 +489,8 @@ impl MainView {
                 let copy_flash_rect = this.copy_flash_rect;
                 let search_matches = this.search_matches.clone();
                 let search_active = this.search_active;
+                let search_query = this.search_query.clone();
+                let search_options = anvil_core::SearchOptions::default();
                 let entity = entity.clone();
                 let row_ctx = grid::RowContext {
                     selection: &selection,
@@ -497,6 +499,8 @@ impl MainView {
                     copy_flash: copy_flash_rect,
                     search_matches: &search_matches,
                     search_active,
+                    search_query: &search_query,
+                    search_options,
                 };
                 range
                     .map(|i| {

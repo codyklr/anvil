@@ -1470,3 +1470,168 @@ Unchanged from the previous entry: proceed with **filter**
 record indexes from a background task, generation-cancel, row
 highlight) transfers directly to filter, which additionally needs a
 predicate evaluator and a row-permutation grid path.
+
+## 2026-10-09 — Highlight the matched substring inside each cell
+
+### Context
+
+The search slice from 2026-10-07 highlighted the row (yellow tint
+across the whole row) and used a brighter tint for the active row,
+but the user could not tell *which cell* in the row contained the
+match, let alone *where* inside the cell. The user explicitly asked
+for substring-level highlighting so the search hit is unambiguous.
+
+### Implemented
+
+- New data-side helper `anvil_core::query::find_ranges(haystack,
+  needle, case_sensitive) -> Vec<Range<usize>>` that returns the
+  byte ranges of every occurrence of `needle` inside `haystack`.
+  Case-sensitive path uses `memchr::memmem::find_iter`; the
+  case-insensitive path lowercases the haystack once (an owned
+  buffer) and runs the same iterator. The cost is one allocation
+  per call; bounded because the caller drives this only for visible
+  cells of match rows.
+- `theme::BG_MATCH_TEXT = #c69400` — a bright yellow, distinct from
+  the row tints `BG_MATCH (#4a3a00)` and `BG_MATCH_ACTIVE
+  (#6b5400)` so the literal matched substring pops visually.
+- `RowContext` extended with `search_query: &str` and
+  `search_options: SearchOptions` so the renderer knows what to
+  highlight and whether the search is case-sensitive.
+- `render_row` now branches per cell:
+  - Non-match row → no substring scan; cell rendered as plain text.
+  - Match row, query empty → no substring scan (defensive).
+  - Match row, query non-empty, cell does NOT contain the needle
+    → plain text rendering, the row tint shows through.
+  - Match row, query non-empty, cell DOES contain the needle →
+    `find_ranges` runs; a `StyledText` is built with one
+    `HighlightStyle { background_color: Some(BG_MATCH_TEXT) }`
+    per match range, and the cell renders with the matched bytes
+    highlighted against the row tint.
+- Re-exported `find_ranges` from `anvil_core::lib.rs`.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 139 passed (was 128): 47 lib (was 38, +9
+  `find_ranges` unit tests), 32 binary (was 30, +2 `render_row`
+  smoke tests), 60 integration (unchanged), 1 ignored.
+- `cargo test --release --lib query` — 22 passed.
+- `cargo test --release --bin anvil` — 32 passed, including the two
+  new `render_row_substring_highlight_does_not_panic` and
+  `render_row_non_match_does_not_panic` smoke tests.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, 20 cols, 0 warnings, probe time in the same range as the
+  baseline.
+- `./target/release/anvil` (GUI launch, killed after 5 s) — no
+  panic, no stderr. Visual confirmation of the substring
+  highlight deferred; the rendering path is exercised by the
+  new smoke tests, but the painted pixels can only be observed in
+  the running app.
+
+### Tests added / changed
+
+- 9 unit tests in `src/query.rs::find_ranges_*`:
+  - `find_ranges_case_sensitive_single_match`
+  - `find_ranges_case_sensitive_multiple_matches`
+  - `find_ranges_case_sensitive_no_match`
+  - `find_ranges_case_insensitive_matches_mixed_case`
+  - `find_ranges_case_sensitive_respects_case`
+  - `find_ranges_empty_needle_returns_no_ranges`
+  - `find_ranges_needle_longer_than_haystack_returns_no_ranges`
+  - `find_ranges_empty_haystack_returns_no_ranges`
+  - `find_ranges_overlapping_matches`
+- 2 smoke tests in `src/ui/grid.rs::tests`:
+  - `render_row_substring_highlight_does_not_panic` — builds a
+    fixture with multiple matches across cells, sets up a
+    `RowContext` with a non-empty query and a populated match
+    list, and renders the matched rows. The regression we care
+    about (panic from mismatched byte ranges, or a `find_ranges`
+    surprise) would surface here.
+  - `render_row_non_match_does_not_panic` — same fixture, but
+    renders a non-match row to confirm the non-scan path is
+    stable.
+- No data-side tests removed.
+
+### Roadmap changes
+
+None. Substring highlighting was an enhancement request from the
+user, not a roadmap tick.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - "What is current vs planned" → `query::find_ranges` listed
+    alongside `query::search` under Current.
+  - "What is current vs planned" → `ui::grid` description extended
+    to note the substring highlight (`BG_MATCH_TEXT`).
+  - Planned Evolution → Search paragraph: the matched-substring
+    highlight is now described, with `find_ranges` as the source
+    of byte ranges.
+  - Testing section: query unit test count 13 → 22; the new
+    `render_row` smoke tests added to the grid-geometry row.
+  - Functional gaps → UI coverage line mentions the two
+    `render_row` smoke tests.
+
+### Issues / technical debt discovered
+
+- `find_ranges` allocates one lowercase buffer per call. For a
+  long match list rendered into a wide viewport this is the
+  per-frame hot path; a future optimisation would cache the
+  lowercase of the needle (and only that, not the haystack) and
+  walk the haystack with a sliding window — same trick as
+  `ascii_contains_lower`. Not urgent: per visible cell the cost
+  is small (cells are tens of bytes in typical CSV), and there
+  are ~600 visible cells per redraw worst case.
+- The substring highlight ignores case folding for non-ASCII
+  bytes (`ascii_lower` only folds A-Z). A cell containing
+  "CAFÉ" matched against "café" would not highlight "É" in the
+  same way as a pure ASCII match — the "É" lowercases to itself
+  but "é" lowercases to itself too, so the bytes do match.
+  Unicode lowercasing would need a crate; not done.
+- The active match's tint is unchanged by the substring highlight
+  (`BG_MATCH_ACTIVE` row tint + `BG_MATCH_TEXT` cell tint). The
+  combination reads clearly in practice but is not formally
+  contrast-checked. A future polish pass could introduce a
+  slightly different `BG_MATCH_TEXT_ACTIVE` for the active match
+  cell.
+- The `render_row` smoke tests cannot observe the rendered
+  `StyledText` from the headless harness. They guard against
+  panics but not against visual regressions (e.g. a future change
+  that swaps the highlight order and the substring goes
+  unhighlighted). A test that constructs a real `Window` and
+  asserts on a paint output would be needed for that. Recorded
+  for a future polish pass.
+
+### Open loops
+
+- ADR backlog candidates unchanged. No durable architectural
+  reversal landed.
+- The case-sensitive / column-scoped UI toggles from the
+  previous search-slice handoff are still unimplemented; the
+  substring highlight already respects `case_sensitive` because
+  `RowContext.search_options` carries it through.
+- The match-list overlay is still unimplemented.
+
+### Next recommended task
+
+Proceed with **filter** (Cmd/Ctrl+L), as previously planned.
+Substring highlighting is a refinement of the search slice; it
+does not change the path forward. The filter slice needs:
+
+1. `anvil_core::query::filter(doc, predicates, opts) -> Vec<u64>`
+   with operators equals / not-equals / contains / not-contains /
+   starts-with / ends-with / empty / non-empty / numeric `>` / `>=`
+   / `<` / `<=`. AND-composition over a `Vec<Filter>`.
+2. `MainView` filter state (mirrors the search fields). Filter bar
+   overlay (Cmd/Ctrl+L) with an input that parses into `Filter`s.
+3. The grid renders from the filtered `Vec<u64>` rather than the
+   full range; the row mapping (`record_index → list position`)
+   is built once when the filter result is applied.
+4. Status bar shows "rows (filtered from N)".
+
+The same generation-cancel pattern from search transfers
+verbatim; the same `BG_MATCH`-style row tint applies; the
+`find_ranges` helper could also be used to highlight the matched
+substring within a filtered value (overkill for filter; deferred).

@@ -8,9 +8,12 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, rgb, IntoElement, MouseDownEvent, MouseMoveEvent, Pixels};
+use gpui::{
+    div, prelude::*, px, rgb, HighlightStyle, Hsla, IntoElement, MouseDownEvent, MouseMoveEvent,
+    Pixels, SharedString, StyledText,
+};
 
-use anvil_core::{CellPos, ColumnIndex, ParsedDocument, Selection};
+use anvil_core::{find_ranges, CellPos, ColumnIndex, ParsedDocument, SearchOptions, Selection};
 
 use super::theme;
 
@@ -219,6 +222,16 @@ pub struct RowContext<'a> {
     /// row is painted with `BG_MATCH_ACTIVE`; all other matches are
     /// `BG_MATCH`.
     pub search_active: i64,
+    /// The needle the user typed. Empty when there is no search.
+    /// Used to highlight the matched substring within each cell of a
+    /// match row; rendering skips the substring scan when the row is
+    /// not a match, so the cost is bounded to ~30 visible rows × ~6
+    /// columns on the 1M-row fixture.
+    pub search_query: &'a str,
+    /// Search options that affect highlighting (currently
+    /// `case_sensitive`). The data-side `find_ranges` honours this;
+    /// rendering does not re-derive anything from it.
+    pub search_options: SearchOptions,
 }
 
 /// Renders a single data row. `index` is the 0-based record index.
@@ -255,15 +268,37 @@ where
     let copy_flash = ctx.copy_flash;
     let search_matches = ctx.search_matches;
     let search_active = ctx.search_active;
+    let search_query = ctx.search_query;
+    let search_options = &ctx.search_options;
+
+    // Row-level search state. Computed once for the row and reused
+    // per cell so the binary_search into `search_matches` does not
+    // repeat. Substring highlighting fires on any match row, not
+    // just the active row, so every matched row's cells get the
+    // `find_ranges` scan.
+    let row_search_match = search_matches.binary_search(&index).is_ok();
+    // The needle as bytes for `find_ranges` is only needed when this
+    // is a match row, the needle is non-empty, and we are about to
+    // render a cell whose bytes are available.
+    let needle_bytes = if row_search_match && !search_query.is_empty() {
+        Some(search_query.as_bytes())
+    } else {
+        None
+    };
+
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
     for col in vis {
-        let text = model
+        // Borrow the cell's bytes (zero-copy from the mmap) for the
+        // substring scan; convert to a String only when actually
+        // rendering. When the cell is missing, `bytes` is `None` and
+        // we render the empty-cell glyph.
+        let cell_bytes_opt = model
             .doc
             .cell(index, ColumnIndex(col))
-            .map(|c| c.into_string())
-            .unwrap_or_default();
+            .map(|c| c.into_string());
+        let text = cell_bytes_opt.clone().unwrap_or_default();
         let is_selected = selection.contains(index, col);
         let is_flashed = rect_contains(copy_flash, index, col);
         let down_handler = mouse_down.clone();
@@ -280,8 +315,28 @@ where
         }
         if text.is_empty() {
             cell_div = cell_div.text_color(theme::TEXT_EMPTY).child("∅");
+        } else if let (Some(needle), Some(text_owned)) = (needle_bytes, cell_bytes_opt.as_ref()) {
+            // Match row: highlight every occurrence of the needle
+            // inside the cell text. We use `find_ranges` (data-side)
+            // for the byte positions, then build a `StyledText` with
+            // one HighlightStyle per match. The cost is one
+            // case-folded lowercase copy per visible cell in a match
+            // row; cheap in practice (~30 visible rows × ~6 columns).
+            let ranges = find_ranges(text_owned.as_bytes(), needle, search_options.case_sensitive);
+            if ranges.is_empty() {
+                // Row matched but this cell did not — render plain.
+                cell_div = cell_div.child(SharedString::from(text_owned.clone()));
+            } else {
+                let highlight = HighlightStyle {
+                    background_color: Some(Hsla::from(theme::BG_MATCH_TEXT)),
+                    ..Default::default()
+                };
+                let styled = StyledText::new(SharedString::from(text_owned.clone()))
+                    .with_highlights(ranges.into_iter().map(|r| (r, highlight)));
+                cell_div = cell_div.child(styled);
+            }
         } else {
-            cell_div = cell_div.child(text);
+            cell_div = cell_div.child(SharedString::from(text));
         }
         // Wire the click on the cell. The captured closure receives
         // the live `MouseDownEvent` (with the shift modifier) plus a
@@ -319,12 +374,10 @@ where
 
     // Search-match row tint. The active row uses a stronger colour so
     // the user can see which match Enter / Shift+Enter will land on.
-    // The binary search returns an Err when not found, so we test
-    // `is_ok()` rather than `position()`.
-    let search_pos = search_matches.binary_search(&index).ok();
+    // Reuses the binary-search result computed at the top of the
+    // function so we do not scan the match list twice.
     let row_search_active =
-        search_pos.is_some() && search_active >= 0 && search_pos == Some(search_active as usize);
-    let row_search_match = search_pos.is_some();
+        row_search_match && search_active >= 0 && search_matches[search_active as usize] == index;
 
     let bg = if row_flashed {
         theme::BG_COPIED
@@ -372,6 +425,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anvil_core::SearchOptions;
 
     #[test]
     fn rect_contains_respects_inclusive_bounds() {
@@ -388,5 +442,68 @@ mod tests {
     #[test]
     fn rect_contains_is_false_when_none() {
         assert!(!rect_contains(None, 0, 0));
+    }
+
+    /// Smoke test: render_row with a populated search query and a
+    /// match in the rendered row should not panic and should build
+    /// the substring highlight path. We can't observe the rendered
+    /// `StyledText` directly from the headless harness, but the
+    /// regression we care about (panicking because the byte ranges
+    /// don't line up with `SharedString` boundaries, or because
+    /// `find_ranges` returned an unexpected value) would surface
+    /// here.
+    #[test]
+    fn render_row_substring_highlight_does_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hl.csv");
+        std::fs::write(&path, b"a,b\nneedle,other\nfoo,needle bar\nbaz,qux\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let model = GridModel::new(std::sync::Arc::new(doc));
+
+        let selection = Selection::empty();
+        let ctx = RowContext {
+            selection: &selection,
+            scroll_x: 0.0,
+            viewport_w: 1000.0,
+            copy_flash: None,
+            search_matches: &[0, 1],
+            search_active: 1,
+            search_query: "needle",
+            search_options: SearchOptions::default(),
+        };
+
+        // Row 0 is a match (it contains "needle" in column 0).
+        // Row 1 is the active match (it contains "needle" in column 1,
+        // followed by " bar"). Rendering either row must not panic.
+        let _elem0 = render_row(&model, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem1 = render_row(&model, 1, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+    }
+
+    /// A non-match row should not run the substring scan path.
+    /// Render it and rely on the absence of panics as the assertion;
+    /// we cannot observe the resulting element from this harness.
+    #[test]
+    fn render_row_non_match_does_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hl.csv");
+        std::fs::write(&path, b"a,b\nneedle,other\nfoo,needle bar\nbaz,qux\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let model = GridModel::new(std::sync::Arc::new(doc));
+
+        let selection = Selection::empty();
+        let ctx = RowContext {
+            selection: &selection,
+            scroll_x: 0.0,
+            viewport_w: 1000.0,
+            copy_flash: None,
+            search_matches: &[0, 1],
+            search_active: 1,
+            search_query: "needle",
+            search_options: SearchOptions::default(),
+        };
+
+        let _elem = render_row(&model, 2, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
     }
 }

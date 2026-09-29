@@ -14,7 +14,7 @@ pub use error::{AnvilError, Result};
 pub use loader::{index_opened, load, load_entry, LoadResult, LoadedDocument};
 pub use parser::indexing::{build as build_index, parse as parse_opened, IndexResult};
 pub use parser::{Cell, Cells, ColumnIndex, ParseMeta, ParseWarning, ParsedDocument, WarningKind};
-pub use query::{search as search_records, SearchOptions};
+pub use query::{find_ranges, search as search_records, SearchOptions};
 pub use selection::{CellPos, Selection};
 pub use source::archive::{
     sample_first_bytes, ArchiveSource, MAX_COMPRESSION_RATIO, MAX_DECOMPRESSED_BYTES,
