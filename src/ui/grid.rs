@@ -8,9 +8,9 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, rgb, IntoElement, Pixels};
+use gpui::{div, prelude::*, px, rgb, IntoElement, MouseDownEvent, Pixels};
 
-use anvil_core::{ColumnIndex, ParsedDocument};
+use anvil_core::{ColumnIndex, ParsedDocument, Selection};
 
 use super::theme;
 
@@ -31,7 +31,7 @@ impl ColumnLayout {
         let min_w = f32::from(theme::MIN_COLUMN_WIDTH);
         let pad = f32::from(theme::CELL_PAD_X) * 2.0;
 
-        for col in 0..measured {
+        for (col, width) in widths.iter_mut().enumerate().take(measured) {
             let mut widest =
                 text_width(doc.meta.headers.get(col).map(String::as_str).unwrap_or(""));
             for row in 0..sampled_rows {
@@ -45,7 +45,7 @@ impl ColumnLayout {
                     break;
                 }
             }
-            widths[col] = (widest + pad).clamp(min_w, MAX_AUTO_WIDTH);
+            *width = (widest + pad).clamp(min_w, MAX_AUTO_WIDTH);
         }
 
         let mut offsets = Vec::with_capacity(n + 1);
@@ -186,13 +186,24 @@ pub fn render_header(model: &GridModel, scroll_x: f32, viewport_w: f32) -> impl 
 }
 
 /// Renders a single data row. `index` is the 0-based record index.
-pub fn render_row(
+///
+/// `selection` is consulted to choose the per-cell background: cells
+/// inside the selection rectangle are filled with `theme::BG_SELECTED`.
+/// `mouse_down` is wired on every visible cell so that clicking a cell
+/// invokes the handler with the row, column, the event (so the shift
+/// modifier can be inspected), and a `&mut App` (so the handler can
+/// route an `entity.update` back to the `MainView`).
+pub fn render_row<F>(
     model: &GridModel,
     index: u64,
     scroll_x: f32,
     viewport_w: f32,
-    selected: bool,
-) -> impl IntoElement {
+    selection: &Selection,
+    mouse_down: F,
+) -> impl IntoElement
+where
+    F: Fn(&MouseDownEvent, u64, usize, &mut gpui::App) + Clone + 'static,
+{
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
@@ -202,29 +213,43 @@ pub fn render_row(
             .cell(index, ColumnIndex(col))
             .map(|c| c.into_string())
             .unwrap_or_default();
-        if text.is_empty() {
-            cells.push(
-                div()
-                    .flex_shrink_0()
-                    .w(model.layout.width_of(col))
-                    .px(theme::CELL_PAD_X)
-                    .truncate()
-                    .text_color(theme::TEXT_EMPTY)
-                    .child("∅"),
-            );
-        } else {
-            cells.push(
-                div()
-                    .flex_shrink_0()
-                    .w(model.layout.width_of(col))
-                    .px(theme::CELL_PAD_X)
-                    .truncate()
-                    .child(text),
-            );
+        let is_selected = selection.contains(index, col);
+        let handler = mouse_down.clone();
+        let mut cell_div = div()
+            .flex_shrink_0()
+            .w(model.layout.width_of(col))
+            .px(theme::CELL_PAD_X)
+            .truncate();
+        if is_selected {
+            cell_div = cell_div.bg(theme::BG_SELECTED);
         }
+        if text.is_empty() {
+            cell_div = cell_div.text_color(theme::TEXT_EMPTY).child("∅");
+        } else {
+            cell_div = cell_div.child(text);
+        }
+        // Wire the click on the cell. The captured closure receives
+        // the live `MouseDownEvent` (with the shift modifier) plus a
+        // `&mut App` so the caller can route an `entity.update` back
+        // to the `MainView` and mutate `selection`.
+        cell_div = cell_div.on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+            handler(ev, index, col, app_cx);
+        });
+        cells.push(cell_div);
     }
 
-    let bg = if selected {
+    // Row-level selection: when the user has selected the entire row we
+    // paint a row-wide background so the row number gutter and any
+    // column outside the visible range still look selected. This is a
+    // cheap, cosmetic touch; the authoritative state is still the
+    // `selection.contains` check above.
+    let row_selected = selection
+        .normalize()
+        .map(|(tl, br)| {
+            tl.column_index == 0 && br.column_index >= model.layout.widths.len().saturating_sub(1)
+        })
+        .unwrap_or(false);
+    let bg = if row_selected {
         theme::BG_SELECTED
     } else if index % 2 == 1 {
         theme::BG_ROW_ALT

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use anvil_core::source::local::open_local;
 use anvil_core::{
-    open_path, parse_opened, ArchiveSource, ColumnIndex, LoadResult, OpenResult, OpenedSource,
-    ParsedDocument,
+    open_path, parse_opened, ArchiveSource, CellPos, ColumnIndex, LoadResult, OpenResult,
+    OpenedSource, ParsedDocument, Selection,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -614,4 +614,94 @@ fn archive_source_lists_archive_name() {
     let (_d, path) = make_zip("named.zip", &[("x.csv", b"a\n1\n")]);
     let source = ArchiveSource::from_path(&path).expect("archive source");
     assert_eq!(source.archive_name(), "named.zip");
+}
+
+// ---- selection model (Milestone 2) --------------------------------------
+//
+// Selection state is independent of GPUI; these tests exercise the
+// public surface end-to-end so the data-side contract is stable. The
+// deeper unit tests live in `src/selection.rs`.
+
+#[test]
+fn selection_starts_empty_and_round_trips_through_set() {
+    let mut s = Selection::empty();
+    assert!(s.is_empty());
+    s.set(CellPos::new(4, 7));
+    assert!(!s.is_empty());
+    assert_eq!(s.cursor(), Some(CellPos::new(4, 7)));
+    assert_eq!(s.cursor_column(), Some(ColumnIndex(7)));
+}
+
+#[test]
+fn selection_extend_to_normalises_anchor_and_cursor() {
+    let mut s = Selection::empty();
+    s.set(CellPos::new(1, 1));
+    s.extend_to(CellPos::new(5, 4));
+    assert_eq!(s.anchor(), Some(CellPos::new(1, 1)));
+    assert_eq!(s.cursor(), Some(CellPos::new(5, 4)));
+    assert_eq!(
+        s.normalize(),
+        Some((CellPos::new(1, 1), CellPos::new(5, 4)))
+    );
+    // The anchor is preserved on subsequent `extend_to` calls: the
+    // cursor moves while the anchor stays at (1,1), and the rectangle
+    // is recomputed from the (anchor, cursor) pair.
+    s.extend_to(CellPos::new(0, 0));
+    assert_eq!(s.anchor(), Some(CellPos::new(1, 1)));
+    assert_eq!(s.cursor(), Some(CellPos::new(0, 0)));
+    assert_eq!(
+        s.normalize(),
+        Some((CellPos::new(0, 0), CellPos::new(1, 1)))
+    );
+}
+
+#[test]
+fn selection_move_cursor_clamps_inside_a_real_document() {
+    let (doc, _d) = parse_bytes(b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 0));
+    // Walk off the top-left edge; both deltas saturate at zero.
+    s.move_cursor(-100, -100, doc.column_count(), doc.record_count(), false);
+    assert_eq!(s.cursor(), Some(CellPos::new(0, 0)));
+    // Walk past the bottom-right edge; clamps to last record / column.
+    s.move_cursor(100, 100, doc.column_count(), doc.record_count(), false);
+    assert_eq!(s.cursor(), Some(CellPos::new(2, 2)));
+}
+
+#[test]
+fn selection_shift_arrow_keeps_anchor_intact() {
+    let (doc, _d) = parse_bytes(b"a,b,c,d\n1,2,3,4\n5,6,7,8\n");
+    let mut s = Selection::empty();
+    s.set(CellPos::new(0, 0));
+    s.move_cursor(0, 2, doc.column_count(), doc.record_count(), true);
+    assert_eq!(s.anchor(), Some(CellPos::new(0, 0)));
+    assert_eq!(s.cursor(), Some(CellPos::new(0, 2)));
+    assert!(s.is_range());
+    assert!(s.contains(0, 1));
+    assert!(!s.contains(1, 0));
+}
+
+#[test]
+fn selection_clear_removes_cursor_and_anchor() {
+    let mut s = Selection::empty();
+    s.set(CellPos::new(2, 3));
+    s.extend_to(CellPos::new(4, 5));
+    s.clear();
+    assert!(s.is_empty());
+    assert_eq!(s.cursor(), None);
+    assert_eq!(s.anchor(), None);
+    assert!(s.normalize().is_none());
+}
+
+#[test]
+fn selection_contains_inside_a_multi_record_range() {
+    let mut s = Selection::empty();
+    s.set(CellPos::new(3, 3));
+    s.extend_to(CellPos::new(1, 1));
+    assert!(s.contains(1, 1));
+    assert!(s.contains(2, 2));
+    assert!(s.contains(3, 3));
+    assert!(!s.contains(0, 0));
+    assert!(!s.contains(4, 4));
+    assert!(!s.contains(2, 0));
 }

@@ -11,15 +11,20 @@ use std::sync::Arc;
 
 use gpui::{
     canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Context, ExternalPaths,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollDelta, ScrollWheelEvent, Task,
-    UniformListScrollHandle, Window,
+    KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollDelta,
+    ScrollWheelEvent, Task, UniformListScrollHandle, Window,
 };
 
-use anvil_core::{ArchiveSource, LoadResult, LoadedDocument};
+use anvil_core::{ArchiveSource, CellPos, LoadResult, LoadedDocument, Selection};
 
 use super::archive_picker;
 use super::grid::{self, GridModel};
 use super::theme;
+
+/// How many rows a Page Up / Page Down jump moves the cursor by. Tied
+/// to a conservative estimate of the visible row count so the grid does
+/// not have to be measured every keypress.
+const PAGE_STEP: i64 = 20;
 
 /// Result of the background open+index pass.
 enum OpenOutcome {
@@ -52,6 +57,8 @@ pub struct MainView {
     /// drags the horizontal scrollbar thumb.
     h_drag: Option<(f32, f32)>,
 
+    selection: Selection,
+
     task: Option<Task<()>>,
 }
 
@@ -68,6 +75,7 @@ impl Default for MainView {
             viewport_w: 1600.0,
             v_scroll: UniformListScrollHandle::new(),
             h_drag: None,
+            selection: Selection::empty(),
             task: None,
         }
     }
@@ -110,16 +118,19 @@ impl MainView {
                 self.selected_entry = entry;
                 self.show_picker = false;
                 self.scroll_x = 0.0;
+                self.selection.clear();
                 self.state = ViewState::Ready;
             }
             OpenOutcome::NeedArchiveChoice(source) => {
                 self.archive = Some(source);
                 self.selected_entry = None;
                 self.show_picker = true;
+                self.selection.clear();
                 self.state = ViewState::Ready;
             }
             OpenOutcome::Error(message) => {
                 self.model = None;
+                self.selection.clear();
                 self.state = ViewState::Error(message);
             }
         }
@@ -305,6 +316,14 @@ impl MainView {
         let scroll_x = self.scroll_x;
         let header = grid::render_header(&model, scroll_x, viewport_w);
 
+        // The entity handle is needed inside the per-cell click handler
+        // closures. We capture it here (where `cx` is `&mut Context`)
+        // and move it into each row render. Inside the cell click,
+        // `cx` is `&mut App`, and `entity.update(cx, ...)` walks back
+        // up to the `MainView` so we can mutate `selection` and call
+        // `cx.notify()`.
+        let entity = cx.entity();
+
         let list = uniform_list(
             "anvil-grid",
             row_count,
@@ -314,8 +333,37 @@ impl MainView {
                 };
                 let scroll_x = this.scroll_x;
                 let viewport_w = this.viewport_w;
+                let selection = this.selection.clone();
+                let entity = entity.clone();
                 range
-                    .map(|i| grid::render_row(&model, i as u64, scroll_x, viewport_w, false))
+                    .map(|i| {
+                        // Per-row closure: each row is built with its
+                        // own clone of the entity handle. The
+                        // cell-click closures produced by render_row
+                        // are themselves Fn + Clone, so cloning
+                        // again here is required by the FnMut
+                        // contract on `range.map`.
+                        let entity_for_row = entity.clone();
+                        grid::render_row(
+                            &model,
+                            i as u64,
+                            scroll_x,
+                            viewport_w,
+                            &selection,
+                            move |ev, row, col, app_cx| {
+                                let pos = CellPos::new(row, col);
+                                let extend = ev.modifiers.shift;
+                                entity_for_row.update(app_cx, |view, cx| {
+                                    if extend {
+                                        view.selection.extend_to(pos);
+                                    } else {
+                                        view.selection.set(pos);
+                                    }
+                                    cx.notify();
+                                });
+                            },
+                        )
+                    })
                     .collect::<Vec<_>>()
             }),
         )
@@ -332,6 +380,8 @@ impl MainView {
                 div()
                     .flex_1()
                     .overflow_hidden()
+                    .key_context("Grid")
+                    .on_key_down(cx.listener(Self::on_grid_key_down))
                     .on_scroll_wheel(cx.listener(Self::on_grid_scroll))
                     .child(list),
             )
@@ -449,6 +499,64 @@ impl MainView {
             self.scroll_x = next;
             cx.notify();
         }
+    }
+
+    // ---- selection / keyboard navigation -------------------------------
+
+    fn on_grid_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.is_none() {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let shift = event.keystroke.modifiers.shift;
+
+        // Movement deltas in (row, col). `None` means the key is not a
+        // movement key; we then check for "clear selection" / "select
+        // all".
+        let movement: Option<(i64, i64)> = match key {
+            "up" => Some((-1, 0)),
+            "down" => Some((1, 0)),
+            "left" => Some((0, -1)),
+            "right" => Some((0, 1)),
+            "pageup" => Some((-PAGE_STEP, 0)),
+            "pagedown" => Some((PAGE_STEP, 0)),
+            "home" => Some((0, i64::MIN)),
+            "end" => Some((0, i64::MAX)),
+            _ => None,
+        };
+
+        if let Some((dr, dc)) = movement {
+            self.move_selection(dr, dc, shift, cx);
+            return;
+        }
+
+        if key == "escape" {
+            if !self.selection.is_empty() {
+                self.selection.clear();
+                cx.notify();
+            } else if self.show_picker {
+                self.show_picker = false;
+                cx.notify();
+            }
+        }
+    }
+
+    fn move_selection(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let records = model.row_count();
+        let cols = model.doc.column_count();
+        // If there is no selection yet, start at (0, 0) so the first
+        // arrow key makes the cursor visible. `move_cursor` already
+        // handles that case (it uses (0,0) as the implied cursor).
+        self.selection.move_cursor(dr, dc, cols, records, extend);
+        cx.notify();
     }
 
     fn render_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

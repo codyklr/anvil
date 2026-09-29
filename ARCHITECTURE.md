@@ -117,7 +117,7 @@ anvil/
 
 ### What is *current* vs *planned*
 
-**Current (Milestone 1, in `src/`):**
+**Current (Milestone 1 + selection slice of Milestone 2, in `src/`):**
 
 - `parser::indexing` — build record byte-offset index, collect
   `ParseWarning`s, report `record_count` and `column_count`.
@@ -127,10 +127,16 @@ anvil/
 - `source::local` and `source::mod` — direct file mmap and dispatch.
 - `loader` — open orchestration, including archive auto-open vs.
   multi-entry choice.
+- `selection` — GPUI-free selection model: `(record, column)` cursor +
+  anchor + `CellPos` coordinate type. Selected cells are painted with
+  `theme::BG_SELECTED`; arrow / Page / Home / End / Esc keys drive
+  the cursor; click and shift-click on cells drive it too.
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
-  for horizontal virtualization.
+  for horizontal virtualization. Per-cell `on_mouse_down` for
+  selection.
 - `ui::view` — toolbar, drag/drop, archive picker overlay, status bar,
-  generation counter for cancellation.
+  generation counter for cancellation, inline keyboard handler for
+  selection movement.
 
 **Planned (Milestone 2+ — these modules do not exist yet):**
 
@@ -141,6 +147,10 @@ anvil/
   statistics for the column inspector.
 - `diagnostics` — richer diagnostics surfaced in a panel and as
   navigation targets (jump to bad row).
+- `commands` — a unified keybinding module (search, filter,
+  clipboard, sort). Today keybindings live inline in
+  `view.rs::on_grid_key_down`; a small refactor will lift them out
+  once the surface grows.
 - `tasks` — a uniform background-task wrapper if the existing
   per-feature `cx.spawn` pattern stops scaling.
 - `docs/adr/` — ADRs for non-trivial decisions, numbered
@@ -178,6 +188,7 @@ The `MainView` owns:
 | `scroll_x: f32`, `viewport_w: f32` | Horizontal scroll bookkeeping.         |
 | `v_scroll: UniformListScrollHandle` | Vertical scroll handle for the grid.   |
 | `h_drag: Option<(f32, f32)>`        | Horizontal scrollbar drag state.        |
+| `selection: Selection` | Current cell / range selection (see below).     |
 | `task: Option<Task<()>>`            | Outstanding background task handle.     |
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
@@ -202,13 +213,27 @@ the model without aliasing `MainView` mutably.
 
 ### Actions / commands
 
-There is **no** keyboard command layer yet. There are no action enums.
-The toolbar `Open…` button and the file picker (`rfd`) are the only
-explicit actions. Click handlers are wired via
-`cx.listener(|view, _, _, cx| ...)`.
+There is **no** GPUI `Action` layer yet (no `actions!` macro, no
+`cx.bind_keys`). The toolbar `Open…` button and the file picker
+(`rfd`) are the only explicit actions wired through GPUI's typed
+actions system.
 
-This is one of the bigger gaps before Milestone 2; selection,
-navigation, copy, search, and filter will all need a unified command
+Keyboard navigation today is handled inline by
+`MainView::on_grid_key_down`, which inspects the `KeyDownEvent`'s
+keystroke and routes to `Selection::move_cursor`, `Selection::set`,
+or `Selection::clear`. This is enough for the arrows / Home / End /
+Page Up / Page Down / Esc family. A dedicated `commands` module will
+be extracted once the keyboard surface grows (search, filter,
+clipboard, etc.).
+
+Click handlers are wired via `cx.listener(|view, _, _, cx| ...)` for
+toolbar / overlay clicks. Per-cell clicks are wired through
+`Div::on_mouse_down(MouseButton::Left, ...)` and route into the view
+via the captured `Entity<MainView>` handle, calling
+`entity.update(&mut app, |view, cx| ...)`.
+
+This is one of the bigger remaining gaps before Milestone 2 lands
+fully: search, filter, and clipboard copy will need a unified command
 path.
 
 ### Drag / drop
@@ -220,9 +245,87 @@ the others are silently ignored.
 
 ### Keyboard handling
 
-There is **no** keybinding handling yet. The grid is not focusable in a
-way that supports keyboard navigation today. This is part of the
-Milestone 2 scope.
+The grid div carries `key_context("Grid")` and an `on_key_down`
+listener that delegates to `MainView::on_grid_key_down`. Recognised
+keys:
+
+| Key            | Action                                                       |
+|----------------|--------------------------------------------------------------|
+| Arrow keys     | Move the selection by one cell.                              |
+| Page Up/Down   | Move the selection by `PAGE_STEP` rows.                       |
+| Home / End     | Jump the column cursor to the first / last column.           |
+| Esc            | Clear the selection; if already empty, close the archive picker overlay. |
+
+Shift held during arrow / Page / Home / End extends the selection
+instead of replacing it. The grid div is not focusable in the
+traditional sense today; the `key_context` is wired so that a future
+focus handle can scope keys here without renaming them. A real
+focus handle and `cx.bind_keys` will be added when the keyboard
+surface grows (search / filter / clipboard).
+
+## Selection model
+
+`Selection` lives in `src/selection.rs` (re-exported from
+`anvil_core::Selection`). It is GPUI-free and has no `unsafe`.
+
+A `Selection` carries an optional cursor and anchor. The cursor is
+the cell the user has most recently acted on; the anchor is the
+cell where the current range selection started. A range selection is
+identified by `cursor != anchor`. `Selection::normalize()` returns
+the top-left and bottom-right corners of the rectangle in row-major
+order; `Selection::contains(record, column)` does an inclusive test.
+
+### Operations
+
+| Method                          | Meaning                                       |
+|---------------------------------|-----------------------------------------------|
+| `Selection::empty`              | New empty selection.                          |
+| `Selection::single(pos)`        | One-cell selection, no range.                 |
+| `selection.set(pos)`            | Replace selection with a single cell.         |
+| `selection.extend_to(pos)`      | Move cursor to `pos`, keep anchor fixed.      |
+| `selection.move_cursor(dr, dc, columns, records, extend)` | Translate cursor by `(dr, dc)`, clamp to document bounds; preserve anchor if `extend`. |
+| `selection.clear()`             | Empty the selection.                          |
+| `selection.cursor()`            | Current cursor cell (or `None`).              |
+| `selection.anchor()`            | Current anchor cell (or `None`).              |
+| `selection.normalize()`         | Top-left + bottom-right of the rectangle.     |
+| `selection.contains(r, c)`      | Is `(r, c)` inside the rectangle?             |
+
+### Invariants
+
+* Cursor and anchor are `Option<CellPos>` so "nothing selected" is
+  representable without sentinel coordinates.
+* `set` always produces a single-cell selection (cursor == anchor).
+* The first call to `move_cursor(..., extend=true)` from an empty
+  selection anchors at the implicit origin `(0, 0)` so that the very
+  first shift-arrow produces a real range.
+
+### Grid integration
+
+* `MainView.selection` is reset on every successful `OpenOutcome`.
+* `render_row` paints cells inside the rectangle with
+  `theme::BG_SELECTED` (see `ui/grid.rs::render_row`).
+* Mouse click on a cell: `Selection::set(pos)`; shift-click:
+  `Selection::extend_to(pos)`. Both go through the captured
+  `Entity<MainView>` handle and call `cx.notify()` to re-render.
+* Keyboard: `MainView::on_grid_key_down` routes arrow / Page /
+  Home / End keys through `Selection::move_cursor`. Shift extends.
+
+### Architectural invariants preserved
+
+* `Selection` is owned by `anvil_core`, not the UI crate; it has no
+  GPUI types in its public surface. The grid renders from it, the
+  keyboard handlers write to it, the (future) clipboard reads from
+  it. They all agree on the same data type.
+* `Selection::move_cursor` is `O(1)`; we never iterate cells to
+  decide whether a key needs handling.
+
+### Open loops
+
+* Click-and-drag (hold left button and move the mouse) is not yet
+  wired; today only mouse-down and shift-click extend the selection.
+* The `commands` module that will own keybindings (search, filter,
+  copy) is not yet extracted. Today keybindings are inlined in
+  `view.rs::on_grid_key_down`.
 
 ### UI update flow
 
@@ -823,7 +926,7 @@ of decompression + temp-file write + mmap.
 
 ### What exists today
 
-`tests/core.rs` — 38 integration tests in one file. They run without
+`tests/core.rs` — 44 integration tests in one file. They run without
 a GUI and are the primary CI signal.
 
 | Group                  | Tests                                                                 |
@@ -834,7 +937,11 @@ a GUI and are the primary CI signal.
 | open_path dispatch     | direct CSV, rejects empty file                                         |
 | ZIP handling           | single CSV, multiple CSVs, ignores `__MACOSX`/`.DS_Store`, no supported files, path traversal rejected, duplicate names, corrupted zip, large compressed round-trip |
 | Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
+| Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
+
+In addition, `src/selection.rs` carries 11 unit tests for the
+selection type itself (`cargo test --release --lib selection`).
 
 There are **no** UI tests yet. `anvil --probe` exists as a manual
 smoke test for the open path.
@@ -872,9 +979,12 @@ Notes:
 
 ### Functional gaps
 
-- No selection, no keyboard navigation, no clipboard, no search, no
-  filter, no sort, no type inference, no column statistics. Milestones
-  2–3.
+- Selection and basic keyboard navigation are wired (arrow keys,
+  Page Up/Down, Home/End, Esc). Selection model lives in
+  `anvil_core::Selection` and is exercised by 11 unit tests + 6
+  integration tests. Click-and-drag selection is not yet wired.
+- No clipboard copy, no search, no filter, no sort, no type
+  inference, no column statistics. Milestones 2–3.
 - The status bar reports a warning count but cannot navigate to the
   offending row. Milestone 4.
 - No progress UI for extraction / indexing. Milestone 5.
@@ -974,11 +1084,13 @@ change architecture and update this file.
 The architecture is designed so Milestones 2–5 can be added without
 restructuring. Specifically:
 
-- **Selection / navigation / clipboard (Milestone 2).** Add a
-  `Selection` struct on `MainView` storing `(record_index, column_index)`
-  ranges, independent of GPUI elements. Keyboard handling will go
-  through a new `commands` module that translates key events into
-  `MainView` method calls.
+- **Selection / navigation / clipboard (Milestone 2, partial).**
+  `Selection` (in `anvil_core::selection`) lives on `MainView` and
+  stores `(record_index, column_index)` ranges, independent of GPUI
+  elements. Keyboard handling is currently inlined in
+  `view.rs::on_grid_key_down`; a dedicated `commands` module will be
+  extracted once search/filter/clipboard add their keybindings.
+  Clipboard copy is not yet implemented.
 - **Search (Milestone 2).** A `query::search` module owns the
   in-progress search: input string, options (case sensitivity,
   column scope), and an `Arc<Mutex<Vec<record_index>>>` shared

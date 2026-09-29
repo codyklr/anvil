@@ -121,20 +121,24 @@ this may freeze the UI.
 
 #### Selection model
 
-- [ ] Introduce `Selection` type storing `(record_index, column_index)`
+- [x] Introduce `Selection` type storing `(record_index, column_index)`
   with optional anchor + cursor for ranges.
-- [ ] Render selected cells with `theme::BG_SELECTED` background.
-- [ ] Mouse-click selection on the grid canvas.
-- [ ] Shift-click range selection.
+- [x] Render selected cells with `theme::BG_SELECTED` background.
+- [x] Mouse-click selection on the grid canvas.
+- [x] Shift-click range selection.
 - [ ] Click-and-drag range selection.
 
 #### Keyboard navigation
 
-- [ ] Wire a `commands` module: arrow keys, Page Up/Down, Home/End,
-  Cmd/Ctrl+Home/End.
+- [x] Arrow keys move the selection (Up/Down/Left/Right).
+- [x] Page Up / Page Down step the selection by `PAGE_STEP` rows.
+- [x] Home / End jump the column cursor to the first / last column.
+- [ ] Cmd/Ctrl+Home/End jump to first / last row.
+- [ ] Wire a dedicated `commands` module (currently handled inline in
+  `view.rs::on_grid_key_down`).
 - [ ] Tab / Shift-Tab navigation between cells.
 - [ ] Cmd/Ctrl+G — go-to-row input box.
-- [ ] Esc — clear selection / close overlays.
+- [x] Esc — clear selection / close overlays.
 - [ ] Cmd/Ctrl+C — copy selection to clipboard.
 
 #### Clipboard
