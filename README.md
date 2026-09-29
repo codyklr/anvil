@@ -103,8 +103,19 @@ newline-less files, a 100k-row synthetic dataset, single/multi-file ZIPs,
 nested paths, `__MACOSX`, corrupted ZIPs, path traversal, duplicate entry
 names, and a large compressed CSV.
 
-## Not yet done (Milestones 2–4)
+## Not yet done (Milestones 2–5)
 
 Selection & keyboard navigation, clipboard, search, filtering, sorting, type
-inference, column statistics, and richer diagnostics. The module boundaries
-are set up to receive these without restructuring.
+inference, column statistics, richer diagnostics, performance and UX
+hardening. See `ROADMAP.md` for the planned work and acceptance criteria.
+
+## Documentation
+
+- `VISION.md` — durable product intent.
+- `ROADMAP.md` — milestone-by-milestone plan; checkboxes reflect the
+  actual repository state.
+- `ARCHITECTURE.md` — current technical architecture.
+- `AGENTS.md` — operating manual for coding agents working in this
+  repository.
+- `docs/agent-log.md` — chronological handoff log.
+- `docs/prompts/initial-anvil-prompt.md` — historical product brief.
