@@ -191,6 +191,7 @@ The `MainView` owns:
 | `v_scroll: UniformListScrollHandle` | Vertical scroll handle for the grid.   |
 | `h_drag: Option<(f32, f32)>`        | Horizontal scrollbar drag state.        |
 | `selection: Selection` | Current cell / range selection (see below).     |
+| `drag_selecting: bool` | Armed on a grid cell mouse-down, disarmed on mouse-up. Drag-select only extends the selection while set. |
 | `task: Option<Task<()>>`            | Outstanding background task handle.     |
 | `status_message: Option<String>`    | Transient status-bar message (e.g. "copied N cells"). Cleared on every `OpenOutcome`. |
 | `focus_handle: FocusHandle` | Keyboard focus target for the grid. The grid element carries `.track_focus(...)`; keyboard events are only delivered to `on_grid_key_down` while this handle is focused. |
@@ -337,6 +338,16 @@ order; `Selection::contains(record, column)` does an inclusive test.
 * Mouse click on a cell: `Selection::set(pos)`; shift-click:
   `Selection::extend_to(pos)`. Both go through the captured
   `Entity<MainView>` handle and call `cx.notify()` to re-render.
+* Click-and-drag: a mouse-down on a cell arms `drag_selecting`; every
+  cell also carries an `on_mouse_move` handler, and while
+  `MouseMoveEvent::dragging()` is true and `drag_selecting` is set, the
+  handler calls `Selection::extend_to(pos)` for whichever cell the
+  pointer is over. A mouse-up (bubble over the grid, or
+  `on_mouse_up_out` capture when the pointer has left it) disarms.
+  Because each cell is its own hitbox, this needs no coordinate
+  arithmetic and no vertical-scroll bookkeeping. `drag_selecting`
+  guards the case where a drag began outside the grid and passes over
+  cells.
 * Keyboard: `MainView::on_grid_key_down` routes arrow / Page /
   Home / End keys through `Selection::move_cursor`. Shift extends.
 
@@ -351,8 +362,10 @@ order; `Selection::contains(record, column)` does an inclusive test.
 
 ### Open loops
 
-* Click-and-drag (hold left button and move the mouse) is not yet
-  wired; today only mouse-down and shift-click extend the selection.
+* Drag-select does not auto-scroll when the pointer is dragged past
+  the top or bottom edge of the list; the selection can only extend to
+  currently visible rows. (Follow-up: auto-scroll on drag near the
+  viewport edge.)
 * The `commands` module that will own keybindings (search, filter,
   copy) is not yet extracted. Today keybindings are inlined in
   `view.rs::on_grid_key_down`.
@@ -829,13 +842,18 @@ while the column's offset is inside the viewport.
 
 ### Row retrieval
 
-Inside `cx.processor`, `grid::render_row` is invoked with the visible
-range. Each row:
+Inside `cx.processor`, `grid::render_row` is invoked per visible row.
+The per-frame inputs (`selection`, `scroll_x`, `viewport_w`,
+`copy_flash`) are bundled once into a `grid::RowContext` and passed by
+reference, so `render_row` keeps a small argument list as more
+per-frame state is added. Each row:
 
 1. Decides which columns are visible (`ColumnLayout::visible`).
 2. Renders a leading gutter div (`ROW_NUMBER_WIDTH`) with the row
    number (`index + 1`).
-3. Renders a flex row of cell divs for the visible columns only.
+3. Renders a flex row of cell divs for the visible columns only, each
+   with `on_mouse_down` (selection) and `on_mouse_move` (drag-select)
+   handlers.
 4. Alternates background colour for odd-indexed rows.
 
 ### How millions of persistent UI nodes are avoided
@@ -1046,7 +1064,7 @@ a GUI and are the primary CI signal. `src/selection.rs` additionally
 carries 25 unit tests.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
-`TestAppContext` (`gpui` `test-support` dev-dependency) with two UI
+`TestAppContext` (`gpui` `test-support` dev-dependency) with three UI
 regression tests:
 
 * `arrow_keys_move_selection_when_grid_focused` — injects a ready
@@ -1056,10 +1074,15 @@ and asserts arrow keys move the cursor.
 dispatches Cmd/Ctrl+C and asserts the status message, the green flash
 rectangle, and the exact TSV written to an injected clipboard recorder
 (the real clipboard is never touched).
+* `drag_select_builds_rectangle` — synthesises a mouse-down on one cell,
+a drag to another (via a test-only `debug_selector` on the grid list to
+derive cell pixel centres), and a mouse-up, then asserts the selection
+rectangle and a follow-up copy's TSV.
 
-Both were confirmed to fail when `.track_focus(&self.focus_handle)` is
-removed from the grid, so they genuinely guard the focus-routing
-invariant described under Keyboard handling.
+The first two were confirmed to fail when `.track_focus(&self.focus_handle)`
+is removed from the grid, and the drag test was confirmed to fail when
+the cell `on_mouse_move` wiring is removed — so they genuinely guard
+the focus-routing and drag-select behaviour.
 
 `src/ui/grid.rs` has two unit tests for `rect_contains`, the inclusive
 rectangle test used for the copy flash (inside / edge / outside / `None`).
@@ -1075,6 +1098,7 @@ rectangle test used for the copy flash (inside / edge / outside / `None`).
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
 | UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
+| UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
@@ -1126,14 +1150,14 @@ Notes:
 
 ### Functional gaps
 
-- Selection, basic keyboard navigation (arrow keys, Page Up/Down,
-  Home/End, Esc), and clipboard copy (Cmd/Ctrl+C, TSV via
-  `arboard`) are wired. Keyboard handling requires the grid to hold
-  focus; two UI regression tests guard this. `anvil_core::Selection`
-  carries 25 unit tests + 14 integration tests; the clipboard
-  formatter and cell-count helper are covered end-to-end against
-  real `ParsedDocument`s. Click-and-drag selection is still not
-  wired.
+- Selection (click / shift-click / click-and-drag), basic keyboard
+  navigation (arrow keys, Page Up/Down, Home/End, Esc), and clipboard
+  copy (Cmd/Ctrl+C, TSV via `arboard`) are wired. Keyboard handling
+  requires the grid to hold focus; UI regression tests guard both the
+  focus path and drag-select. `anvil_core::Selection` carries 25 unit
+  tests + 14 integration tests; the clipboard formatter and cell-count
+  helper are covered end-to-end against real `ParsedDocument`s.
+  Drag-select does not auto-scroll at the viewport edges.
 - No search, no filter, no sort, no type inference, no column
   statistics. Milestones 2–3.
 - The status bar reports a warning count but cannot navigate to the
@@ -1253,8 +1277,9 @@ restructuring. Specifically:
   the injectable `ClipboardWriter` (default `arboard`);
   `MainView::status_message` shows "copied N cells" in the status
   bar. The grid tracks `MainView.focus_handle` so keyboard events
-  reach `on_grid_key_down`; two UI tests guard the focus path.
-  Click-and-drag selection and Cmd/Ctrl+Home/End remain outstanding.
+  reach `on_grid_key_down`, and drag-select is wired via per-cell
+  `on_mouse_move`; UI tests guard both. Cmd/Ctrl+Home/End and
+  drag auto-scroll at the viewport edges remain outstanding.
 - **Search (Milestone 2).** A `query::search` module owns the
   in-progress search: input string, options (case sensitivity,
   column scope), and an `Arc<Mutex<Vec<record_index>>>` shared

@@ -77,6 +77,11 @@ pub struct MainView {
     h_drag: Option<(f32, f32)>,
 
     selection: Selection,
+    /// True between a mouse-down on a grid cell and the matching
+    /// mouse-up. Drag-select only extends the selection while this is
+    /// set, so a drag that began outside the grid does not suddenly
+    /// select cells when it passes over them.
+    drag_selecting: bool,
 
     task: Option<Task<()>>,
     /// Transient status-bar message (e.g. "copied 12 cells"). Cleared
@@ -122,6 +127,7 @@ impl MainView {
             v_scroll: UniformListScrollHandle::new(),
             h_drag: None,
             selection: Selection::empty(),
+            drag_selecting: false,
             task: None,
             status_message: None,
             focus_handle: cx.focus_handle(),
@@ -169,6 +175,7 @@ impl MainView {
                 self.show_picker = false;
                 self.scroll_x = 0.0;
                 self.selection.clear();
+                self.drag_selecting = false;
                 self.status_message = None;
                 self.copy_flash_rect = None;
                 self.focus_grid_on_next_frame = true;
@@ -179,6 +186,7 @@ impl MainView {
                 self.selected_entry = None;
                 self.show_picker = true;
                 self.selection.clear();
+                self.drag_selecting = false;
                 self.status_message = None;
                 self.copy_flash_rect = None;
                 self.focus_grid_on_next_frame = true;
@@ -419,6 +427,12 @@ impl MainView {
                 let selection = this.selection.clone();
                 let copy_flash_rect = this.copy_flash_rect;
                 let entity = entity.clone();
+                let row_ctx = grid::RowContext {
+                    selection: &selection,
+                    scroll_x,
+                    viewport_w,
+                    copy_flash: copy_flash_rect,
+                };
                 range
                     .map(|i| {
                         // Per-row closure: each row is built with its
@@ -431,21 +445,39 @@ impl MainView {
                         grid::render_row(
                             &model,
                             i as u64,
-                            scroll_x,
-                            viewport_w,
-                            &selection,
-                            copy_flash_rect,
-                            move |ev, row, col, app_cx| {
-                                let pos = CellPos::new(row, col);
-                                let extend = ev.modifiers.shift;
-                                entity_for_row.update(app_cx, |view, cx| {
-                                    if extend {
-                                        view.selection.extend_to(pos);
-                                    } else {
-                                        view.selection.set(pos);
+                            &row_ctx,
+                            {
+                                let entity = entity_for_row.clone();
+                                move |ev, row, col, app_cx| {
+                                    let pos = CellPos::new(row, col);
+                                    let extend = ev.modifiers.shift;
+                                    entity.update(app_cx, |view, cx| {
+                                        if extend {
+                                            view.selection.extend_to(pos);
+                                        } else {
+                                            view.selection.set(pos);
+                                        }
+                                        // A press arms drag-select; the
+                                        // matching mouse-up disarms it.
+                                        view.drag_selecting = true;
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                            {
+                                let entity = entity_for_row;
+                                move |ev, row, col, app_cx| {
+                                    if !ev.dragging() {
+                                        return;
                                     }
-                                    cx.notify();
-                                });
+                                    let pos = CellPos::new(row, col);
+                                    entity.update(app_cx, |view, cx| {
+                                        if view.drag_selecting {
+                                            view.selection.extend_to(pos);
+                                            cx.notify();
+                                        }
+                                    });
+                                }
                             },
                         )
                     })
@@ -466,6 +498,10 @@ impl MainView {
                     .flex_1()
                     .overflow_hidden()
                     .key_context("Grid")
+                    // Test-only: lets UI tests look up the grid's pixel
+                    // bounds to synthesise mouse coordinates. A no-op in
+                    // release builds.
+                    .debug_selector(|| "anvil-grid-list".to_string())
                     // Keyboard events are only routed to `on_key_down`
                     // while this element holds focus. `track_focus`
                     // also makes a mouse-down anywhere in the grid
@@ -474,6 +510,17 @@ impl MainView {
                     .track_focus(&self.focus_handle)
                     .on_key_down(cx.listener(Self::on_grid_key_down))
                     .on_scroll_wheel(cx.listener(Self::on_grid_scroll))
+                    // End a drag-select on release, whether the pointer
+                    // is still over the grid (bubble) or has left it
+                    // (capture).
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|view, _, _, _cx| view.drag_selecting = false),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|view, _, _, _cx| view.drag_selecting = false),
+                    )
                     .child(list),
             )
             .child(self.render_h_scrollbar(cx))
@@ -1045,5 +1092,71 @@ mod tests {
         let ending = if cfg!(windows) { "\r\n" } else { "\n" };
         let captured = written.lock().expect("clipboard recorder").clone();
         assert_eq!(captured, vec![format!("1{ending}")]);
+    }
+
+    /// Centre of cell `(row, col)` in window coordinates, using the grid
+    /// list's measured bounds plus the known row height, row-number
+    /// gutter, and computed column widths. Assumes the grid is not
+    /// scrolled (the tests never scroll it).
+    fn cell_center(
+        cx: &mut VisualTestContext,
+        view: &Entity<MainView>,
+        row: u64,
+        col: usize,
+    ) -> gpui::Point<gpui::Pixels> {
+        let bounds = cx
+            .debug_bounds("anvil-grid-list")
+            .expect("grid list bounds");
+        let (col_offset, col_width) = view.read_with(cx, |view, _| {
+            let layout = &view.model.as_ref().expect("model").layout;
+            (layout.offsets[col], layout.widths[col])
+        });
+        let x = bounds.origin.x + theme::ROW_NUMBER_WIDTH + px(col_offset) + px(col_width) / 2.0;
+        let y = bounds.origin.y + px((row as f32 + 0.5) * f32::from(theme::ROW_HEIGHT));
+        gpui::point(x, y)
+    }
+
+    /// Drag-select: press on one cell, drag across to another, release.
+    /// The selection should become the rectangle between them, and the
+    /// copy should then emit the whole block as TSV.
+    #[gpui::test]
+    async fn drag_select_builds_rectangle(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let written = inject(cx, &view);
+
+        let start = cell_center(cx, &view, 0, 0);
+        let end = cell_center(cx, &view, 1, 1);
+        let modifiers = gpui::Modifiers::default();
+
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        // Two moves to the same cell: the first updates the hover hit
+        // test, the second is delivered to the now-hovered cell.
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(
+                view.selection.normalize(),
+                Some((CellPos::new(0, 0), CellPos::new(1, 1)))
+            );
+            // Mouse-up disarms drag-select.
+            assert!(!view.drag_selecting);
+        });
+
+        // Copy the dragged block and check the TSV payload.
+        let copy_keystroke = if cfg!(target_os = "macos") {
+            "cmd-c"
+        } else {
+            "ctrl-c"
+        };
+        cx.simulate_keystrokes(copy_keystroke);
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        let captured = written.lock().expect("clipboard recorder").clone();
+        assert_eq!(
+            captured,
+            vec![format!("1\t2{ending}4\t5{ending}")],
+            "dragged block should copy as TSV"
+        );
     }
 }

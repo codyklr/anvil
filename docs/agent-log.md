@@ -772,3 +772,115 @@ interim UX feature; it does not change the data side.
 Unchanged from the previous entry: extract the `commands` module, then
 land search (`Cmd/Ctrl+F`). The copy confirmation was a small interim
 feature and does not change the plan.
+
+---
+
+## 2026-10-04 — Drag-select
+
+### Context
+
+The user asked for click-and-drag box selection. This was the last
+unchecked item in the Milestone 2 Selection model. The grid already had
+per-cell `on_mouse_down` (set / shift-extend) and keyboard navigation;
+what was missing was holding the button and dragging across cells.
+
+### Implemented
+
+- `MainView.drag_selecting: bool`, armed by a grid cell mouse-down and
+disarmed on mouse-up. It prevents a drag that began outside the grid
+from selecting cells it passes over.
+- `grid::render_row` gained a `mouse_move` handler generic; every cell
+now carries `.on_mouse_move(...)` in addition to `.on_mouse_down(...)`.
+- In `view.rs`, the cell mouse-move closure ignores events unless
+`MouseMoveEvent::dragging()` is true and `drag_selecting` is set, then
+calls `Selection::extend_to(pos)` and `cx.notify()`.
+- The grid container carries `on_mouse_up` (bubble, pointer over the
+grid) and `on_mouse_up_out` (capture, pointer has left the grid) to
+disarm `drag_selecting`.
+- **Design choice: per-cell hitboxes rather than coordinate
+arithmetic.** Each cell is its own GPUI hitbox, so whichever cell the
+pointer is over reports its own `(row, col)`. This avoids the
+`ColumnLayout`/`scroll_x`/vertical-scroll mapping that a single
+full-grid mouse listener would need, and it composes with
+`uniform_list` virtualization for free. The trade-off is a one-event
+lag from GPUI's hover hit test, imperceptible for a real drag.
+- `render_row`'s argument list had reached 8 and tripped clippy
+`too_many_arguments`; the per-frame inputs are now bundled into a
+`grid::RowContext<'a>` (`selection`, `scroll_x`, `viewport_w`,
+`copy_flash`) passed by reference. This was the follow-up flagged in
+the copy-flash entry.
+- A test-only `.debug_selector("anvil-grid-list")` on the grid
+container (a no-op in release) lets the UI test derive cell pixel
+centres from the measured grid bounds plus `ROW_HEIGHT`,
+`ROW_NUMBER_WIDTH`, and the computed column widths.
+
+### Verified
+
+- Reproduced the gap as a test first: `drag_select_builds_rectangle`
+fails when the cell `.on_mouse_move` wiring is removed (selection
+stays one cell) and passes with it. Re-verified after the
+`RowContext` refactor.
+- `cargo test --release` — 82 passed (25 lib + 5 binary + 52
+integration), 0 failed, 1 ignored.
+- `cargo test --release --bin anvil` — 5 pass: two focus/copy tests,
+the new drag test, and the two `rect_contains` unit tests.
+- The drag test also copies the dragged block and asserts the TSV
+(`1\t2\n4\t5\n`), so drag-select + copy is covered end-to-end.
+- `cargo clippy --release --all-targets` — clean (the
+`too_many_arguments` warning is resolved by `RowContext`).
+- `cargo fmt --check` — clean.
+- `cargo build --release` and `./target/release/anvil` — launch and
+run 5 s without panic.
+
+### Tests added / changed
+
+- 1 new UI test: `drag_select_builds_rectangle`.
+- No data-side tests changed; `Selection::extend_to` was already
+covered.
+
+### Roadmap changes
+
+- Milestone 2 Selection model: "Click-and-drag range selection"
+ticked (the last unchecked selection item).
+
+### Architecture changes
+
+- `ARCHITECTURE.md` state table: added `drag_selecting`.
+- Selection model → Grid integration: documented the drag-select
+mechanism and why per-cell hitboxes are used.
+- Grid Rendering → Row retrieval: documented `RowContext`.
+- Functional gaps and Planned Evolution updated (drag-select wired;
+edge auto-scroll still outstanding).
+- Testing: added the drag test, its mutation check, and a test-table
+row.
+
+### Issues / technical debt discovered
+
+- **No drag auto-scroll.** Dragging past the top/bottom edge does not
+scroll the list, so a selection cannot be extended beyond currently
+visible rows in one gesture. This is the main functional gap in
+drag-select and is recorded in the roadmap and architecture open
+loops. Implementing it needs the pointer position mapped to the list
+bounds and a scroll tick while the pointer is outside — likely a small
+`cx.spawn` loop using `UniformListScrollHandle::scroll_to_item`.
+- GPUI delivers mouse moves to the hovered hitbox using the hit test
+from the previous frame, so drag-select lags a single mouse event. In
+practice mouse moves are continuous; only synthetic single-jump tests
+notice. The test moves twice to the target to be deterministic.
+- `view.rs` is now ~1090 lines. The `commands` extraction is more
+overdue than ever.
+
+### Open loops
+
+- Drag auto-scroll at viewport edges (recorded).
+- Non-contiguous multi-select and select-all are recorded in
+`ROADMAP.md` Future Ideas, not started.
+- Configurable copy format (TSV/CSV/Markdown/JSON) recorded in Future
+Ideas; current Cmd/Ctrl+C is TSV only.
+
+### Next recommended task
+
+Still the `commands` module extraction, then search (`Cmd/Ctrl+F`).
+Drag-select was the last selection-model gap; the selection surface is
+now feature-complete for Milestone 2 except for the drag auto-scroll
+follow-up.

@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, rgb, IntoElement, MouseDownEvent, Pixels};
+use gpui::{div, prelude::*, px, rgb, IntoElement, MouseDownEvent, MouseMoveEvent, Pixels};
 
 use anvil_core::{CellPos, ColumnIndex, ParsedDocument, Selection};
 
@@ -199,30 +199,49 @@ pub fn render_header(model: &GridModel, scroll_x: f32, viewport_w: f32) -> impl 
         )
 }
 
+/// Per-frame inputs shared by every row in a single render pass. Bundled
+/// so `render_row` does not grow an unbounded argument list as more
+/// per-frame state is added.
+pub struct RowContext<'a> {
+    pub selection: &'a Selection,
+    pub scroll_x: f32,
+    pub viewport_w: f32,
+    /// Rectangle of the most recent copy, painted `theme::BG_COPIED`.
+    pub copy_flash: Option<(CellPos, CellPos)>,
+}
+
 /// Renders a single data row. `index` is the 0-based record index.
 ///
-/// `selection` is consulted to choose the per-cell background: cells
+/// `ctx.selection` is consulted to choose the per-cell background: cells
 /// inside the selection rectangle are filled with `theme::BG_SELECTED`.
-/// `copy_flash` is the rectangle of the most recent copy; while set,
+/// `ctx.copy_flash` is the rectangle of the most recent copy; while set,
 /// those cells are filled with `theme::BG_COPIED` instead, which is the
 /// short green "copied" confirmation.
 ///
-/// `mouse_down` is wired on every visible cell so that clicking a cell
-/// invokes the handler with the row, column, the event (so the shift
+/// `mouse_down` and `mouse_move` are wired on every visible cell.
+/// `mouse_down` receives the row, column, the event (so the shift
 /// modifier can be inspected), and a `&mut App` (so the handler can
-/// route an `entity.update` back to the `MainView`).
-pub fn render_row<F>(
+/// route an `entity.update` back to the `MainView`). `mouse_move`
+/// receives the same, but only fires while the pointer is over that
+/// cell; the caller checks `MouseMoveEvent::dragging()` to implement
+/// drag-select. Because each cell is its own hitbox, drag-select needs
+/// no coordinate arithmetic or vertical-scroll bookkeeping — whichever
+/// cell the pointer is over reports itself.
+pub fn render_row<F, G>(
     model: &GridModel,
     index: u64,
-    scroll_x: f32,
-    viewport_w: f32,
-    selection: &Selection,
-    copy_flash: Option<(CellPos, CellPos)>,
+    ctx: &RowContext<'_>,
     mouse_down: F,
+    mouse_move: G,
 ) -> impl IntoElement
 where
     F: Fn(&MouseDownEvent, u64, usize, &mut gpui::App) + Clone + 'static,
+    G: Fn(&MouseMoveEvent, u64, usize, &mut gpui::App) + Clone + 'static,
 {
+    let selection = ctx.selection;
+    let scroll_x = ctx.scroll_x;
+    let viewport_w = ctx.viewport_w;
+    let copy_flash = ctx.copy_flash;
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
@@ -234,7 +253,8 @@ where
             .unwrap_or_default();
         let is_selected = selection.contains(index, col);
         let is_flashed = rect_contains(copy_flash, index, col);
-        let handler = mouse_down.clone();
+        let down_handler = mouse_down.clone();
+        let move_handler = mouse_move.clone();
         let mut cell_div = div()
             .flex_shrink_0()
             .w(model.layout.width_of(col))
@@ -254,9 +274,13 @@ where
         // the live `MouseDownEvent` (with the shift modifier) plus a
         // `&mut App` so the caller can route an `entity.update` back
         // to the `MainView` and mutate `selection`.
-        cell_div = cell_div.on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
-            handler(ev, index, col, app_cx);
-        });
+        cell_div = cell_div
+            .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+                down_handler(ev, index, col, app_cx);
+            })
+            .on_mouse_move(move |ev, _window, app_cx| {
+                move_handler(ev, index, col, app_cx);
+            });
         cells.push(cell_div);
     }
 

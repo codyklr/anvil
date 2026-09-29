@@ -126,7 +126,7 @@ this may freeze the UI.
 - [x] Render selected cells with `theme::BG_SELECTED` background.
 - [x] Mouse-click selection on the grid canvas.
 - [x] Shift-click range selection.
-- [ ] Click-and-drag range selection.
+- [x] Click-and-drag range selection.
 
 #### Keyboard navigation
 
