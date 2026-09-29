@@ -42,7 +42,7 @@ src/
   query.rs          search + match-range helpers (GPUI-free)
   ui/               GPUI presentation (binary only)
     app.rs            window lifecycle
-    view.rs           toolbar + tabs + grid + status + overlays
+    view.rs           toolbar + tabs + file panel + grid + status
     commands.rs       keyboard chord -> action binding table
     grid.rs           column layout + row rendering helpers
     archive_picker.rs archive presentation helpers

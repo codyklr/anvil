@@ -1972,3 +1972,140 @@ demand. The next slice should be the deferred **filter** work
 search slice. Alternatively, split `view.rs` first: at ~2900 lines it
 is the main obstacle to further UI work, and the tab / lazy-load code
 is a natural first extraction (`tabs.rs`).
+
+## 2026-10-12 — File-manager panel + scrollable tab strip
+
+### Context
+
+The user confirmed the lazy-loading approach ("just the first one that
+opens") — which the previous iteration already implements: a dropped
+ZIP creates a tab per usable entry but only the loader's favourite (or,
+for an ambiguous archive, the first tab) is extracted. They then raised
+two follow-ups: the tab menu can overflow with no way to reach distant
+files, and they still want a file-manager area on the left or right
+listing the opened files. This iteration adds that panel and makes the
+tab strip scroll.
+
+### Implemented
+
+- `MainView.file_panel_open: bool` (default `true`) and
+  `MainView.tab_scroll: ScrollHandle`.
+- `group_documents(&[DocumentSnapshot])` — free function that groups
+  consecutive snapshots sharing an archive by `Arc` identity. Direct
+  files are top-level; ZIP entries nest under their archive header.
+  Returns `(Option<Arc<ArchiveSource>>, Vec<(tab_index, label,
+  loaded)>)` in tab order.
+- `render_file_panel` — left-hand panel, `theme::FILE_PANEL_WIDTH`
+  wide, with:
+  - a header showing the open count and a × that hides the panel;
+  - archive group headers (`▾ archive.zip`);
+  - file rows with an active highlight, a loaded/pending dot, the
+    label, and a × that closes the tab;
+  - click-to-switch and click-to-close wired to the same
+    `switch_to` / `close_active_at` the tabs use;
+  - a scrollable body for long lists.
+- `Render::render` now lays the body out as a row: the panel is a
+  `flex_shrink_0` left child and the grid/search area takes the
+  remaining space. The panel is only rendered when
+  `file_panel_open && !documents.is_empty()`.
+- Toolbar **Files** button toggles the panel.
+- `Action::ToggleFilePanel` (Cmd/Ctrl+B) added to the binding table,
+  with two unit tests (Cmd/Ctrl+B binds; plain B does not).
+- Tab strip: tabs are now `flex_shrink_0` and the inner track is
+  `overflow_x_scroll()` + `track_scroll(&self.tab_scroll)`, so a long
+  tab list scrolls horizontally instead of crushing every tab.
+- `theme::FILE_PANEL_WIDTH = 220px` and
+  `theme::FILE_PANEL_ENTRY_INDENT = 18px`.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 155 passed (47 lib + 48 binary + 60
+  integration), 0 failed, 1 ignored. The binary suite grew from 43
+  to 48.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil` — launches, runs 5 s without panic.
+- `./target/release/anvil --probe fixtures/multi.zip` — unchanged.
+- Manual GUI confirmation of the panel layout is deferred; the
+  grouping helper, the toggle binding, and the panel's switch / close
+  paths all have automated coverage.
+
+### Tests added / changed
+
+- `src/ui/commands.rs`:
+  - `toggle_file_panel_chord`
+  - `plain_b_is_not_toggle_file_panel`
+- `src/ui/view.rs`:
+  - `cmd_b_toggles_file_panel` — Cmd/Ctrl+B flips `file_panel_open`
+    both ways through the grid keyboard path.
+  - `group_documents_groups_by_archive_identity` — direct files stay
+    top-level; two archives with separate `Arc`s stay separate even
+    when their entry names overlap.
+  - `file_panel_navigation_uses_tab_lifecycle` — switch loads the
+    pending neighbour and close adjusts `active`, using the same
+    methods the panel rows call.
+
+### Roadmap changes
+
+- Milestone 2 "Multi-document tabs": ticked the file panel and the
+  scrollable tab strip; replaced the "dockable side panel / tree
+  view" follow-up with the remaining work (resizable / movable /
+  icon-rail / truly nested tree).
+- Milestone 2 Tests: added the file-panel regression item.
+- Future Ideas: the "Dockable side panel / document tree" bullet now
+  describes making the landed panel resizable / movable.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Primary-state table gained `next_doc_id` (previously missing),
+    `file_panel_open`, and `tab_scroll`.
+  - "Multi-document / tabs" gained a "Presentation — tab strip and
+    file panel" subsection describing the scroll behaviour,
+    `group_documents`, the panel's toggle surfaces, and the layout.
+  - Planned Evolution and Functional gaps updated: the panel exists
+    but is fixed-width, left-only, and two-level; the remaining
+    work is recorded.
+  - Testing section: new tests listed, UI count 25 -> 28, commands
+    count 14 -> 16, new "UI / file panel (binary)" table row.
+
+### Issues / technical debt discovered
+
+- The panel is a fixed 220 px on the left. No resize grip, no move to
+  the right, no collapse-to-icon-rail. Recorded.
+- `group_documents` groups only consecutive runs. Two documents from
+  the same archive separated by another document (possible if the user
+  reorders tabs later, or opens the same archive twice) would appear
+  as two groups. Tab reordering is not implemented yet, so this is not
+  reachable today.
+- Row ids use the tab index (`("file-row", index)`). When tabs close,
+  indices shift, so GPUI may attach hover state to a different row for
+  a frame. Harmless for stateless rows but worth switching to the
+  stable `DocumentSnapshot::id` if hover glitches appear.
+- The panel body's `overflow_y_scroll()` is not backed by a tracked
+  `ScrollHandle`, unlike the tab strip. It works via GPUI's default
+  scrolling; a handle would let the app scroll a row into view when
+  the active tab changes.
+- `view.rs` is now ~3100 lines. The split recommendation is more
+  urgent; the file panel is another natural extraction.
+
+### Open loops
+
+- Resizable / movable / collapsible file panel; nested tree beyond
+  archive → entry.
+- Scroll the panel to keep the active row visible.
+- Use `DocumentSnapshot::id` for panel row element ids.
+- Cap / group very large archives (from the previous entry).
+- Cancellation or batching for lazy extraction tasks (from the
+  previous entry).
+- `search_task` / `copy_flash_generation` still live on `MainView`
+  rather than the snapshot.
+
+### Next recommended task
+
+The user's navigation request is now covered by both the tab strip
+and the file panel. The standing deferred work is **filter**
+(Cmd/Ctrl+L). Before that, though, splitting `view.rs` (~3100 lines)
+would materially reduce the cost of every future UI change; the file
+panel and the tab/lazy-load code are the two clearest extractions.

@@ -209,6 +209,9 @@ reading a single set of names.
 |--------------------|-------------------------------------------------------|
 | `documents: Vec<DocumentSnapshot>` | Every open document, in tab order. |
 | `active: Option<usize>` | Index into `documents` of the active tab, or `None`. |
+| `next_doc_id: u64` | Monotonic source of `DocumentSnapshot::id`, never reused. |
+| `file_panel_open: bool` | Whether the left file-manager panel is shown. Toggled by Cmd/Ctrl+B / the toolbar **Files** button. |
+| `tab_scroll: ScrollHandle` | Horizontal scroll state for the (possibly overflowing) tab strip. |
 | `generation: u64`  | Bumped on every open; obsolete results are dropped.   |
 | `state: ViewState` | `Empty`, `Loading`, `Ready`, or `Error`; only shown when no tab is active. |
 | `archive: Option<Arc<ArchiveSource>>` | Active tab's ZIP source, for the picker. (Mirror.) |
@@ -383,6 +386,25 @@ Closing / switching:
   the neighbour (or `None`), and triggers a load if the neighbour is
   pending. Closing the last tab resets `state` to `Empty` so the
   welcome screen returns.
+
+Presentation — tab strip and file panel:
+
+- The tab strip sits between the toolbar and the body. Tabs are
+  `flex_shrink_0`, so a long list keeps its natural widths; the
+  inner track is `overflow_x_scroll()` and tracked by
+  `MainView.tab_scroll`, so distant tabs stay reachable by scrolling.
+- The left-hand file-manager panel (`render_file_panel`) lists every
+  open document. `group_documents` groups consecutive snapshots that
+  share an archive by `Arc` identity (direct files are top-level
+  rows, ZIP entries are nested under an archive header), so two
+  archives with the same entry name stay separate. Each row has an
+  active highlight, a loaded/pending dot, and a × that calls
+  `close_active_at`; clicking the row calls `switch_to`.
+- The panel is shown when `file_panel_open && !documents.is_empty()`.
+  It is toggled by the toolbar **Files** button, its own × , and
+  `Action::ToggleFilePanel` (Cmd/Ctrl+B). It is a `flex_shrink_0`
+  sibling of the grid body with a fixed width, so the grid takes the
+  remaining space and reflows when the panel is hidden.
 
 Status / error behaviour:
 
@@ -1228,7 +1250,7 @@ helper.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
 `TestAppContext` (`gpui` `test-support` dev-dependency) with
-twenty-five UI regression tests plus unit tests for the pure
+twenty-eight UI regression tests plus unit tests for the pure
 helpers:
 
 * `arrow_keys_move_selection_when_grid_focused` — injects a ready
@@ -1292,6 +1314,14 @@ drop path installs all tabs and shows no modal picker.
 * `install_archive_tabs_marks_loaded_entry_as_ready` — when the
 loader pre-opened a favourite, that entry's tab is ready and
 active; the other is pending.
+* `cmd_b_toggles_file_panel` — Cmd/Ctrl+B flips `file_panel_open`
+both ways through the grid keyboard path.
+* `group_documents_groups_by_archive_identity` — direct files are
+top-level; ZIP entries nest under their archive keyed by `Arc`
+identity.
+* `file_panel_navigation_uses_tab_lifecycle` — the switch / close
+paths the panel rows call still move `active` correctly, including
+lazy-loading the newly active pending tab.
 
 The focus tests were confirmed to fail when `.track_focus(&self.focus_handle)`
 is removed from the grid, the drag test when the cell `on_mouse_move`
@@ -1299,10 +1329,10 @@ wiring is removed, and the auto-scroll test when the global-listener
 `auto_scroll_step` call is removed — so they genuinely guard each
 behaviour.
 
-`src/ui/commands.rs` has fourteen pure unit tests for keystroke mapping
-(copy chord per platform, plain/Alt+C, arrow/Shift-arrow, Page keys,
-Home/End, Esc, F3/Shift-F3, Cmd/Ctrl+F, plain-F/Alt-F, and unbound
-keys). `src/ui/grid.rs` has two unit tests for `rect_contains`, the
+`src/ui/commands.rs` has sixteen pure unit tests for keystroke
+mapping (copy chord per platform, plain/Alt+C, arrow/Shift-arrow,
+Page keys, Home/End, Esc, F3/Shift-F3, Cmd/Ctrl+F, plain-F/Alt-F,
+Cmd/Ctrl+B, plain-B, and unbound keys). `src/ui/grid.rs` has two unit tests for `rect_contains`, the
 inclusive rectangle test used for the copy flash (inside / edge /
 outside / `None`).
 
@@ -1322,6 +1352,7 @@ outside / `None`).
 | UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
 | UI / search (binary)   | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state |
 | UI / tabs (binary)     | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; every usable ZIP entry becomes a tab synchronously; each pending tab lazy-loads on activation; a pre-opened favourite is the ready active tab |
+| UI / file panel (binary) | Cmd/Ctrl+B toggles the panel; `group_documents` nests ZIP entries under their archive by `Arc` identity; panel switch / close reuse the tab lifecycle |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
@@ -1379,20 +1410,24 @@ Notes:
   search (Cmd/Ctrl+F for the bar, F3 / Shift-F3 for navigation,
   Enter / Shift+Enter inside the bar, Esc to close), and
   multi-document tabs (drop several files, open every ZIP entry as a
-  tab, switch / close tabs) are wired. Keyboard handling requires the
-  grid to hold focus; UI regression tests guard the focus path,
-  drag-select, auto-scroll, every search-bar transition, and the
-  tab lifecycle. `anvil_core::Selection` carries 25 unit tests + 14
-  integration tests; `anvil_core::query::search` carries 22 unit
-  tests + 8 integration tests; the clipboard formatter and cell-count
-  helper are covered end-to-end against real `ParsedDocument`s.
+  tab, switch / close tabs) plus a left file-manager panel (grouped
+  by archive, Cmd/Ctrl+B to toggle) are wired. Keyboard handling
+  requires the grid to hold focus; UI regression tests guard the
+  focus path, drag-select, auto-scroll, every search-bar transition,
+  and the tab lifecycle. `anvil_core::Selection` carries 25 unit
+  tests + 14 integration tests; `anvil_core::query::search` carries
+  22 unit tests + 8 integration tests; the clipboard formatter and
+  cell-count helper are covered end-to-end against real
+  `ParsedDocument`s.
 - The search bar's UI does not yet expose `case_sensitive` /
   `column` toggles — `SearchOptions` carries them, but the bar shows
   only the query input. Column-scoped search via header click is
   unimplemented. Both are follow-up UI work; the data-side supports
   them today.
-- The tab strip is a flat horizontal row; there is no dockable side
-  panel, no tree view, and no tab reordering. Long labels are
+- The file panel is fixed on the left and a fixed width; it cannot
+  be dragged, moved to the right, or collapsed to an icon rail. It
+  shows a flat two-level tree (archive → entry) rather than nested
+  directories, and there is no tab reordering. Long labels are
   truncated with an ellipsis but there is no tooltip. Recorded as a
   follow-up.
 - Every usable ZIP entry gets a tab eagerly. A ZIP with hundreds of
@@ -1520,16 +1555,17 @@ change architecture and update this file.
 The architecture is designed so Milestones 2–5 can be added without
 restructuring. Specifically:
 
-- **Multi-document / tabs (landed).** The tab strip is the first
-  consumed step of the "multiple datasets" idea in the roadmap's
-  Future Ideas. Every usable ZIP entry becomes a tab up front and
-  extracts on demand, so the strip works as a file manager for
-  archives without paying to load them all. A future dockable side
-  panel or nested tree view can reuse the same `DocumentSnapshot`
-  list; only the presentation changes. Tab reordering,
-  recently-closed tabs, and remembering per-document state across
-  app restarts are all extensions of the current model rather than
-  rewrites.
+- **Multi-document / tabs (landed).** The tab strip and the
+  left-hand file panel are the first consumed step of the "multiple
+  datasets" idea in the roadmap's Future Ideas. Every usable ZIP
+  entry becomes a tab up front and extracts on demand, so the strip
+  and panel list archives without paying to load them all. A future
+  dockable panel (right side, draggable width) or a truly nested
+  tree (directories inside archives) can reuse the same
+  `DocumentSnapshot` list and `group_documents` grouping; only the
+  presentation changes. Tab reordering, recently-closed tabs, and
+  remembering per-document state across app restarts are all
+  extensions of the current model rather than rewrites.
 - **Selection / navigation / clipboard (Milestone 2, partial).**
   `Selection` (in `anvil_core::selection`) lives on `MainView` and
   stores `(record_index, column_index)` ranges, independent of GPUI

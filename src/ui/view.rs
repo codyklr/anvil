@@ -13,7 +13,8 @@ use std::time::Duration;
 use gpui::{
     canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Bounds, Context, ExternalPaths,
     FocusHandle, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
-    ScrollDelta, ScrollStrategy, ScrollWheelEvent, Task, UniformListScrollHandle, Window,
+    ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, Task, UniformListScrollHandle,
+    Window,
 };
 
 use anvil_core::{
@@ -168,6 +169,39 @@ impl DocumentSnapshot {
     }
 }
 
+/// A group of documents that share an archive (or are all direct
+/// files). `archive` is `None` for direct files; `entries` is a list
+/// of `(tab_index, label, is_loaded)` in tab order.
+type FileGroup = (Option<Arc<ArchiveSource>>, Vec<(usize, String, bool)>);
+
+/// Group consecutive snapshots that come from the same archive (or
+/// are all direct files) for the file-manager panel. The list is in
+/// tab order, so grouping consecutive runs preserves the order the
+/// user opened things in. Two different archives with the same file
+/// name stay in separate groups because grouping is by `Arc`
+/// identity, not by name.
+fn group_documents(documents: &[DocumentSnapshot]) -> Vec<FileGroup> {
+    let mut groups: Vec<FileGroup> = Vec::new();
+    for (index, snap) in documents.iter().enumerate() {
+        let key = snap.archive.clone();
+        let label = snap.tab_label();
+        let loaded = snap.is_loaded();
+        if let Some(last) = groups.last_mut() {
+            let same = match (&last.0, &key) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            };
+            if same {
+                last.1.push((index, label, loaded));
+                continue;
+            }
+        }
+        groups.push((key, vec![(index, label, loaded)]));
+    }
+    groups
+}
+
 /// Default `ClipboardWriter`: `arboard` (text only). Errors are turned
 /// into strings so the status bar can display them.
 fn system_clipboard_write(text: &str) -> Result<(), String> {
@@ -207,6 +241,13 @@ pub struct MainView {
     /// Monotonic counter for `DocumentSnapshot::id`. Bumped on every
     /// tab creation; never reused.
     next_doc_id: u64,
+    /// Whether the file-manager side panel is visible. Toggled with
+    /// Cmd/Ctrl+B and the toolbar button; defaults to open.
+    file_panel_open: bool,
+    /// Horizontal scroll handle for the tab strip. With many tabs the
+    /// strip overflows the window; this lets it scroll instead of
+    /// crushing every tab.
+    tab_scroll: ScrollHandle,
 
     generation: u64,
     model: Option<GridModel>,
@@ -310,6 +351,8 @@ impl MainView {
             documents: Vec::new(),
             active: None,
             next_doc_id: 0,
+            file_panel_open: true,
+            tab_scroll: ScrollHandle::new(),
             generation: 0,
             model: None,
             state: ViewState::Empty,
@@ -755,6 +798,7 @@ impl MainView {
             .child(
                 div()
                     .id("open-button")
+                    .flex_shrink_0()
                     .px_3()
                     .py_1()
                     .rounded_sm()
@@ -764,6 +808,30 @@ impl MainView {
                     .hover(|s| s.bg(rgb(0x1177bb)))
                     .on_click(cx.listener(|this, _, _, cx| this.pick_file(cx)))
                     .child("Open…"),
+            )
+            // Toggle the file-manager panel. Disabled-looking while
+            // there are no documents to list.
+            .child(
+                div()
+                    .id("toggle-files")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme::BORDER_STRONG)
+                    .cursor_pointer()
+                    .text_color(if self.file_panel_open {
+                        theme::TEXT_STRONG
+                    } else {
+                        theme::TEXT_DIM
+                    })
+                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.file_panel_open = !this.file_panel_open;
+                        cx.notify();
+                    }))
+                    .child("Files"),
             )
             .child(
                 div()
@@ -828,7 +896,9 @@ impl MainView {
             let bg = if is_active { active_bg } else { inactive_bg };
             let fg = if is_active { active_fg } else { inactive_fg };
 
-            // Tab body — clickable to switch active.
+            // Tab body — clickable to switch active. `flex_shrink_0`
+            // keeps tabs at their natural width; the strip scrolls
+            // horizontally rather than crushing them.
             tabs.push(
                 div()
                     .id(("doc-tab", index))
@@ -836,6 +906,7 @@ impl MainView {
                     .flex_row()
                     .items_center()
                     .gap_1()
+                    .flex_shrink_0()
                     .h(px(f32::from(theme::TAB_BAR_HEIGHT)))
                     .px_2()
                     .bg(bg)
@@ -867,6 +938,8 @@ impl MainView {
             );
         }
 
+        // Outer strip: a full-width bar with a horizontally scrollable
+        // inner track so a long tab list stays reachable.
         div()
             .flex()
             .flex_row()
@@ -876,7 +949,159 @@ impl MainView {
             .bg(theme::BG_TOOLBAR)
             .border_b_1()
             .border_color(theme::BORDER)
-            .children(tabs)
+            .child(
+                div()
+                    .id("tab-strip")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h_full()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll)
+                    .children(tabs),
+            )
+    }
+
+    /// Left-hand file-manager panel. Lists every open document, with
+    /// ZIP entries nested under their archive. Click a row to switch
+    /// to it; click × to close it. Toggled with Cmd/Ctrl+B or the
+    /// toolbar button; hidden by default when no documents are open.
+    fn render_file_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let groups = group_documents(&self.documents);
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.documents.len() + groups.len());
+        for (archive, entries) in &groups {
+            if let Some(archive) = archive {
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .pt_2()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(theme::TEXT_DIM)
+                        .child("▾")
+                        .child(div().truncate().child(archive.archive_name().to_string()))
+                        .into_any_element(),
+                );
+            }
+            for (index, label, loaded) in entries {
+                let is_active = Some(*index) == self.active;
+                let indented = archive.is_some();
+                let select_index = *index;
+                let close_index = *index;
+                let label_color = if is_active {
+                    theme::TEXT_STRONG
+                } else {
+                    theme::TEXT
+                };
+                let dot_color = if *loaded { theme::ACCENT } else { theme::WARN };
+                let mut row = div()
+                    .id(("file-row", *index))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .pr_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .when(is_active, |s| s.bg(theme::BG_SELECTED))
+                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.switch_to(select_index, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(dot_color)
+                            .child("●"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_color(label_color)
+                            .child(label.clone()),
+                    )
+                    .child(
+                        div()
+                            .id(("file-row-close", *index))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme::TEXT_DIM)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme::TEXT_STRONG))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |view, _, _, cx| {
+                                    view.close_active_at(close_index, cx);
+                                }),
+                            )
+                            .child("×"),
+                    );
+                row = if indented {
+                    row.pl(px(f32::from(theme::FILE_PANEL_ENTRY_INDENT)))
+                } else {
+                    row.pl_2()
+                };
+                rows.push(row.into_any_element());
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .w(theme::FILE_PANEL_WIDTH)
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme::BG_PANEL)
+            .border_r_1()
+            .border_color(theme::BORDER)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(f32::from(theme::TAB_BAR_HEIGHT)))
+                    .px_2()
+                    .border_b_1()
+                    .border_color(theme::BORDER)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::TEXT_DIM)
+                            .child(format!("{} open", self.documents.len())),
+                    )
+                    .child(
+                        div()
+                            .id("file-panel-close")
+                            .text_xs()
+                            .text_color(theme::TEXT_DIM)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme::TEXT_STRONG))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.file_panel_open = false;
+                                    cx.notify();
+                                }),
+                            )
+                            .child("×"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("file-panel-scroll")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
     }
 
     fn render_status(&self) -> impl IntoElement {
@@ -1297,6 +1522,10 @@ impl MainView {
             }
             Action::NextMatch { direction } => {
                 self.advance_match(direction, cx);
+            }
+            Action::ToggleFilePanel => {
+                self.file_panel_open = !self.file_panel_open;
+                cx.notify();
             }
         }
     }
@@ -1942,6 +2171,27 @@ impl Render for MainView {
         let search_bar = self.render_search_bar(cx);
         let overlays = self.render_overlay(cx);
 
+        // The grid body and the optional file panel share a row. The
+        // search bar (when open) sits in the normal flex column above
+        // the grid; this pushes the grid down by the bar's height
+        // instead of letting the bar overlap the top of the grid,
+        // which previously hid the active-match highlight when a
+        // match was at row 0.
+        let body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_hidden()
+            .children(search_bar)
+            .child(center)
+            .children(overlays);
+        let panel = if self.file_panel_open && !self.documents.is_empty() {
+            Some(self.render_file_panel(cx).into_any_element())
+        } else {
+            None
+        };
+
         div()
             .flex()
             .flex_col()
@@ -1957,19 +2207,12 @@ impl Render for MainView {
             .child(self.render_tab_bar(cx))
             .child(
                 div()
-                    .relative()
                     .flex()
-                    .flex_col()
+                    .flex_row()
                     .flex_1()
-                    // The search bar (when open) sits in the normal
-                    // flex column above the grid; this pushes the
-                    // grid down by the bar's height instead of
-                    // letting the bar overlap the top of the grid,
-                    // which previously hid the active-match
-                    // highlight when a match was at row 0.
-                    .children(search_bar)
-                    .child(center)
-                    .children(overlays),
+                    .overflow_hidden()
+                    .when_some(panel, |this, panel| this.child(panel))
+                    .child(body),
             )
             .child(self.render_status())
     }
@@ -2959,6 +3202,105 @@ mod tests {
         cx.run_until_parked();
         cx.update_window_entity(&view, |view, _, _| {
             assert!(view.documents[0].is_loaded());
+            assert_eq!(view.active, Some(0));
+        });
+    }
+
+    /// Cmd/Ctrl+B toggles the file-manager panel. The binding routes
+    /// through `on_grid_key_down` like every other grid shortcut, so
+    /// this also re-verifies the keyboard path.
+    #[gpui::test]
+    async fn cmd_b_toggles_file_panel(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.file_panel_open, "panel open by default");
+        });
+
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-b"
+        } else {
+            "ctrl-b"
+        };
+        cx.simulate_keystrokes(chord);
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(!view.file_panel_open, "first toggle hides it");
+        });
+        cx.simulate_keystrokes(chord);
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.file_panel_open, "second toggle shows it again");
+        });
+    }
+
+    /// `group_documents` groups direct files on their own and nests
+    /// ZIP entries under their archive, keyed by `Arc` identity so two
+    /// archives with the same file name stay separate.
+    #[test]
+    fn group_documents_groups_by_archive_identity() {
+        let (_dir_a, archive_a) = make_zip_archive(&["a.csv", "b.csv"]);
+        let (_dir_b, archive_b) = make_zip_archive(&["c.csv"]);
+        let docs = vec![
+            DocumentSnapshot::from_doc(0, Arc::new(sample_document()), None, None),
+            DocumentSnapshot::pending_entry(1, archive_a.clone(), "a.csv".into()),
+            DocumentSnapshot::pending_entry(2, archive_a.clone(), "b.csv".into()),
+            DocumentSnapshot::pending_entry(3, archive_b.clone(), "c.csv".into()),
+            DocumentSnapshot::from_doc(4, Arc::new(sample_document()), None, None),
+        ];
+        let groups = group_documents(&docs);
+
+        assert_eq!(groups.len(), 4, "two direct files + two archives");
+        assert!(groups[0].0.is_none(), "first direct file is top-level");
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1[0].0, 0);
+
+        assert!(groups[1]
+            .0
+            .as_ref()
+            .is_some_and(|a| Arc::ptr_eq(a, &archive_a)));
+        assert_eq!(groups[1].1.len(), 2, "both archive_a entries grouped");
+        assert_eq!(groups[1].1[0].0, 1);
+        assert_eq!(groups[1].1[1].0, 2);
+
+        assert!(groups[2]
+            .0
+            .as_ref()
+            .is_some_and(|a| Arc::ptr_eq(a, &archive_b)));
+        assert_eq!(groups[2].1.len(), 1);
+
+        assert!(groups[3].0.is_none(), "last direct file is top-level");
+        assert_eq!(groups[3].1[0].0, 4);
+    }
+
+    /// The panel's row actions reuse the tab lifecycle: switching and
+    /// closing still move `active` correctly, so a test that drives the
+    /// underlying methods is enough to pin the behaviour the panel
+    /// depends on.
+    #[gpui::test]
+    async fn file_panel_navigation_uses_tab_lifecycle(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv"]);
+        let ar = archive.clone();
+        cx.update_window_entity(&view, move |view, _, cx| {
+            view.install_archive_tabs(ar, None, None, cx);
+        });
+        cx.run_until_parked();
+
+        // Switch via the same path the panel's row click uses.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.switch_to(1, cx);
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.active, Some(1));
+            assert!(view.documents[1].is_loaded());
+        });
+
+        // Close via the same path the panel's × uses.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.close_active_at(1, cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 1);
             assert_eq!(view.active, Some(0));
         });
     }

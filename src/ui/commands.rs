@@ -46,6 +46,8 @@ pub(super) enum Action {
     /// is previous, `+1` is next. The actual navigation depends on
     /// the current match list.
     NextMatch { direction: i8 },
+    /// Show or hide the file-manager side panel (Cmd/Ctrl+B).
+    ToggleFilePanel,
 }
 
 /// Translate a keystroke into an [`Action`], or `None` when the chord is
@@ -61,6 +63,10 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
 
     if key == "f" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
         return Some(Action::OpenSearch);
+    }
+
+    if key == "b" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::ToggleFilePanel);
     }
 
     if key == "escape" {
@@ -253,5 +259,20 @@ mod tests {
     #[test]
     fn shift_f3_jumps_to_previous_match() {
         assert_eq!(act("shift-f3"), Some(Action::NextMatch { direction: -1 }));
+    }
+
+    #[test]
+    fn toggle_file_panel_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-b"
+        } else {
+            "ctrl-b"
+        };
+        assert_eq!(act(chord), Some(Action::ToggleFilePanel));
+    }
+
+    #[test]
+    fn plain_b_is_not_toggle_file_panel() {
+        assert_eq!(act("b"), None);
     }
 }

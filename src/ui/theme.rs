@@ -54,6 +54,10 @@ pub const WARN: Rgba = rgb(0xd7ba7d);
 pub const TOOLBAR_HEIGHT: Pixels = px(38.);
 pub const TAB_BAR_HEIGHT: Pixels = px(28.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
+/// Width of the left-hand file-manager panel.
+pub const FILE_PANEL_WIDTH: Pixels = px(220.);
+/// Left padding for a file row nested under an archive group header.
+pub const FILE_PANEL_ENTRY_INDENT: Pixels = px(18.);
 pub const HEADER_HEIGHT: Pixels = px(24.);
 pub const ROW_HEIGHT: Pixels = px(22.);
 pub const ROW_NUMBER_WIDTH: Pixels = px(64.);

@@ -188,8 +188,16 @@ this may freeze the UI.
 - [x] Errors from background open tasks (including a failed lazy
   extraction, which drops the tab) surface in the status bar and do
   not tear down the other tabs.
-- [ ] Dockable side panel / tree view (a flat tab strip landed here;
-  a future slice can reuse `DocumentSnapshot`).
+- [x] Left-hand file-manager panel listing every open document,
+  grouped by archive (`group_documents`, keyed by `Arc` identity so
+  same-named archives stay separate). Click to switch, × to close;
+  loaded/pending dot per row. Toggled by Cmd/Ctrl+B, the toolbar
+  **Files** button, and the panel's own × .
+- [x] Tab strip scrolls horizontally instead of crushing tabs when
+  the list is long (`overflow_x_scroll` + `tab_scroll`).
+- [ ] Dockable / resizable / right-side panel, and a truly nested
+  tree (directories inside archives). The data model already
+  supports it; only the presentation is missing.
 - [ ] Tab reordering and a tooltip for truncated labels.
 - [ ] Remember recently-closed tabs.
 
@@ -244,6 +252,9 @@ this may freeze the UI.
   every usable ZIP entry becomes a tab synchronously; each pending
   tab lazy-loads on activation; a pre-opened favourite is the ready
   active tab).
+- [x] UI regression tests for the file panel (Cmd/Ctrl+B toggles it;
+  `group_documents` nests ZIP entries under their archive keyed by
+  `Arc` identity; panel switch / close reuse the tab lifecycle).
 
 ### Dependencies
 
@@ -479,10 +490,11 @@ whether to elevate one.
 - **Additional archive formats** — `gz`, `tar.gz`, `7z`, `tar.zst`,
   `parquet` (parquet would require a new source path that bypasses
   the parser).
-- **Dockable side panel / document tree** — the multi-document model
-  landed as a flat tab strip (see Milestone 2). A future dockable
-  side panel or nested tree view can reuse `DocumentSnapshot`
-  unchanged; only the presentation differs.
+- **Dockable / resizable side panel** — a left file panel landed in
+  Milestone 2 (see the Multi-document tabs section). Making it
+  resizable, movable to the right, or collapsible to an icon rail,
+  and growing it into a truly nested tree, can reuse
+  `DocumentSnapshot` and `group_documents` unchanged.
 - **Dataset comparison** — diff two files by `(record_index, column)`
   with a side-by-side view.
 - **Configurable copy format** — give Cmd/Ctrl+C a chosen output
