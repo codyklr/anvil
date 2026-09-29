@@ -40,7 +40,7 @@ fn probe(path: &str) -> i32 {
                     candidate.entry_name, candidate.compressed_size, candidate.uncompressed_size
                 );
             }
-            println!("(multiple files; the GUI would show the archive picker)");
+            println!("(multiple files; the GUI opens every usable entry as a tab)");
             0
         }
         Err(err) => {

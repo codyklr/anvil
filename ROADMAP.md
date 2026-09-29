@@ -96,9 +96,11 @@ and react appropriately when the archive has multiple data files.
   machine.
 - `cargo run --release --bin anvil --probe fixtures/multi.zip`
   lists multiple candidate files and prints
-  `(multiple files; the GUI would show the archive picker)`.
-- The GUI window opens, the file picker works, drag/drop works, the
-  archive picker appears for `multi.zip`, and scrolling is smooth on
+  `(multiple files; the GUI opens every usable entry as a tab)`.
+  (The probe prints the loader's `NeedArchiveChoice` result; the UI
+  now turns that into one tab per entry rather than a modal picker.)
+- The GUI window opens, the file picker works, drag/drop works, every
+  usable `multi.zip` entry appears as a tab, and scrolling is smooth on
   the 1M-row fixture.
 
 ### Known gaps carried forward into Milestone 2
@@ -170,12 +172,22 @@ this may freeze the UI.
   adjustment for closing active / earlier / last tabs.
 - [x] Opening a new file no longer replaces the existing document;
   it adds a tab.
-- [x] Archive picker: picking one entry adds a tab; a new
-  "Open all N files as tabs" button (`choose_all_entries`) loads
-  every usable entry sequentially in the background, adding tabs
-  as each completes and aborting if `generation` has moved on.
-- [x] Errors from background open tasks surface in the status bar
-  and do not tear down the current tab.
+- [x] Every usable ZIP entry becomes a tab immediately on open
+  (`install_archive_tabs`); the ZIP central directory is enough to
+  build the strip without decompressing anything. The entry the
+  loader pre-opened is marked ready; the rest are pending.
+- [x] Pending tabs extract lazily: `ensure_active_loaded` runs
+  `load_entry` on first activation, `apply_lazy_result` stores the
+  document (looked up by stable tab `id`) and rebuilds the model
+  only if the tab is still active. A detached task means switching
+  away does not cancel the load or leave the tab stuck.
+- [x] Multi-entry ZIPs no longer force a modal picker. The picker
+  remains reachable from the toolbar's **Archive…** button as an
+  entry list; clicking an entry switches to its tab
+  (`switch_to_entry`).
+- [x] Errors from background open tasks (including a failed lazy
+  extraction, which drops the tab) surface in the status bar and do
+  not tear down the other tabs.
 - [ ] Dockable side panel / tree view (a flat tab strip landed here;
   a future slice can reuse `DocumentSnapshot`).
 - [ ] Tab reordering and a tooltip for truncated labels.
@@ -229,7 +241,9 @@ this may freeze the UI.
   creates a tab; two sequential opens create two tabs; errors with
   an open tab keep it; tab switch restores per-document selection /
   scroll; closing the active / earlier / last tab adjusts `active`;
-  `choose_all_entries` adds one tab per ZIP entry).
+  every usable ZIP entry becomes a tab synchronously; each pending
+  tab lazy-loads on activation; a pre-opened favourite is the ready
+  active tab).
 
 ### Dependencies
 

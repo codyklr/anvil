@@ -240,14 +240,15 @@ reading a single set of names.
 | `focus_search_on_next_frame: bool` | Set when the search bar opens; the next `Render::render` schedules a deferred `window.focus` for the bar. |
 
 `DocumentSnapshot` owns the per-document state that survives a tab
-switch: the parsed `Arc<ParsedDocument>`, the archive / entry pair
-for ZIP-backed tabs, the selection, the horizontal scroll offset, the
-vertical scroll handle, the search state, and the copy-flash state.
-`MainView::snapshot_active` copies the live fields into
-`documents[active]`; `MainView::load_active` copies the other way.
-`switch_to`, `close_active_at`, and `apply` are the only callers that
-change `active`, so the mirror is always consistent at the point
-render observes it.
+switch: a stable `id`, an optional parsed `Arc<ParsedDocument>`
+(`None` for a ZIP entry that has not been extracted yet), the archive
+/ entry pair for ZIP-backed tabs, a `loading` guard, the selection,
+the horizontal scroll offset, the vertical scroll handle, the search
+state, and the copy-flash state. `MainView::snapshot_active` copies
+the live fields into `documents[active]`; `MainView::load_active`
+copies the other way. `switch_to`, `close_active_at`, and `apply` are
+the only callers that change `active`, so the mirror is always
+consistent at the point render observes it.
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
 Both are cheap to clone, so the uniform-list row renderer can capture
@@ -312,15 +313,17 @@ error.
 
 ### Multi-document / tabs
 
-Anvil keeps every successfully opened file (and every chosen ZIP
-entry) as a separate document. The tab strip renders above the grid
-and below the toolbar; it is zero-height when no documents are open.
-The state model is:
+Anvil keeps every opened file, and every usable ZIP entry, as a
+separate document. The tab strip renders above the grid and below
+the toolbar; it is zero-height when no documents are open. The state
+model is:
 
 - `documents: Vec<DocumentSnapshot>` — one entry per tab, in tab
-  order. The `DocumentSnapshot` owns the parsed document, the
-  optional archive / entry pair for ZIP-backed tabs, and all the
-  per-document UI state (selection, scroll, search, copy flash).
+  order. Each snapshot owns a stable `id` (from
+  `MainView::next_doc_id`), an optional parsed document (see lazy
+  loading below), the optional archive / entry pair for ZIP-backed
+  tabs, and all the per-document UI state (selection, scroll,
+  search, copy flash).
 - `active: Option<usize>` — the active tab index, or `None`.
 - The live per-document fields on `MainView` (`model`, `selection`,
   `scroll_x`, `search_*`, `copy_flash_*`, `v_scroll`, `archive`,
@@ -334,35 +337,57 @@ Two helpers keep the mirror consistent:
   the user's latest actions.
 - `load_active` copies `documents[active]` into the live fields. It
   is called after every change of `active`; with `active == None` it
-  falls back to `clear_live_per_document`.
+  falls back to `clear_live_per_document`. When the active snapshot
+  has no document yet, `model` becomes `None` and the renderer shows
+  a loading placeholder.
 
 Opening:
 
 - `begin_open` spawns a background task; its `OpenOutcome::Ready` is
-  delivered to `apply`, which snapshots the previous tab, pushes a
-  new `DocumentSnapshot`, and makes it active.
+  delivered to `apply`, which snapshots the previous tab, pushes the
+  new tab(s), and makes one active.
 - Multi-file drops call `begin_open` once per path, so each path
   becomes its own tab.
-- A ZIP with one usable entry auto-opens as a tab (via `load`'s
-  `best_candidate` rule). A ZIP with several equally-ranked entries
-  shows the archive picker; picking one adds that entry as a tab.
-- The picker also offers "Open all N files as tabs", implemented by
-  `choose_all_entries`. That loops over the usable entries on the
-  background executor and calls `apply` for each; tabs appear
-  progressively and the loop aborts if `generation` has moved on.
+- A direct file becomes a single loaded tab.
+- A ZIP-backed open (either `Ready` with an archive, or
+  `NeedArchiveChoice`) calls `install_archive_tabs`. Every **usable**
+  entry gets its own tab immediately: the ZIP central directory
+  already lists names and sizes, so no decompression is needed to
+  build the tab strip. The entry the loader pre-opened (when there
+  is a clear favourite) is marked ready; the rest are pending.
+- The modal archive picker is no longer shown automatically. It
+  remains reachable from the toolbar's **Archive…** button to list a
+  ZIP's contents (including skipped entries); clicking an entry calls
+  `switch_to_entry`, which switches to the existing tab.
+
+Lazy loading:
+
+- A pending tab has `doc == None`. When it becomes active,
+  `ensure_active_loaded` starts a background `load_entry` task (the
+  same extract-to-temp + index path as a normal open) and sets
+  `loading` so repeated switches do not duplicate the work. The task
+  is detached, so switching away or opening another file does not
+  cancel it and leave the tab permanently stuck.
+- On completion `apply_lazy_result` looks the tab up by `id`, stores
+  the parsed document, and rebuilds the live model if the tab is
+  still active. If the tab was closed while loading, the result is
+  discarded. If extraction failed, the tab is removed and the error
+  goes to the status bar.
 
 Closing / switching:
 
-- `switch_to(index)` snapshots the current tab, moves `active`, and
-  loads the new snapshot. It also sets `focus_grid_on_next_frame` so
-  the grid takes keyboard focus.
-- `close_active_at(index)` removes the snapshot and adjusts `active`
-  to the neighbour (or `None`). Closing the last tab resets `state`
-  to `Empty` so the welcome screen returns.
+- `switch_to(index)` snapshots the current tab, moves `active`,
+  loads the new snapshot, and calls `ensure_active_loaded`. It also
+  sets `focus_grid_on_next_frame` so the grid takes keyboard focus.
+- `close_active_at(index)` removes the snapshot, adjusts `active` to
+  the neighbour (or `None`), and triggers a load if the neighbour is
+  pending. Closing the last tab resets `state` to `Empty` so the
+  welcome screen returns.
 
 Status / error behaviour:
 
 - With at least one tab open, the active document is always rendered;
+  a pending active tab shows a `Loading…` placeholder.
   `Empty` / `Loading` / `Error` only take over when `active == None`.
 - An error from a background open task sets `status_message` and does
   not tear down the current tab. When no tab is open it also sets
@@ -1203,7 +1228,7 @@ helper.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
 `TestAppContext` (`gpui` `test-support` dev-dependency) with
-twenty-three UI regression tests plus unit tests for the pure
+twenty-five UI regression tests plus unit tests for the pure
 helpers:
 
 * `arrow_keys_move_selection_when_grid_focused` — injects a ready
@@ -1258,8 +1283,15 @@ selects a neighbour.
 earlier inactive tab shifts the active index down.
 * `closing_last_tab_leaves_empty_state` — closing the only tab
 resets to the empty document list.
-* `open_all_entries_adds_a_tab_per_entry` — `choose_all_entries` on
-a real three-entry ZIP adds three tabs.
+* `archive_entries_become_tabs_immediately` — `install_archive_tabs`
+on a real three-entry ZIP creates all three tabs synchronously;
+the first lazy-loads, switching to the second loads it, the third
+stays pending.
+* `apply_need_archive_choice_installs_all_tabs` — the multi-entry
+drop path installs all tabs and shows no modal picker.
+* `install_archive_tabs_marks_loaded_entry_as_ready` — when the
+loader pre-opened a favourite, that entry's tab is ready and
+active; the other is pending.
 
 The focus tests were confirmed to fail when `.track_focus(&self.focus_handle)`
 is removed from the grid, the drag test when the cell `on_mouse_move`
@@ -1289,7 +1321,7 @@ outside / `None`).
 | UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
 | UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
 | UI / search (binary)   | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state |
-| UI / tabs (binary)     | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; `choose_all_entries` adds one tab per ZIP entry |
+| UI / tabs (binary)     | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; every usable ZIP entry becomes a tab synchronously; each pending tab lazy-loads on activation; a pre-opened favourite is the ready active tab |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
@@ -1363,6 +1395,10 @@ Notes:
   panel, no tree view, and no tab reordering. Long labels are
   truncated with an ellipsis but there is no tooltip. Recorded as a
   follow-up.
+- Every usable ZIP entry gets a tab eagerly. A ZIP with hundreds of
+  entries therefore creates hundreds of (initially unloaded) tabs.
+  Lazy loading keeps memory bounded to the tabs the user actually
+  visits, but there is no cap or grouping yet.
 - Closing a tab does not prompt for unsaved state (there is none yet)
   and does not remember recently-closed tabs.
 - No filter, no sort, no type inference, no column statistics.
@@ -1486,11 +1522,14 @@ restructuring. Specifically:
 
 - **Multi-document / tabs (landed).** The tab strip is the first
   consumed step of the "multiple datasets" idea in the roadmap's
-  Future Ideas. A future dockable side panel or nested tree view
-  can reuse the same `DocumentSnapshot` list; only the presentation
-  changes. Tab reordering, recently-closed tabs, and remembering
-  per-document state across app restarts are all extensions of the
-  current model rather than rewrites.
+  Future Ideas. Every usable ZIP entry becomes a tab up front and
+  extracts on demand, so the strip works as a file manager for
+  archives without paying to load them all. A future dockable side
+  panel or nested tree view can reuse the same `DocumentSnapshot`
+  list; only the presentation changes. Tab reordering,
+  recently-closed tabs, and remembering per-document state across
+  app restarts are all extensions of the current model rather than
+  rewrites.
 - **Selection / navigation / clipboard (Milestone 2, partial).**
   `Selection` (in `anvil_core::selection`) lives on `MainView` and
   stores `(record_index, column_index)` ranges, independent of GPUI

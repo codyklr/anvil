@@ -38,9 +38,12 @@ src/
     mod.rs            Cells iterator, Cell, ParsedDocument
     delimit.rs        quote-aware delimiter + header detection
     indexing.rs       record byte-offset index, diagnostics
+  selection.rs      selection model (GPUI-free)
+  query.rs          search + match-range helpers (GPUI-free)
   ui/               GPUI presentation (binary only)
     app.rs            window lifecycle
-    view.rs           toolbar + grid + status bar + archive picker
+    view.rs           toolbar + tabs + grid + status + overlays
+    commands.rs       keyboard chord -> action binding table
     grid.rs           column layout + row rendering helpers
     archive_picker.rs archive presentation helpers
     theme.rs          palette + metrics
@@ -75,12 +78,16 @@ A ZIP becomes an `ArchiveSource` which:
    encrypted entries, unsupported compression methods, and oversized or
    zip-bomb-ratio entries,
 3. ranks usable entries by extension (`csv`/`tsv` > `dat` > `txt`),
-4. auto-opens the single best-ranked entry, or asks the UI to show a picker
-   when several share the top rank.
+4. auto-opens the single best-ranked entry when there is a clear
+   favourite, otherwise reports that the choice is ambiguous.
 
-The selected entry is decompressed to a `tempfile`, then memory-mapped and
-indexed through the *same* path as a normal file. The temp directory is kept
-alive by an `Arc<TempDir>` inside `OpenedSource` and removed on drop.
+In the GUI, every usable entry becomes its own tab immediately (the
+central directory already lists names and sizes). The entry the loader
+pre-opened is ready; the others are extracted and indexed lazily when
+their tab is first activated. Each entry is decompressed to a
+`tempfile`, then memory-mapped and indexed through the *same* path as a
+normal file. The temp directory is kept alive by an `Arc<TempDir>`
+inside `OpenedSource` and removed on drop.
 
 ## Threading
 
@@ -92,7 +99,7 @@ is safe. The UI thread only ever renders the already-built index.
 ## Tests
 
 ```sh
-cargo test        # 38 data-side tests (parsing, quoting, ZIP safety, ...)
+cargo test        # 60 data-side + 43 binary (UI / command / geometry) tests
 cargo test --release --test core -- --ignored measure_large   # throughput
 ```
 

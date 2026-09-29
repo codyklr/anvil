@@ -46,16 +46,24 @@ type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 /// code can keep reading from one place.
 #[derive(Clone)]
 struct DocumentSnapshot {
-    /// Arc-shared parsed document; multiple snapshots can share a
-    /// doc only when the user opens the same file twice (today that
-    /// does not happen — each open is a fresh parse — but the Arc
-    /// is the right shape for the future).
-    doc: Arc<ParsedDocument>,
+    /// Stable identifier assigned when the tab is created. Lazy-load
+    /// completion looks the tab up by id, so a tab closed mid-load
+    /// cannot be resurrected and a reordered list cannot confuse the
+    /// result with a different tab.
+    id: u64,
+    /// Arc-shared parsed document, or `None` while a ZIP-backed tab
+    /// is waiting to be extracted and indexed. Tabs for every usable
+    /// archive entry are created immediately when the ZIP is opened;
+    /// only the active one is loaded on demand.
+    doc: Option<Arc<ParsedDocument>>,
     /// Set when this document came from a ZIP entry; the picker
-    /// overlay consults it.
+    /// overlay consults it and lazy loads use it to locate the entry.
     archive: Option<Arc<ArchiveSource>>,
     /// The archive entry this document was loaded from.
     entry_name: Option<String>,
+    /// True while a lazy load for this tab is in flight, so repeated
+    /// `switch_to` calls do not spawn duplicate extraction tasks.
+    loading: bool,
     /// Cell / range selection.
     selection: Selection,
     /// Horizontal scroll position in pixels.
@@ -83,15 +91,20 @@ struct DocumentSnapshot {
 }
 
 impl DocumentSnapshot {
+    /// A fully-loaded tab (direct file, or a ZIP entry that has
+    /// already been extracted and indexed).
     fn from_doc(
+        id: u64,
         doc: Arc<ParsedDocument>,
         archive: Option<Arc<ArchiveSource>>,
         entry_name: Option<String>,
     ) -> Self {
         Self {
-            doc,
+            id,
+            doc: Some(doc),
             archive,
             entry_name,
+            loading: false,
             selection: Selection::empty(),
             scroll_x: 0.0,
             v_scroll: UniformListScrollHandle::new(),
@@ -105,12 +118,46 @@ impl DocumentSnapshot {
         }
     }
 
+    /// A ZIP entry tab that has not been loaded yet. Created for
+    /// every usable archive entry when the archive is opened; the
+    /// document is extracted and indexed the first time the tab
+    /// becomes active.
+    fn pending_entry(id: u64, archive: Arc<ArchiveSource>, entry_name: String) -> Self {
+        Self {
+            id,
+            doc: None,
+            archive: Some(archive),
+            entry_name: Some(entry_name),
+            loading: false,
+            selection: Selection::empty(),
+            scroll_x: 0.0,
+            v_scroll: UniformListScrollHandle::new(),
+            search_open: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_active: -1,
+            search_generation: 0,
+            copy_flash_rect: None,
+            copy_flash_generation: 0,
+        }
+    }
+
+    fn is_loaded(&self) -> bool {
+        self.doc.is_some()
+    }
+
     /// Short label for the tab strip. Truncated to a sane length.
     fn tab_label(&self) -> String {
         let raw = match (&self.archive, &self.entry_name) {
-            (Some(a), Some(e)) => format!("{}:{}", a.archive_name(), e),
-            (None, _) => self.doc.opened.display_label(),
-            _ => self.doc.opened.display_label(),
+            // ZIP-backed tab: the entry name on its own is usually
+            // enough; the archive name is only shown when two entries
+            // in different archives could collide. We keep it short
+            // for the strip by showing just the entry basename.
+            (Some(_), Some(e)) => e.rsplit(['/', '\\']).next().unwrap_or(e).to_string(),
+            _ => match &self.doc {
+                Some(doc) => doc.opened.display_label(),
+                None => "loading…".to_string(),
+            },
         };
         if raw.chars().count() > 40 {
             let truncated: String = raw.chars().take(37).collect();
@@ -157,6 +204,9 @@ pub struct MainView {
     /// state into `documents[active]` and loads the new snapshot's
     /// state into the live fields.
     active: Option<usize>,
+    /// Monotonic counter for `DocumentSnapshot::id`. Bumped on every
+    /// tab creation; never reused.
+    next_doc_id: u64,
 
     generation: u64,
     model: Option<GridModel>,
@@ -259,6 +309,7 @@ impl MainView {
         Self {
             documents: Vec::new(),
             active: None,
+            next_doc_id: 0,
             generation: 0,
             model: None,
             state: ViewState::Empty,
@@ -348,7 +399,10 @@ impl MainView {
             self.clear_live_per_document();
             return;
         };
-        self.model = Some(GridModel::new(snap.doc.clone()));
+        // A pending (not-yet-loaded) tab has no document yet; render
+        // code shows a loading placeholder for it until the lazy load
+        // completes.
+        self.model = snap.doc.clone().map(GridModel::new);
         self.archive = snap.archive;
         self.selected_entry = snap.entry_name;
         self.selection = snap.selection;
@@ -363,6 +417,13 @@ impl MainView {
         self.copy_flash_generation = snap.copy_flash_generation;
     }
 
+    /// Allocate the next unique `DocumentSnapshot` id.
+    fn alloc_doc_id(&mut self) -> u64 {
+        let id = self.next_doc_id;
+        self.next_doc_id = self.next_doc_id.wrapping_add(1);
+        id
+    }
+
     /// Switch to the tab at `index`. No-op if it is already active
     /// or out of range.
     fn switch_to(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -375,6 +436,7 @@ impl MainView {
         self.snapshot_active();
         self.active = Some(index);
         self.load_active();
+        self.ensure_active_loaded(cx);
         // Focus the grid so the keyboard surface is ready. The same
         // deferred-focus path is used as after a fresh open.
         self.focus_grid_on_next_frame = true;
@@ -408,6 +470,9 @@ impl MainView {
             // No tabs left — the centre panel falls back to the
             // empty state so the welcome screen reappears.
             self.state = ViewState::Empty;
+        } else {
+            // The neighbour may itself be a pending ZIP entry.
+            self.ensure_active_loaded(cx);
         }
         if was_active && new_active.is_some() {
             self.focus_grid_on_next_frame = true;
@@ -446,30 +511,32 @@ impl MainView {
                     archive,
                     entry,
                 } = *loaded;
-                // Capture the previous tab's live state before
-                // rebuilding the live fields around the new document.
-                self.snapshot_active();
                 let doc = Arc::new(document);
-                self.documents
-                    .push(DocumentSnapshot::from_doc(doc.clone(), archive, entry));
-                self.active = Some(self.documents.len() - 1);
-                self.load_active();
-                self.show_picker = false;
-                self.drag_selecting = false;
-                self.status_message = None;
-                self.focus_grid_on_next_frame = true;
-                self.state = ViewState::Ready;
+                match archive {
+                    // A ZIP-backed open installs one tab per usable
+                    // entry, with the loader's favourite pre-loaded
+                    // and the rest waiting to be extracted on demand.
+                    Some(source) => self.install_archive_tabs(source, entry, Some(doc), cx),
+                    // A direct file is a single tab.
+                    None => {
+                        self.snapshot_active();
+                        let id = self.alloc_doc_id();
+                        self.documents
+                            .push(DocumentSnapshot::from_doc(id, doc, None, None));
+                        self.active = Some(self.documents.len() - 1);
+                        self.load_active();
+                        self.show_picker = false;
+                        self.drag_selecting = false;
+                        self.status_message = None;
+                        self.focus_grid_on_next_frame = true;
+                        self.state = ViewState::Ready;
+                    }
+                }
             }
             OpenOutcome::NeedArchiveChoice(source) => {
-                self.archive = Some(source);
-                self.selected_entry = None;
-                self.show_picker = true;
-                // Keep the current tab's selection / scroll / search
-                // state intact; the picker is a transient overlay.
-                self.drag_selecting = false;
-                self.status_message = None;
-                self.focus_grid_on_next_frame = true;
-                self.state = ViewState::Ready;
+                // No clear favourite: every usable entry becomes a
+                // pending tab and the first one loads immediately.
+                self.install_archive_tabs(source, None, None, cx);
             }
             OpenOutcome::Error(message) => {
                 // Surface the error in the status bar; do not tear
@@ -492,79 +559,161 @@ impl MainView {
         cx.notify();
     }
 
-    fn choose_entry(&mut self, entry: String, cx: &mut Context<Self>) {
-        let Some(archive) = self.archive.clone() else {
-            return;
-        };
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.state = ViewState::Loading(format!("extracting {entry}"));
-        self.show_picker = false;
-        cx.notify();
-
-        let executor = cx.background_executor().clone();
-        let task = cx.spawn(async move |this, cx| {
-            let outcome = executor
-                .spawn(async move { extract_and_index(&archive, &entry) })
-                .await;
-            this.update(cx, |view, cx| {
-                if view.generation != generation {
-                    return;
-                }
-                view.apply(outcome, cx);
-            })
-            .ok();
-        });
-        self.task = Some(task);
-    }
-
-    /// Extract and index every usable archive entry, adding each as
-    /// its own tab. Entries are processed sequentially on the
-    /// background executor so we never hold more than one extraction
-    /// in memory at a time; tabs appear progressively as each entry
-    /// finishes. Bumping `generation` before the loop means a
-    /// subsequent open (or a close-all) aborts the remaining work.
-    fn choose_all_entries(&mut self, cx: &mut Context<Self>) {
-        let Some(archive) = self.archive.clone() else {
-            return;
-        };
-        let entries: Vec<String> = archive
+    /// Install one tab per usable archive entry. `loaded_entry` /
+    /// `loaded_doc` are `Some` when the loader already produced a
+    /// document for one of the entries (the auto-opened favourite);
+    /// that entry becomes a ready tab and the others become pending
+    /// tabs whose data is extracted on first activation.
+    ///
+    /// Every usable entry gets a tab immediately because the archive
+    /// metadata (entry names and sizes) is available from the ZIP
+    /// central directory without decompressing anything.
+    fn install_archive_tabs(
+        &mut self,
+        source: Arc<ArchiveSource>,
+        loaded_entry: Option<String>,
+        loaded_doc: Option<Arc<ParsedDocument>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.snapshot_active();
+        let usable: Vec<String> = source
             .candidates
             .iter()
             .filter(|c| c.usable)
             .map(|c| c.entry_name.clone())
             .collect();
-        if entries.is_empty() {
+        if usable.is_empty() {
+            let message = "archive contains no usable data files".to_string();
+            self.status_message = Some(format!("error: {message}"));
+            if self.documents.is_empty() {
+                self.state = ViewState::Error(message);
+            }
+            cx.notify();
             return;
         }
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.state = ViewState::Loading(format!("loading {} archive entries", entries.len()));
-        self.show_picker = false;
-        cx.notify();
 
-        let executor = cx.background_executor().clone();
-        let task = cx.spawn(async move |this, cx| {
-            for entry in entries {
-                let archive = archive.clone();
-                let outcome = executor
-                    .spawn(async move { extract_and_index(&archive, &entry) })
-                    .await;
-                let stop = this
-                    .update(cx, |view, cx| {
-                        if view.generation != generation {
-                            return true;
-                        }
-                        view.apply(outcome, cx);
-                        false
-                    })
-                    .unwrap_or(true);
-                if stop {
-                    break;
+        let mut active_index = self.documents.len();
+        for entry in usable {
+            let id = self.alloc_doc_id();
+            let is_loaded_favourite = loaded_entry.as_deref() == Some(entry.as_str());
+            match (is_loaded_favourite, loaded_doc.as_ref()) {
+                (true, Some(doc)) => {
+                    self.documents.push(DocumentSnapshot::from_doc(
+                        id,
+                        doc.clone(),
+                        Some(source.clone()),
+                        Some(entry),
+                    ));
+                    active_index = self.documents.len() - 1;
+                }
+                _ => {
+                    self.documents
+                        .push(DocumentSnapshot::pending_entry(id, source.clone(), entry));
                 }
             }
-        });
-        self.task = Some(task);
+        }
+
+        self.active = Some(active_index);
+        self.load_active();
+        self.ensure_active_loaded(cx);
+        self.show_picker = false;
+        self.drag_selecting = false;
+        self.status_message = None;
+        self.focus_grid_on_next_frame = true;
+        self.state = ViewState::Ready;
+        cx.notify();
+    }
+
+    /// Start a background extract+index pass for the active tab if it
+    /// is a pending ZIP entry. No-op for loaded tabs and for tabs
+    /// whose load is already in flight. The task is detached so
+    /// switching away (or opening another file) does not cancel it
+    /// and leave the tab permanently stuck in `loading`.
+    fn ensure_active_loaded(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.active else {
+            return;
+        };
+        let Some(snap) = self.documents.get(active) else {
+            return;
+        };
+        if snap.is_loaded() || snap.loading {
+            return;
+        }
+        let Some(archive) = snap.archive.clone() else {
+            return;
+        };
+        let Some(entry) = snap.entry_name.clone() else {
+            return;
+        };
+        let id = snap.id;
+        if let Some(snap) = self.documents.get_mut(active) {
+            snap.loading = true;
+        }
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = executor
+                .spawn(async move { extract_and_index(&archive, &entry) })
+                .await;
+            this.update(cx, |view, cx| view.apply_lazy_result(id, outcome, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Deliver the result of a lazy extraction to the tab it belongs
+    /// to. The tab may have been closed while the extraction was in
+    /// flight, in which case the result is discarded.
+    fn apply_lazy_result(&mut self, id: u64, outcome: OpenOutcome, cx: &mut Context<Self>) {
+        let Some(index) = self.documents.iter().position(|d| d.id == id) else {
+            return;
+        };
+        if let Some(snap) = self.documents.get_mut(index) {
+            snap.loading = false;
+        }
+        match outcome {
+            OpenOutcome::Ready(loaded) => {
+                let LoadedDocument {
+                    document,
+                    archive,
+                    entry,
+                } = *loaded;
+                if let Some(snap) = self.documents.get_mut(index) {
+                    snap.doc = Some(Arc::new(document));
+                    snap.archive = archive;
+                    snap.entry_name = entry;
+                }
+                if self.active == Some(index) {
+                    self.load_active();
+                    self.focus_grid_on_next_frame = true;
+                }
+                cx.notify();
+            }
+            OpenOutcome::Error(message) => {
+                self.status_message = Some(format!("error: {message}"));
+                // Remove the failed tab so the user is not left on a
+                // loading placeholder. If it was active,
+                // `close_active_at` picks a neighbour.
+                self.close_active_at(index, cx);
+            }
+            OpenOutcome::NeedArchiveChoice(_) => {
+                // Cannot happen for a single entry; ignore.
+            }
+        }
+    }
+
+    /// Switch to the tab backing `entry_name`, if one exists. Used by
+    /// the archive picker when it lists a ZIP's contents.
+    fn switch_to_entry(&mut self, entry_name: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .documents
+            .iter()
+            .position(|d| d.entry_name.as_deref() == Some(entry_name))
+        else {
+            return;
+        };
+        self.show_picker = false;
+        self.switch_to(index, cx);
     }
 
     fn pick_file(&mut self, cx: &mut Context<Self>) {
@@ -1605,7 +1754,7 @@ impl MainView {
                             .child(archive_picker::format_size(candidate.uncompressed_size)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose_entry(on_click_name.clone(), cx);
+                        this.switch_to_entry(&on_click_name, cx);
                     }))
                     .into_any_element(),
             );
@@ -1622,36 +1771,12 @@ impl MainView {
                 .text_xs()
                 .text_color(theme::TEXT_DIM)
                 .child(format!(
-                    "{} — select one file to open",
+                    "{} — every usable file already has a tab",
                     archive.archive_name()
                 ))
                 .into_any_element(),
         ];
         children.extend(rows);
-
-        // "Open all" turns every usable entry into its own tab (they
-        // load sequentially in the background). Handy for exports
-        // that ship several CSVs together, which is the common
-        // Anvil input shape.
-        if usable_count > 1 {
-            children.push(
-                div()
-                    .id("archive-open-all")
-                    .mt_2()
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .bg(theme::ACCENT)
-                    .text_color(theme::TEXT_STRONG)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(0x1177bb)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.choose_all_entries(cx);
-                    }))
-                    .child(format!("Open all {usable_count} files as tabs"))
-                    .into_any_element(),
-            );
-        }
 
         if !rejected.is_empty() {
             children.push(
@@ -1701,7 +1826,28 @@ impl MainView {
         // at least one tab, errors on background tasks surface only
         // in the status bar.
         if self.active.is_some() {
-            return self.render_grid(window, cx);
+            // Active tab with a loaded document: show the grid.
+            // Active tab whose ZIP entry is still being extracted:
+            // show a placeholder so the user knows the tab is
+            // working, not blank.
+            return match self.model.is_some() {
+                true => self.render_grid(window, cx),
+                false => div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .bg(theme::BG)
+                    .child(div().text_color(theme::TEXT_STRONG).child("Loading…"))
+                    .child(
+                        div()
+                            .text_color(theme::TEXT_DIM)
+                            .child(self.selected_entry.clone().unwrap_or_default()),
+                    )
+                    .into_any_element(),
+            };
         }
         match &self.state {
             ViewState::Empty => div()
@@ -1903,6 +2049,17 @@ mod tests {
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
+    /// Test helper: append a loaded tab for `doc` and make it active.
+    /// Mirrors the direct-file arm of `apply` without going through
+    /// the background-task machinery.
+    fn push_loaded_tab(view: &mut MainView, doc: Arc<ParsedDocument>) {
+        let id = view.alloc_doc_id();
+        view.documents
+            .push(DocumentSnapshot::from_doc(id, doc, None, None));
+        view.active = Some(view.documents.len() - 1);
+        view.load_active();
+    }
+
     fn sample_document() -> anvil_core::ParsedDocument {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("sample.csv");
@@ -1922,6 +2079,32 @@ mod tests {
         std::fs::write(&path, csv).expect("write fixture");
         let opened = anvil_core::source::local::open_local(&path).expect("open local");
         anvil_core::index_opened(opened)
+    }
+
+    /// Build a ZIP whose entries all contain the same small CSV, and
+    /// return its `ArchiveSource`. The `TempDir` must be kept alive
+    /// for the lifetime of the test, so callers bind it.
+    fn make_zip_archive(names: &[&str]) -> (tempfile::TempDir, Arc<ArchiveSource>) {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("archive.zip");
+        {
+            let file = std::fs::File::create(&path).expect("create zip");
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for name in names {
+                zip.start_file(*name, opts).expect("start file");
+                zip.write_all(b"x,y\n1,2\n3,4\n").expect("write entry");
+            }
+            zip.finish().expect("finish zip");
+        }
+        let opened = anvil_core::open_path(&path).expect("open zip");
+        let archive = match opened {
+            anvil_core::OpenResult::Archive(a) => Arc::new(a),
+            _ => panic!("expected an archive"),
+        };
+        (dir, archive)
     }
 
     /// Inject a ready document and focus the grid the way `render_grid`
@@ -1945,10 +2128,7 @@ mod tests {
             // sees a consistent live state. The selection lives on the
             // new snapshot.
             let arc_doc = Arc::new(doc);
-            view.documents
-                .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
-            view.active = Some(view.documents.len() - 1);
-            view.load_active();
+            push_loaded_tab(view, arc_doc);
             view.state = ViewState::Ready;
             view.selection.set(CellPos::new(0, 0));
             // The selection we just set lives on the live field; copy
@@ -2451,10 +2631,7 @@ mod tests {
         let second = anvil_core::index_opened(opened);
         cx.update_window_entity(&view, |view, _, _| {
             let arc_doc = std::sync::Arc::new(second);
-            view.documents
-                .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
-            view.active = Some(view.documents.len() - 1);
-            view.load_active();
+            push_loaded_tab(view, arc_doc);
         });
         cx.update_window_entity(&view, |view, _, _| {
             assert_eq!(view.documents.len(), 2);
@@ -2488,10 +2665,7 @@ mod tests {
         cx.update_window_entity(&view, |view, _, _| {
             view.snapshot_active();
             let arc_doc = std::sync::Arc::new(second);
-            view.documents
-                .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
-            view.active = Some(view.documents.len() - 1);
-            view.load_active();
+            push_loaded_tab(view, arc_doc);
         });
 
         // The live selection / scroll_x should be the defaults for
@@ -2528,10 +2702,7 @@ mod tests {
             let extra = anvil_core::index_opened(opened);
             cx.update_window_entity(&view, |view, _, _| {
                 let arc_doc = std::sync::Arc::new(extra);
-                view.documents
-                    .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
-                view.active = Some(view.documents.len() - 1);
-                view.load_active();
+                push_loaded_tab(view, arc_doc);
             });
         }
         cx.update_window_entity(&view, |view, _, _| {
@@ -2566,10 +2737,7 @@ mod tests {
             let extra = anvil_core::index_opened(opened);
             cx.update_window_entity(&view, |view, _, _| {
                 let arc_doc = std::sync::Arc::new(extra);
-                view.documents
-                    .push(DocumentSnapshot::from_doc(arc_doc.clone(), None, None));
-                view.active = Some(view.documents.len() - 1);
-                view.load_active();
+                push_loaded_tab(view, arc_doc);
             });
         }
         cx.update_window_entity(&view, |view, _, _| {
@@ -2693,47 +2861,105 @@ mod tests {
         });
     }
 
-    /// `choose_all_entries` adds one tab per usable archive entry.
-    /// The entries load sequentially on the background executor; by
-    /// the time `run_until_parked` returns, all tabs are present.
+    /// Every usable archive entry becomes a tab synchronously, before
+    /// any extraction runs. Only the first tab's document is loaded
+    /// on demand.
     #[gpui::test]
-    async fn open_all_entries_adds_a_tab_per_entry(cx: &mut TestAppContext) {
-        use std::io::Write;
-
+    async fn archive_entries_become_tabs_immediately(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-
-        // Build a ZIP with three CSVs.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("multi.zip");
-        {
-            let file = std::fs::File::create(&path).expect("create zip");
-            let mut zip = zip::ZipWriter::new(file);
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-            for name in ["a.csv", "b.csv", "c.csv"] {
-                zip.start_file(name, opts).expect("start file");
-                zip.write_all(b"x,y\n1,2\n3,4\n").expect("write entry");
-            }
-            zip.finish().expect("finish zip");
-        }
-        let opened = anvil_core::open_path(&path).expect("open zip");
-        let archive = match opened {
-            anvil_core::OpenResult::Archive(a) => Arc::new(a),
-            _ => panic!("expected an archive"),
-        };
+        let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv", "c.csv"]);
         assert_eq!(archive.total_candidates(), 3);
 
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.archive = Some(archive);
-            view.show_picker = true;
-            view.choose_all_entries(cx);
+        let archive_for_view = archive.clone();
+        cx.update_window_entity(&view, move |view, _, cx| {
+            view.install_archive_tabs(archive_for_view, None, None, cx);
         });
-        cx.run_until_parked();
 
+        // All three tabs exist immediately; only the active one is
+        // loading.
         cx.update_window_entity(&view, |view, _, _| {
             assert_eq!(view.documents.len(), 3);
-            assert_eq!(view.active, Some(2));
-            assert!(!view.show_picker, "picker should close after Open all");
+            assert_eq!(view.active, Some(0));
+            assert!(view.documents[0].loading || view.documents[0].is_loaded());
+            assert!(!view.documents[1].is_loaded());
+            assert!(!view.documents[2].is_loaded());
+        });
+
+        // The first tab's lazy load completes and the grid renders.
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.documents[0].is_loaded());
+            assert!(view.model.is_some());
+        });
+
+        // Switching to the second tab triggers its own load.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.switch_to(1, cx);
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.active, Some(1));
+            assert!(view.documents[1].is_loaded());
+            assert!(view.model.is_some());
+            // The third tab is still untouched.
+            assert!(!view.documents[2].is_loaded());
+        });
+    }
+
+    /// `apply(NeedArchiveChoice)` is the path a multi-entry ZIP drop
+    /// takes. Every usable entry becomes a tab and no modal picker is
+    /// shown any more.
+    #[gpui::test]
+    async fn apply_need_archive_choice_installs_all_tabs(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let (_dir, archive) = make_zip_archive(&["one.csv", "two.csv", "three.csv"]);
+        cx.update_window_entity(&view, move |view, _, cx| {
+            view.apply(OpenOutcome::NeedArchiveChoice(archive), cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 3);
+            assert_eq!(view.active, Some(0));
+            assert!(!view.show_picker, "no modal picker any more");
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.documents[0].is_loaded());
+            assert!(view.model.is_some());
+        });
+    }
+
+    /// When the loader already produced a document for one entry (the
+    /// auto-opened favourite), that entry's tab is ready and the
+    /// active tab points at it; the others stay pending.
+    #[gpui::test]
+    async fn install_archive_tabs_marks_loaded_entry_as_ready(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv"]);
+        let loaded = anvil_core::load_entry(&archive, "b.csv").expect("load entry");
+        let loaded_doc = Arc::new(loaded.document);
+
+        cx.update_window_entity(&view, move |view, _, cx| {
+            view.install_archive_tabs(archive, Some("b.csv".to_string()), Some(loaded_doc), cx);
+        });
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.documents.len(), 2);
+            // Active points at the pre-loaded entry, not the first
+            // entry in the archive.
+            assert_eq!(view.active, Some(1));
+            assert!(view.documents[1].is_loaded());
+            assert!(!view.documents[0].is_loaded());
+            assert!(view.model.is_some());
+        });
+
+        // The pending first entry loads when the user switches to it.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.switch_to(0, cx);
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.documents[0].is_loaded());
+            assert_eq!(view.active, Some(0));
         });
     }
 }

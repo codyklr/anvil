@@ -1824,3 +1824,151 @@ Either way, the work is now smaller because `choose_all_entries` and
 `DocumentSnapshot` already exist. I would also strongly consider
 splitting `view.rs` first, as its size is now the main risk to further
 UI changes.
+
+## 2026-10-11 — Lazy tabs for every ZIP entry
+
+### Context
+
+After the multi-document tab slice, ZIPs with several entries still
+required the modal picker (or its "Open all" button) before their
+files appeared as tabs. The user asked for the opposite: "show all
+entries immediately in the zip, like all files should be populated at
+the tab menu". This iteration makes every usable archive entry a tab
+the moment the ZIP opens, and extracts each entry's data lazily when
+the tab is first activated.
+
+### Implemented
+
+- `DocumentSnapshot` changes:
+  - `doc: Arc<ParsedDocument>` became `doc: Option<Arc<ParsedDocument>>`
+    so a tab can exist before its data is loaded.
+  - New `id: u64` (allocated from `MainView::next_doc_id`) so a lazy
+    load can find its tab even if the list changed while it ran.
+  - New `loading: bool` so repeated `switch_to` calls do not spawn
+    duplicate extraction tasks.
+  - `from_doc` now takes the id; new `pending_entry(id, archive,
+    entry_name)` builds an unloaded ZIP tab; `is_loaded()` helper.
+  - `tab_label()` shows the entry basename for ZIP tabs (the archive
+    name moved out of the strip) and "loading…" only as a fallback.
+- `install_archive_tabs(source, loaded_entry, loaded_doc, cx)`:
+  installs one tab per usable entry. The central directory gives
+  names and sizes without decompression, so the whole strip is built
+  synchronously. The entry the loader pre-opened (when there is a
+  clear favourite) becomes the ready active tab; the rest are
+  pending.
+- `apply` now routes `Ready` with an archive and `NeedArchiveChoice`
+  through `install_archive_tabs`. `NeedArchiveChoice` no longer sets
+  `show_picker`; the modal picker is not shown automatically.
+- `ensure_active_loaded(cx)` starts a detached background
+  `extract_and_index` task for the active pending tab and marks it
+  loading. Called from `install_archive_tabs`, `switch_to`, and
+  `close_active_at`.
+- `apply_lazy_result(id, outcome, cx)` finds the tab by id, stores
+  the parsed document, and rebuilds the live model only if the tab
+  is still active. A tab closed mid-load is simply not found, so
+  the result is dropped. A failed extraction drops the tab and
+  reports the error in the status bar.
+- `render_center` shows a `Loading…` placeholder (with the entry
+  name) while the active tab is pending, instead of a blank grid.
+- `render_archive_picker` no longer offers "Open all"; clicking an
+  entry calls the new `switch_to_entry`, which finds the matching
+  tab and switches to it. The toolbar **Archive…** button still
+  opens the picker for an entry list and the skipped-entries count.
+- Removed `choose_entry` and `choose_all_entries` (superseded).
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 150 passed (47 lib + 43 binary + 60
+  integration), 0 failed, 1 ignored.
+- `cargo clippy --release --all-targets` — clean (modulo the
+  pre-existing future-incompat notes).
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/multi.zip` — still lists
+  the two candidates (the probe uses the core loader, which still
+  reports `NeedArchiveChoice`; the UI now turns that into tabs).
+- `./target/release/anvil` — launches, runs 5 s without panic.
+- Manual confirmation that all ZIP entries appear as tabs is
+  deferred; the behaviour is covered by three new UI tests that
+  build real ZIPs.
+
+### Tests added / changed
+
+- New UI tests in `src/ui/view.rs`:
+  - `archive_entries_become_tabs_immediately` — three-entry ZIP: all
+    three tabs exist synchronously, the first lazy-loads, switching
+    to the second loads it while the third stays pending.
+  - `apply_need_archive_choice_installs_all_tabs` — the multi-entry
+    drop path installs all tabs and shows no picker.
+  - `install_archive_tabs_marks_loaded_entry_as_ready` — a pre-opened
+    favourite is the ready active tab; the other entry is pending
+    and loads on switch.
+- New test helper `make_zip_archive(names)` builds a real ZIP and
+  returns its `ArchiveSource`.
+- New test helper `push_loaded_tab(view, doc)` replaces the five
+  hand-rolled snapshot pushes in the existing tab tests.
+- Replaced `open_all_entries_adds_a_tab_per_entry` (the removed
+  `choose_all_entries` test).
+- No data-side tests changed.
+
+### Roadmap changes
+
+- Milestone 2 "Multi-document tabs" rewritten: eager per-entry tabs,
+  lazy extraction, no automatic picker, and the failed-extraction
+  behaviour are all ticked. The three follow-ups (dockable panel,
+  reordering/tooltips, recently-closed tabs) are unchanged.
+- Milestone 2 Tests item updated to the new lazy-tab coverage.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Primary-state `DocumentSnapshot` paragraph now describes the
+    optional document, stable id, and loading guard.
+  - "Multi-document / tabs" rewritten: eager `install_archive_tabs`,
+    a dedicated "Lazy loading" subsection (`ensure_active_loaded` /
+    `apply_lazy_result` / detached task / id lookup), the picker's
+    new role, and the loading-placeholder render path.
+  - Planned Evolution bullet notes lazy extraction.
+  - Testing section: list of tab tests replaced; count 23 -> 25.
+  - Functional gaps note that a ZIP with hundreds of entries creates
+    hundreds of unloaded tabs (no cap/grouping yet).
+
+### Issues / technical debt discovered
+
+- Every usable entry gets a tab eagerly. A ZIP with hundreds of
+  entries creates hundreds of `DocumentSnapshot`s. Each is small
+  and lazy loading keeps extracted data bounded, but there is no cap
+  or grouping. Worth revisiting if large ZIPs become common.
+- A single failed lazy extraction removes that tab. If several
+  entries fail, the user sees a burst of status-bar errors and tabs
+  disappearing one by one. A batch error summary would be nicer.
+- The tab label for a ZIP entry is just the basename, so two archives
+  opened at once that both contain `data.csv` show identical labels.
+  Tooltips / archive-qualified labels are the recorded follow-up.
+- `ensure_active_loaded` spawns one detached task per pending tab; a
+  user rapidly clicking through a large archive starts many
+  extractions. There is no cancellation or queue. Acceptable for now
+  because each task is a single entry, but worth a queue if it
+  becomes a memory issue.
+- `view.rs` remains ~2900 lines; the split recommendation from the
+  previous entry still stands.
+
+### Open loops
+
+- Cap / group very large archives rather than creating a tab per
+  entry.
+- Cancellation or batching for lazy extraction tasks.
+- `search_task` / `copy_flash_generation` still live on `MainView`
+  rather than the snapshot (from the previous entry).
+- Dockable side panel / tree view; tab reordering; tooltips.
+- Case-sensitive / column-scoped search UI toggles.
+
+### Next recommended task
+
+The user's file-navigation request is now satisfied: a dropped ZIP
+populates the tab menu with every usable entry and loads each on
+demand. The next slice should be the deferred **filter** work
+(`Cmd/Ctrl+L`), which has been the standing recommendation since the
+search slice. Alternatively, split `view.rs` first: at ~2900 lines it
+is the main obstacle to further UI work, and the tab / lazy-load code
+is a natural first extraction (`tabs.rs`).
