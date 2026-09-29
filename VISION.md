@@ -12,7 +12,9 @@ Anvil is not intended to be a spreadsheet replacement.
 
 - Extremely fast time-to-first-data
 - Remain responsive with very large files
-- Native desktop experience
+- Native desktop experience on Windows, macOS, and Linux
+- Cross-platform behavior: core workflows and keyboard/clipboard
+  interactions should work consistently on all three target OSes
 - Keyboard-friendly workflows
 - Treat archives such as ZIP files as first-class data sources
 - Avoid unnecessary copies and memory usage

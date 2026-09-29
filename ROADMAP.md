@@ -368,6 +368,18 @@ make what exists feel finished.
 - [ ] Cancellation robustness: document the contract that
   generation-based cancellation is sufficient.
 
+#### Cross-platform support
+
+- [ ] Add a CI build/test matrix for macOS, Windows, and Linux:
+  `cargo fmt --check`, `cargo build --release`, `cargo test --release`,
+  and `anvil --probe fixtures/large.csv`.
+- [ ] Exercise the native GUI on all three target OSes: open dialog,
+  drag/drop, archive picker, grid scrolling, keyboard shortcuts,
+  clipboard copy, and save/open paths where applicable.
+- [ ] Verify platform-specific clipboard behavior (Cmd vs Ctrl and
+  LF vs CRLF), native file dialogs, mmap handling, and GPUI backend
+  requirements; document any supported Linux display/backend limits.
+
 #### Test coverage
 
 - [ ] Extend the GPUI `TestAppContext` suite beyond grid focus:
@@ -404,6 +416,9 @@ make what exists feel finished.
 - Column resize and theme toggle both work.
 - `cargo test --release` passes; performance numbers have not
   regressed vs. the Milestone 1 baseline by more than 10%.
+- macOS, Windows, and Linux each pass the CI build/test/probe matrix;
+  the GUI's core open, inspect, keyboard, and clipboard workflows have
+  been exercised on each target.
 
 ---
 

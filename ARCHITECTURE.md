@@ -1245,6 +1245,11 @@ Notes:
   but not great for `git clone` size. Consider generating in CI.
 - No CI configuration (`.github/workflows/` etc.). Tests pass locally
   but are not enforced on push.
+- Windows, macOS, and Linux are intended target platforms, but this
+  repository has only been built and GUI-smoke-tested on macOS so far.
+  Cross-platform compilation, clipboard/dialog behavior, and GUI
+  backends are not yet verified; Milestone 5 now includes a platform
+  matrix and per-OS GUI exercise.
 
 ## Architectural Invariants
 
