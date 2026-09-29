@@ -415,6 +415,20 @@ whether to elevate one.
   ownership model.
 - **Dataset comparison** — diff two files by `(record_index, column)`
   with a side-by-side view.
+- **Non-contiguous multi-select** — Cmd/Ctrl-click to add separate
+  cells or blocks (and Cmd/Ctrl+drag to add a rectangle) to a single
+  selection. Today `Selection` is one anchor→cursor rectangle, so this
+  needs the model to hold an ordered set of rectangles plus the
+  existing cursor for keyboard navigation. Copy would emit the union
+  in row-major order, separated per block (blank line between blocks)
+  the way spreadsheets do. Also consider select-all (Cmd/Ctrl+A).
+- **Copy / export selection as CSV** — today Cmd/Ctrl+C emits TSV
+  (correct for paste into Excel/Numbers/Sheets). Add an explicit
+  "Copy as CSV" (comma-delimited, same RFC 4180 quoting) and an
+  "Export selection to CSV…" that writes the selected rectangle (or
+  the whole filtered view) to a file via `rfd`'s save dialog. The TSV
+  formatter in `Selection::copy_text_with` should be generalised over
+  a delimiter rather than copied.
 - **Export filtered / sorted rows** — write the current view to a
   new CSV/TSV/JSON.
 - **Saved filters / sorts / layouts** — named views the user can
