@@ -1382,3 +1382,91 @@ data-side predicate evaluator and a thin overlay:
 The existing search slice makes this substantially smaller than it
 would have been a sprint ago: generation-cancel, the match-list
 visual model, and the deferred-focus pattern all transfer.
+
+## 2026-10-08 — Search bar layout: stop overlapping the active-match row
+
+### Context
+
+The user reported that when a search match is at the top of the
+visible area, it gets "cut off" and is not clearly shown. The
+diagnosis from the search-bar slice's render path was straightforward:
+
+- `render_search_bar` painted the bar as an `absolute`-positioned
+  child of the center area (`.absolute().top(px(0.))`).
+- The grid (header + uniform_list) lived in the same `.relative()`
+  parent and painted from the top of the parent's bounds.
+- Therefore the search bar *overlapped* the top of the grid: 36 px
+  tall bar + 24 px grid header = the search bar covered the grid
+  header and 12 px of the first row of the uniform_list.
+- When a search match landed at row 0, the row pinned to the top of
+  the list (via `scroll_to_item_strict(.., ScrollStrategy::Top)`),
+  putting the row exactly where the search bar was overlaying it.
+  The `BG_MATCH_ACTIVE` highlight was visible only on the lower
+  portion of the row; the upper portion (including the row gutter)
+  was hidden behind the bar's `BG_PANEL` background and bottom
+  border. The result looked like a row that had been "cut off".
+
+### Implemented
+
+- `render_search_bar` no longer uses `.absolute().top(px(0.))`. It
+  uses `.flex_shrink_0()` with a fixed `h` so the bar takes its
+  natural height and sits in the normal flex flow.
+- `render_overlay` was simplified to return only the modal archive
+  picker; the search bar is now placed directly in `Render::render`
+  as a flow child of the center flex container, **above** the grid.
+  When closed, the bar is not rendered at all, so no space is
+  reserved.
+- The grid's sticky column header is therefore never covered by the
+  bar, and the active-match row at row 0 sits directly below the
+  header — fully visible — rather than half-hidden behind the bar.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 128 passed (38 lib + 30 binary + 60
+  integration), 0 failed, 1 ignored. No regressions.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil` (GUI launch, killed after 5 s) — no
+  panic, no stderr.
+
+### Tests added / changed
+
+None. The fix is a CSS-style layout change and is not directly
+observable from the headless test harness (which does not exercise
+the rendered bounds). The existing nine UI regression tests still
+pass; visual confirmation in the running app is the primary check.
+
+### Roadmap changes
+
+None. The bug was a layout defect, not a missing roadmap task.
+
+### Architecture changes
+
+- `ARCHITECTURE.md` Planned Evolution → Search paragraph: noted that
+  the bar sits as a normal-flow child so the grid (and its sticky
+  header) shift down by the bar's height rather than sliding under
+  it, and that the active-match row stays fully visible even at row
+  0.
+
+### Issues / technical debt discovered
+
+- None new. The bar still uses the same focus-handle pattern, the
+  same `key_context("Search")`, and the same `on_search_key_down`
+  handler; only its DOM placement changed.
+
+### Open loops
+
+- The case-sensitive / column-scoped UI toggles from the search
+  slice's handoff are still unimplemented. The fix here does not
+  change that scope.
+- The search bar still doesn't grow a "match list" overlay (the
+  count is inline at the right of the input). Deferred.
+
+### Next recommended task
+
+Unchanged from the previous entry: proceed with **filter**
+(Cmd/Ctrl+L). The search slice's data-side shape (`Vec<u64>` of
+record indexes from a background task, generation-cancel, row
+highlight) transfers directly to filter, which additionally needs a
+predicate evaluator and a row-permutation grid path.

@@ -1122,21 +1122,24 @@ impl MainView {
     }
 
     fn render_overlay(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        // The search bar is a normal-flow child of the center area so
+        // the grid shifts down rather than sliding under it (the
+        // active-match row stays fully visible). Only the modal
+        // archive picker is overlaid here.
         let mut out = Vec::new();
-        if let Some(search_bar) = self.render_search_bar(cx) {
-            out.push(search_bar);
-        }
         if let Some(archive_picker) = self.render_archive_picker(cx) {
             out.push(archive_picker);
         }
         out
     }
 
-    /// Search bar overlay (Cmd/Ctrl+F). Pinned to the top of the
-    /// window so it never obscures the toolbar. Carries its own
-    /// `key_context("Search")` and `track_focus` so characters typed
-    /// while it is open route through `on_search_key_down` rather than
-    /// the grid handler.
+    /// Search bar overlay (Cmd/Ctrl+F). Sits as a normal-flow child
+    /// of the center area (above the grid, below the toolbar) so the
+    /// grid never slides under it; this keeps the active match's
+    /// highlight fully visible even when the match is at row 0. The
+    /// bar carries its own `key_context("Search")` and `track_focus`
+    /// so characters typed while it is open route through
+    /// `on_search_key_down` rather than the grid handler.
     fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.search_open {
             return None;
@@ -1146,11 +1149,8 @@ impl MainView {
 
         Some(
             div()
-                .absolute()
-                .top(px(0.))
-                .left(px(0.))
-                .right(px(0.))
                 .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
+                .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -1390,6 +1390,7 @@ impl Render for MainView {
         }
 
         let center = self.render_center(window, cx);
+        let search_bar = self.render_search_bar(cx);
         let overlays = self.render_overlay(cx);
 
         div()
@@ -1407,6 +1408,13 @@ impl Render for MainView {
                     .flex()
                     .flex_col()
                     .flex_1()
+                    // The search bar (when open) sits in the normal
+                    // flex column above the grid; this pushes the
+                    // grid down by the bar's height instead of
+                    // letting the bar overlap the top of the grid,
+                    // which previously hid the active-match
+                    // highlight when a match was at row 0.
+                    .children(search_bar)
                     .child(center)
                     .children(overlays),
             )

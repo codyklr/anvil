@@ -1404,9 +1404,14 @@ restructuring. Specifically:
   the stronger `BG_MATCH_ACTIVE`. The bar's focus handle is
   independent of the grid's, so typed characters route through
   `on_search_key_down` rather than moving the cursor. Cmd/Ctrl+F is
-  a no-op when the bar is already open. UI regression tests cover
-  the open/close cycle, character append, Backspace, Enter cycling,
-  F3 cycling, and the generation guard.
+  a no-op when the bar is already open. The bar sits as a
+  normal-flow child of the center flex container (not absolute), so
+  when it is open the grid (and its sticky column header) shifts
+  down by the bar's height rather than sliding under it; this keeps
+  the active-match highlight fully visible even when the match is at
+  row 0. UI regression tests cover the open/close cycle, character
+  append, Backspace, Enter cycling, F3 cycling, and the generation
+  guard.
 - **Filter (Milestone 2).** A `query::filter` predicate set held on
   `MainView`, evaluated on the background executor over the
   `ParsedDocument`, returning a sorted `Vec<u64>` of record indexes.
