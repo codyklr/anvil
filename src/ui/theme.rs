@@ -28,6 +28,13 @@ pub const BG_SELECTED: Rgba = rgb(0x094771);
 /// Brief green flash painted over the selection right after a copy, as
 /// positive confirmation that the clipboard write happened.
 pub const BG_COPIED: Rgba = rgb(0x2f8f4f);
+/// Background tint for rows that match the current search query. Every
+/// matched row gets this colour so the user can scan a long result
+/// list at a glance.
+pub const BG_MATCH: Rgba = rgb(0x4a3a00);
+/// Slightly stronger tint for the row currently selected by the
+/// search (the "active" match).
+pub const BG_MATCH_ACTIVE: Rgba = rgb(0x6b5400);
 
 pub const BORDER: Rgba = rgb(0x3c3c3c);
 pub const BORDER_STRONG: Rgba = rgb(0x505050);

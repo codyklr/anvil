@@ -39,6 +39,13 @@ pub(super) enum Action {
     /// Clear the selection, or close the archive picker if already
     /// empty.
     Escape,
+    /// Open the search bar (Cmd/Ctrl+F). When the bar is already
+    /// open, the binding is a no-op so the grid does not lose focus.
+    OpenSearch,
+    /// Jump to the next or previous search match. `direction == -1`
+    /// is previous, `+1` is next. The actual navigation depends on
+    /// the current match list.
+    NextMatch { direction: i8 },
 }
 
 /// Translate a keystroke into an [`Action`], or `None` when the chord is
@@ -50,6 +57,10 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
 
     if key == "c" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
         return Some(Action::Copy);
+    }
+
+    if key == "f" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::OpenSearch);
     }
 
     if key == "escape" {
@@ -65,6 +76,13 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
         "pagedown" => (PAGE_STEP, 0),
         "home" => (0, i64::MIN),
         "end" => (0, i64::MAX),
+        "f3" => {
+            // F3 / Shift-F3 jumps between search matches. The actual
+            // navigation is performed by `MainView::run_action`, which
+            // knows whether a search is in progress.
+            let direction = if modifiers.shift { -1 } else { 1 };
+            return Some(Action::NextMatch { direction });
+        }
         _ => return None,
     };
 
@@ -205,5 +223,35 @@ mod tests {
     fn unbound_key_returns_none() {
         assert_eq!(act("a"), None);
         assert_eq!(act("f5"), None);
+    }
+
+    #[test]
+    fn open_search_chord_maps_to_open_search() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-f"
+        } else {
+            "ctrl-f"
+        };
+        assert_eq!(act(chord), Some(Action::OpenSearch));
+    }
+
+    #[test]
+    fn plain_f_is_not_open_search() {
+        assert_eq!(act("f"), None);
+    }
+
+    #[test]
+    fn alt_f_is_not_open_search() {
+        assert_eq!(act("alt-f"), None);
+    }
+
+    #[test]
+    fn f3_jumps_to_next_match() {
+        assert_eq!(act("f3"), Some(Action::NextMatch { direction: 1 }));
+    }
+
+    #[test]
+    fn shift_f3_jumps_to_previous_match() {
+        assert_eq!(act("shift-f3"), Some(Action::NextMatch { direction: -1 }));
     }
 }

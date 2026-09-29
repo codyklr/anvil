@@ -208,6 +208,17 @@ pub struct RowContext<'a> {
     pub viewport_w: f32,
     /// Rectangle of the most recent copy, painted `theme::BG_COPIED`.
     pub copy_flash: Option<(CellPos, CellPos)>,
+    /// Sorted list of record indexes that match the current search
+    /// query. Empty when no search is active. Looked up by binary
+    /// search for every visible row, so it stays cheap on 1M-row
+    /// documents (~30 visible rows × ~7 probes = 200 binary searches
+    /// per redraw).
+    pub search_matches: &'a [u64],
+    /// Index into `search_matches` of the active row, or `-1` when
+    /// there is no active match (e.g. an empty result set). The active
+    /// row is painted with `BG_MATCH_ACTIVE`; all other matches are
+    /// `BG_MATCH`.
+    pub search_active: i64,
 }
 
 /// Renders a single data row. `index` is the 0-based record index.
@@ -242,6 +253,8 @@ where
     let scroll_x = ctx.scroll_x;
     let viewport_w = ctx.viewport_w;
     let copy_flash = ctx.copy_flash;
+    let search_matches = ctx.search_matches;
+    let search_active = ctx.search_active;
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
@@ -303,8 +316,22 @@ where
                 && br.column_index >= model.layout.widths.len().saturating_sub(1)
         })
         .unwrap_or(false);
+
+    // Search-match row tint. The active row uses a stronger colour so
+    // the user can see which match Enter / Shift+Enter will land on.
+    // The binary search returns an Err when not found, so we test
+    // `is_ok()` rather than `position()`.
+    let search_pos = search_matches.binary_search(&index).ok();
+    let row_search_active =
+        search_pos.is_some() && search_active >= 0 && search_pos == Some(search_active as usize);
+    let row_search_match = search_pos.is_some();
+
     let bg = if row_flashed {
         theme::BG_COPIED
+    } else if row_search_active {
+        theme::BG_MATCH_ACTIVE
+    } else if row_search_match {
+        theme::BG_MATCH
     } else if row_selected {
         theme::BG_SELECTED
     } else if index % 2 == 1 {

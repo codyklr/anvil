@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use anvil_core::source::local::open_local;
 use anvil_core::{
-    open_path, parse_opened, ArchiveSource, CellPos, ColumnIndex, LoadResult, OpenResult,
-    OpenedSource, ParsedDocument, Selection,
+    open_path, parse_opened, search_records, ArchiveSource, CellPos, ColumnIndex, LoadResult,
+    OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -812,4 +812,83 @@ fn copy_text_cell_count_matches_rectangle_size() {
         copy_text_for(&doc, &s),
         format!("2\t3\t4{ending}6\t7\t8{ending}10\t11\t12{ending}")
     );
+}
+
+// ---- search ------------------------------------------------------------
+
+#[test]
+fn search_finds_matches_across_columns() {
+    let (doc, _d) = parse_bytes(b"a,b,c\nfoo,bar,baz\nfoo,zip,foo\nzzz,foo,qqq\n");
+    let opts = SearchOptions::default();
+    let matches = search_records(&doc, "foo", &opts);
+    assert_eq!(matches, vec![0, 1, 2]);
+}
+
+#[test]
+fn search_returns_matches_in_record_order() {
+    let (doc, _d) = parse_bytes(b"a,b\nfoo,1\nfoo,2\nfoo,3\n");
+    let opts = SearchOptions::default();
+    let matches = search_records(&doc, "foo", &opts);
+    assert_eq!(matches, vec![0, 1, 2]);
+}
+
+#[test]
+fn search_empty_needle_returns_no_matches() {
+    let (doc, _d) = parse_bytes(b"a,b\n1,2\n3,4\n");
+    let matches = search_records(&doc, "", &SearchOptions::default());
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn search_case_sensitive_distinguishes_case() {
+    let (doc, _d) = parse_bytes(b"a,b\nFoo,1\nfoo,2\nFOO,3\n");
+    let cs = SearchOptions {
+        case_sensitive: true,
+        ..Default::default()
+    };
+    let ci = SearchOptions::default();
+    // Case-sensitive "foo" only matches the middle row.
+    assert_eq!(search_records(&doc, "foo", &cs), vec![1]);
+    // Case-insensitive matches all three.
+    assert_eq!(search_records(&doc, "foo", &ci), vec![0, 1, 2]);
+}
+
+#[test]
+fn search_column_scope_limits_search() {
+    let (doc, _d) = parse_bytes(b"name,city\nalice,paris\nbob,paris\n");
+    let col0 = SearchOptions {
+        column: Some(0),
+        ..Default::default()
+    };
+    let col1 = SearchOptions {
+        column: Some(1),
+        ..Default::default()
+    };
+    assert_eq!(search_records(&doc, "alice", &col0), vec![0]);
+    assert_eq!(search_records(&doc, "alice", &col1), Vec::<u64>::new());
+    assert_eq!(search_records(&doc, "paris", &col1), vec![0, 1]);
+}
+
+#[test]
+fn search_max_matches_caps_results() {
+    let (doc, _d) = parse_bytes(b"a,b\nfoo,1\nfoo,2\nfoo,3\nfoo,4\nfoo,5\n");
+    let opts = SearchOptions {
+        max_matches: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(search_records(&doc, "foo", &opts), vec![0, 1]);
+}
+
+#[test]
+fn search_handles_quoted_commas() {
+    let (doc, _d) = parse_bytes(b"a,b\n\"foo, bar\",1\n");
+    let matches = search_records(&doc, "foo, bar", &SearchOptions::default());
+    assert_eq!(matches, vec![0]);
+}
+
+#[test]
+fn search_finds_substring_match() {
+    let (doc, _d) = parse_bytes(b"a,b\nfoobar,1\nfo,2\nbaz,3\n");
+    let matches = search_records(&doc, "foo", &SearchOptions::default());
+    assert_eq!(matches, vec![0]);
 }

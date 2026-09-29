@@ -113,12 +113,12 @@ anvil/
 │   └── bin/
 │       └── gen_fixture.rs      # synthetic CSV + ZIP generator
 └── tests/
-    └── core.rs                 # 38 integration tests for the data side
+    └── core.rs                 # 60 integration tests for the data side
 ```
 
 ### What is *current* vs *planned*
 
-**Current (Milestone 1 + selection, clipboard, drag, and commands slices of Milestone 2, in `src/`):**
+**Current (Milestone 1 + selection, clipboard, drag, commands, and search slices of Milestone 2, in `src/`):**
 
 - `parser::indexing` — build record byte-offset index, collect
   `ParseWarning`s, report `record_count` and `column_count`.
@@ -133,22 +133,30 @@ anvil/
   `theme::BG_SELECTED`; arrow / Page / Home / End / Esc keys drive
   the cursor; click and shift-click on cells drive it too;
   `Selection::copy_text_with` renders TSV for clipboard paste.
+- `query::search` — streaming search over `ParsedDocument` that
+  returns matching record indexes in record order. `SearchOptions`
+  carries `case_sensitive`, `column`, and `max_matches`. Case
+  sensitivity is implemented with `memchr::memmem::Finder` for the
+  case-sensitive path and a sliding-window ASCII lowercase for the
+  case-insensitive path; the byte scan is SIMD-accelerated.
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
   for horizontal virtualization. Per-cell `on_mouse_down` for
-  selection.
+  selection. Matched search rows are tinted `BG_MATCH`; the active
+  row uses `BG_MATCH_ACTIVE`.
 - `ui::commands` — pure `Keystroke` → `Action` binding table
-  (`MoveCursor`, `Copy`, `Escape`), with unit tests; no window or view
-  state dependencies.
-- `ui::view` — toolbar, drag/drop, archive picker overlay, status bar
-  (with copy / error message slot), generation counter for
-  cancellation, and `MainView::run_action` which executes intents
-  decoded by `ui::commands`.
+  (`MoveCursor`, `Copy`, `Escape`, `OpenSearch`, `NextMatch`), with
+  unit tests; no window or view state dependencies.
+- `ui::view` — toolbar, drag/drop, archive picker overlay, search
+  bar overlay, status bar (with copy / error / match-count slot),
+  generation counter for cancellation, `MainView::run_action` which
+  executes intents decoded by `ui::commands`, and
+  `MainView::on_search_key_down` which handles typed characters,
+  Backspace, Enter, Shift+Enter, and Esc while the bar is open.
 
 **Planned (Milestone 2+ — these modules do not exist yet):**
 
-- `query::search`, `query::filter`, `query::sort` — selection-aware
-  search, predicates, and async sorts that return row references, not
-  copied rows.
+- `query::filter`, `query::sort` — predicates and async sorts that
+  return row references, not copied rows.
 - `schema::infer`, `schema::stats` — type inference and column
   statistics for the column inspector.
 - `diagnostics` — richer diagnostics surfaced in a panel and as
@@ -208,6 +216,14 @@ The `MainView` owns:
 | `clipboard: ClipboardWriter` | `Arc<dyn Fn(&str) -> Result<(), String>>`; defaults to `arboard`, replaced by a recorder in UI tests. |
 | `copy_flash_rect: Option<(CellPos, CellPos)>` | Normalized rectangle of the most recent copy, painted green until the flash timer clears it. |
 | `copy_flash_generation: u64` | Bumped on every copy; a flash timer only clears the rectangle if its generation is still current, so re-copying restarts the flash. |
+| `search_open: bool` | Whether the search bar overlay is visible. |
+| `search_query: String` | Current needle typed into the search bar. |
+| `search_matches: Vec<u64>` | Record indexes that match the latest query; reset to empty on every keystroke while a new search is in flight. |
+| `search_active: i64` | Index into `search_matches` of the active match (`-1` when there are none). |
+| `search_generation: u64` | Bumped on every keystroke; a background task only applies its result if the view's generation still matches, so obsolete searches are discarded. |
+| `search_task: Option<Task<()>>` | Outstanding background search task. |
+| `search_focus_handle: FocusHandle` | Keyboard focus target for the search bar overlay; independent of the grid handle so the bar can swallow keystrokes. |
+| `focus_search_on_next_frame: bool` | Set when the search bar opens; the next `Render::render` schedules a deferred `window.focus` for the bar. |
 
 `GridModel` wraps an `Arc<ParsedDocument>` and an `Arc<ColumnLayout>`.
 Both are cheap to clone, so the uniform-list row renderer can capture
@@ -240,9 +256,10 @@ Keyboard bindings are now centralized in `src/ui/commands.rs`:
 - `commands::action_for(&Keystroke) -> Option<Action>` is a pure
   keystroke-to-intent mapping. It handles arrow / Page / Home / End
   movement (including Shift extension), Cmd/Ctrl+C, and Esc.
-- `Action` is a small UI-layer enum (`MoveCursor`, `Copy`, `Escape`),
-  not a GPUI `Action` type. `PAGE_STEP` lives alongside the binding
-  table. The module has unit tests that need no window.
+- `Action` is a small UI-layer enum (`MoveCursor`, `Copy`, `Escape`,
+  `OpenSearch`, `NextMatch`), not a GPUI `Action` type. `PAGE_STEP`
+  lives alongside the binding table. The module has unit tests that
+  need no window.
 - `MainView::on_grid_key_down` delegates to `action_for`; its
   `run_action` method executes the intent against view state (selection,
   clipboard, overlay). This keeps `commands` independent of `MainView`
@@ -296,17 +313,23 @@ Recognised keys:
 | Arrow keys     | Move the selection by one cell.                              |
 | Page Up/Down   | Move the selection by `commands::PAGE_STEP` rows.              |
 | Home / End     | Jump the column cursor to the first / last column.           |
-| Esc            | Clear the selection; if already empty, close the archive picker overlay. |
+| F3 / Shift-F3  | Advance to the next / previous search match (no-op when no search is active). |
+| Esc            | Clear the selection; close the search bar if open; close the archive picker if open. |
 | Cmd/Ctrl+C     | Copy the current selection to the clipboard as TSV; status bar reports "copied N cells" or "copy failed: ...". |
+| Cmd/Ctrl+F     | Open the search bar overlay (no-op when already open).       |
 
 `commands::action_for` maps each `Keystroke` to a logical
 `commands::Action`; `MainView::run_action` executes it. Shift held
 during arrow / Page / Home / End becomes `MoveCursor { extend: true }`.
-Cmd/Ctrl+C matches `keystroke.modifiers.secondary()` (Cmd on macOS,
-Ctrl on Linux/Windows) with no Alt/Fn; this avoids eating variant
-chords like `Alt+C`. The existing `key_context("Grid")` remains ready
-for a future GPUI `actions!` / `cx.bind_keys` layer if we add
-user-rebindable shortcuts or menu integration.
+Cmd/Ctrl+C and Cmd/Ctrl+F match `keystroke.modifiers.secondary()`
+(Cmd on macOS, Ctrl on Linux/Windows) with no Alt/Fn; this avoids
+eating variant chords like `Alt+C` or `Alt+F`. The existing
+`key_context("Grid")` remains ready for a future GPUI `actions!` /
+`cx.bind_keys` layer if we add user-rebindable shortcuts or menu
+integration. The search bar carries its own `key_context("Search")`
+and `track_focus(&self.search_focus_handle)`, so typed characters
+route through `MainView::on_search_key_down` rather than the grid
+handler.
 
 ## Selection model
 
@@ -1085,12 +1108,13 @@ of decompression + temp-file write + mmap.
 
 ### What exists today
 
-`tests/core.rs` — 52 integration tests in one file. They run without
+`tests/core.rs` — 60 integration tests in one file. They run without
 a GUI and are the primary CI signal. `src/selection.rs` additionally
-carries 25 unit tests.
+carries 25 unit tests. `src/query.rs` carries 13 unit tests for
+`search` / `SearchOptions` / the `ascii_lower` helper.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
-`TestAppContext` (`gpui` `test-support` dev-dependency) with four UI
+`TestAppContext` (`gpui` `test-support` dev-dependency) with nine UI
 regression tests plus unit tests for the pure helpers:
 
 * `arrow_keys_move_selection_when_grid_focused` — injects a ready
@@ -1109,6 +1133,25 @@ past the bottom edge and asserts the selection extended past the first
 visible row and the list's scroll offset actually moved.
 * `auto_scroll_direction_detects_edges` — the pure above/inside/below
 decision.
+* `cmd_f_opens_search_bar_when_grid_focused` — asserts the
+Cmd/Ctrl+F chord flips `search_open` and leaves the query empty.
+* `search_bar_input_appends_and_skips_grid_navigation` — typing
+characters into the open bar appends to the query without moving the
+grid cursor.
+* `search_bar_backspace_drops_last_character` — Backspace removes the
+last typed character without falling back to grid navigation.
+* `escape_closes_search_bar` — Escape clears the search state.
+* `search_populates_match_list` — `kick_search` populates
+`search_matches` against the sample fixture (no matches for "foo").
+* `search_finds_real_matches_in_fixture` — `kick_search` against a
+two-row fixture populates `search_matches = [0, 1]` and sets
+`search_active = 0`.
+* `search_enter_cycles_through_matches` — Enter advances the active
+match index; Shift+Enter wraps backward.
+* `f3_advances_match_without_opening_bar` — F3 / Shift-F3 cycle the
+active match without touching the bar's open state or query.
+* `opening_new_document_clears_search_state` — `close_search` clears
+all search state, mirroring what `apply` does on a new document.
 
 The focus tests were confirmed to fail when `.track_focus(&self.focus_handle)`
 is removed from the grid, the drag test when the cell `on_mouse_move`
@@ -1116,11 +1159,12 @@ wiring is removed, and the auto-scroll test when the global-listener
 `auto_scroll_step` call is removed — so they genuinely guard each
 behaviour.
 
-`src/ui/commands.rs` has nine pure unit tests for keystroke mapping
+`src/ui/commands.rs` has fourteen pure unit tests for keystroke mapping
 (copy chord per platform, plain/Alt+C, arrow/Shift-arrow, Page keys,
-Home/End, Esc, and unbound keys). `src/ui/grid.rs` has two unit tests
-for `rect_contains`, the inclusive rectangle test used for the copy
-flash (inside / edge / outside / `None`).
+Home/End, Esc, F3/Shift-F3, Cmd/Ctrl+F, plain-F/Alt-F, and unbound
+keys). `src/ui/grid.rs` has two unit tests for `rect_contains`, the
+inclusive rectangle test used for the copy flash (inside / edge /
+outside / `None`).
 
 | Group                  | Tests                                                                 |
 |------------------------|-----------------------------------------------------------------------|
@@ -1132,9 +1176,11 @@ flash (inside / edge / outside / `None`).
 | Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
-| Commands (binary)     | `commands::action_for` maps chords to `Action` intents (9 unit tests) |
+| Search                 | empty needle, single match, multi-match order, case-sensitive vs case-insensitive, column-scoped (in / out of bounds / column-0 vs column-1), `max_matches` cap, quoted commas, substring match — against real `ParsedDocument`s |
+| Commands (binary)     | `commands::action_for` maps chords to `Action` intents (14 unit tests) |
 | UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
 | UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
+| UI / search (binary)   | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
@@ -1148,7 +1194,7 @@ out-of-bounds cells, line-ending correctness, normalisation).
 
 ### Planned coverage
 
-- Search/filter/sort (Milestone 2).
+- Filter / sort (Milestone 2).
 - Type inference and column statistics (Milestone 3).
 - Diagnostics navigation (Milestone 4).
 - Performance microbenchmarks (Milestone 5).
@@ -1188,20 +1234,30 @@ Notes:
 
 - Selection (click / shift-click / click-and-drag with edge
   auto-scroll), basic keyboard navigation (arrow keys, Page Up/Down,
-  Home/End, Esc), and clipboard copy (Cmd/Ctrl+C, TSV via `arboard`)
-  are wired. Keyboard handling requires the grid to hold focus; UI
-  regression tests guard the focus path, drag-select, and auto-scroll.
-  `anvil_core::Selection` carries 25 unit tests + 14 integration tests;
-  the clipboard formatter and cell-count helper are covered end-to-end
-  against real `ParsedDocument`s.
-- No search, no filter, no sort, no type inference, no column
-  statistics. Milestones 2–3.
+  Home/End, Esc), clipboard copy (Cmd/Ctrl+C, TSV via `arboard`), and
+  search (Cmd/Ctrl+F for the bar, F3 / Shift-F3 for navigation,
+  Enter / Shift+Enter inside the bar, Esc to close) are wired.
+  Keyboard handling requires the grid to hold focus; UI regression
+  tests guard the focus path, drag-select, auto-scroll, and every
+  search-bar transition. `anvil_core::Selection` carries 25 unit
+  tests + 14 integration tests; `anvil_core::query::search` carries
+  13 unit tests + 8 integration tests; the clipboard formatter and
+  cell-count helper are covered end-to-end against real
+  `ParsedDocument`s.
+- The search bar's UI does not yet expose `case_sensitive` /
+  `column` toggles — `SearchOptions` carries them, but the bar shows
+  only the query input. Column-scoped search via header click is
+  unimplemented. Both are follow-up UI work; the data-side supports
+  them today.
+- No filter, no sort, no type inference, no column statistics.
+  Milestones 2–3.
 - The status bar reports a warning count but cannot navigate to the
   offending row. Milestone 4.
 - No progress UI for extraction / indexing. Milestone 5.
 - No themes, no light mode. Milestone 5.
-- UI coverage is limited to two focus/keyboard tests; there is no
-  automated test of drag/drop, the archive picker, or the toolbar.
+- UI coverage is now nine UI regression tests (focus, copy, drag,
+  auto-scroll, search bar) plus the two `rect_contains` unit tests;
+  there is still no automated test of drag/drop or the toolbar.
   `--probe` remains the only headless data-path harness.
 
 ### Performance gaps
@@ -1310,23 +1366,47 @@ restructuring. Specifically:
 - **Selection / navigation / clipboard (Milestone 2, partial).**
   `Selection` (in `anvil_core::selection`) lives on `MainView` and
   stores `(record_index, column_index)` ranges, independent of GPUI
-  elements. Keyboard handling is currently inlined in
-  `view.rs::on_grid_key_down`; a dedicated `commands` module will be
-  extracted once search / filter / go-to-row add their keybindings.
-  Clipboard copy is implemented: `Selection::copy_text_with`
-  renders TSV; `MainView::copy_selection_to_clipboard` writes through
-  the injectable `ClipboardWriter` (default `arboard`);
+  elements. Keyboard handling routes through `commands::action_for`
+  in `ui/commands.rs`; `MainView::run_action` executes each decoded
+  `Action` against view state. Clipboard copy is implemented:
+  `Selection::copy_text_with` renders TSV;
+  `MainView::copy_selection_to_clipboard` writes through the
+  injectable `ClipboardWriter` (default `arboard`);
   `MainView::status_message` shows "copied N cells" in the status
-  bar. The grid tracks `MainView.focus_handle` so keyboard events
-  reach `on_grid_key_down`; drag-select is wired via per-cell
-  `on_mouse_move` plus an overlay-canvas global listener and tick loop
-  for edge auto-scroll. UI tests guard all of it. Cmd/Ctrl+Home/End
+  bar; the copied cells flash `BG_COPIED` for 450 ms. The grid
+  tracks `MainView.focus_handle` so keyboard events reach
+  `on_grid_key_down`; drag-select is wired via per-cell
+  `on_mouse_move` plus an overlay-canvas global listener and tick
+  loop for edge auto-scroll. UI tests guard all of it. Cmd/Ctrl+Home/End
   remain outstanding.
-- **Search (Milestone 2).** A `query::search` module owns the
-  in-progress search: input string, options (case sensitivity,
-  column scope), and an `Arc<Mutex<Vec<record_index>>>` shared
-  between the background task and the UI. The task emits "found N
-  more" updates via the generation pattern.
+- **Search (Milestone 2).** `query::search` (in
+  `anvil_core::query`) owns the streaming search:
+  `pub fn search(doc: &ParsedDocument, needle: &str, opts:
+  &SearchOptions) -> Vec<u64>` returns the matching record indexes in
+  record order, walking each record's bytes through `Cells::new`
+  (which handles quoting / escapes) and matching with
+  `memchr::memmem::Finder`. Case-insensitive matching is the default
+  and uses ASCII lowercasing on the needle and on a sliding window
+  of the cell. `SearchOptions { case_sensitive, column, max_matches }`
+  carries the toggle / scope / cap. `MainView` owns
+  `search_open / search_query / search_matches / search_active /
+  search_generation / search_task / search_focus_handle /
+  focus_search_on_next_frame`. Cmd/Ctrl+F opens the bar (the grid's
+  `Action::OpenSearch` arm); every typed character spawns a
+  background `cx.spawn` task that runs `query::search`; the task
+  carries the generation so obsolete runs are discarded by an
+  `if view.search_generation != generation` check on `update`.
+  Enter / Shift+Enter inside the bar cycle matches;
+  F3 / Shift-F3 cycle matches from anywhere via `Action::NextMatch`.
+  Each match jump sets the selection cursor and calls
+  `scroll_to_item_strict(.., ScrollStrategy::Top)` so the matched row
+  is visible. Match rows are tinted `BG_MATCH`; the active row uses
+  the stronger `BG_MATCH_ACTIVE`. The bar's focus handle is
+  independent of the grid's, so typed characters route through
+  `on_search_key_down` rather than moving the cursor. Cmd/Ctrl+F is
+  a no-op when the bar is already open. UI regression tests cover
+  the open/close cycle, character append, Backspace, Enter cycling,
+  F3 cycling, and the generation guard.
 - **Filter (Milestone 2).** A `query::filter` predicate set held on
   `MainView`, evaluated on the background executor over the
   `ParsedDocument`, returning a sorted `Vec<u64>` of record indexes.

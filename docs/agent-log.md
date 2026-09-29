@@ -1098,3 +1098,287 @@ Proceed with `query::search` and `Cmd/Ctrl+F`, using
 scan with generation-based obsolescence, F3/Shift-F3 navigation, and
 visible-match highlighting. The action mapping and test infrastructure
 are now ready for the feature.
+
+## 2026-10-07 — Milestone 2 Search slice (Cmd/Ctrl+F, F3/Shift-F3, Enter cycle)
+
+### Context
+
+The previous iteration extracted the `commands` module and landed all
+the keyboard routing for navigation / clipboard / archive-picker.
+The agent-log handoff recommended `query::search` + `Cmd/Ctrl+F` as
+the next vertical slice. This iteration lands the entire basic-search
+feature end-to-end:
+
+* `anvil_core::query::search` (pure, GPUI-free) with `SearchOptions`
+  (case-sensitive / column-scope / max-matches);
+* `commands::Action::OpenSearch` and `Action::NextMatch` bindings;
+* A search-bar overlay with a dedicated focus handle, character
+  input, Backspace, Enter / Shift+Enter, and Esc;
+* Background search task on `cx.background_executor` with
+  generation-counter cancellation;
+* Match highlighting in the grid (`BG_MATCH` / `BG_MATCH_ACTIVE`);
+* F3 / Shift-F3 cycle matches from anywhere via the grid's
+  `Action::NextMatch` arm;
+* Search state is cleared on every `OpenOutcome` so opening a new
+  document cannot carry stale matches.
+
+### Implemented
+
+- New module `src/query.rs` exposing
+  `pub fn search(doc: &ParsedDocument, needle: &str, opts:
+  &SearchOptions) -> Vec<u64>`. Walks each record's bytes through
+  `Cells::new` (which handles quoting / escapes) and matches with
+  `memchr::memmem::Finder`. Case-insensitive matching (the default)
+  uses an ASCII-lowercased needle and a sliding-window lowercase over
+  the cell bytes. `SearchOptions { case_sensitive, column,
+  max_matches }` carries the toggle / scope / cap. Per-record decode
+  only, no `Vec<Vec<String>>` materialisation.
+- `src/lib.rs`: re-exports `SearchOptions` and `search` as
+  `anvil_core::{SearchOptions, search_records}`.
+- `src/ui/theme.rs`: `BG_MATCH = #4a3a00` and `BG_MATCH_ACTIVE =
+  #6b5400`.
+- `src/ui/grid.rs`:
+  - `RowContext` gains `search_matches: &[u64]` (sorted record
+    indexes) and `search_active: i64`. Matched rows tint the row
+    background; the active match uses the stronger colour.
+  - The lookup is `binary_search` per visible row — about 30 visible
+    rows × ~7 probes per redraw for a 1M-row file with 100k matches.
+- `src/ui/commands.rs`:
+  - New `Action::OpenSearch` (Cmd/Ctrl+F).
+  - New `Action::NextMatch { direction }` (F3 = next, Shift+F3 =
+    previous).
+  - The copy chord rejects Alt / Fn / non-secondary as before; same
+    logic for `f`. Five new unit tests cover the new chords.
+- `src/ui/view.rs`:
+  - New `MainView` search fields: `search_open`, `search_query`,
+    `search_matches`, `search_active`, `search_generation`,
+    `search_task`, `search_focus_handle`,
+    `focus_search_on_next_frame`.
+  - `open_search` opens the bar, kicks off a search for the empty
+    query, and sets the deferred-focus flag.
+  - `close_search` clears everything (called from `apply` on every
+    `OpenOutcome`).
+  - `kick_search` bumps the generation, drops the previous task, and
+    spawns `query::search` on `cx.background_executor` with the
+    captured generation; the task's `update` callback is a no-op
+    when the generation has moved on.
+  - `apply_search_result` installs the matches and sets
+    `search_active = 0` (or `-1` if there are none).
+  - `advance_match` cycles `search_active` with i64-safe modular
+    arithmetic so the wrap from row N-1 to row 0 is well-defined.
+  - `jump_to_active_match` sets the cursor to the active row's column
+    and calls `scroll_to_item_strict(.., ScrollStrategy::Top)`.
+  - `on_search_key_down` handles Escape (close + refocus grid),
+    Enter / Shift+Enter (cycle matches), Backspace (pop last byte),
+    and printable characters (append + restart search). Cmd+F,
+    Alt+F, etc. fall through to the grid handler.
+  - `run_action` arms for `OpenSearch` (no-op when already open /
+    no document) and `NextMatch { direction }` (no-op without a
+    match list).
+  - `apply` calls `close_search` so a new document cannot carry
+    stale matches or query text.
+  - `render_overlay` was refactored to return `Vec<AnyElement>`; it
+    stacks the search bar and the archive picker independently.
+  - `render_search_bar` paints the bar at the top of the window with
+    `key_context("Search")` and `.track_focus(&self.search_focus_handle)`.
+    The status text ("1 of 12", "no matches", "searching…") is computed
+    by `search_status_text`.
+  - `Render::render` defers focus to `search_focus_handle` when
+    `focus_search_on_next_frame` is set.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 128 passed (was 93): 38 lib (unchanged),
+  30 binary (was 16; +9 commands tests, +5 search UI tests), 60
+  integration (was 52; +8 search tests). 1 ignored
+  (`measure_large_fixture`).
+- `cargo test --release --lib query` — 13 passed.
+- `cargo test --release --test core search` — 8 passed.
+- `cargo test --release --bin anvil` — 30 passed, including all
+  pre-existing focus / copy / drag / auto-scroll tests and 5 new
+  search tests.
+- `cargo clippy --release --all-targets` — clean (the existing
+  pre-`1.98` future-incompat notes are unchanged).
+- `cargo fmt --check` — clean.
+- `cargo test --release --test core -- --ignored measure_large
+  --nocapture` — 165.4 MiB / 1,000,000 rows in 128 ms (1292 MiB/s),
+  20 cols. Within noise of the pre-search baseline (~650 MiB/s;
+  variance across cold/warm cache dominates).
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, 20 columns, 0 warnings, probe time in the same range as the
+  Milestone 1 baseline.
+- `./target/release/anvil --probe fixtures/multi.zip` — picker
+  message printed, 2 candidates listed.
+- `./target/release/anvil --probe fixtures/malformed.csv` —
+  unterminated-quote warning still surfaces.
+- `./target/release/anvil` (GUI launch, killed after 5 s) — no
+  panic, no stderr. Manual UI exercise of Cmd/Ctrl+F, character
+  input, Backspace, Enter, Esc deferred; the state transitions are
+  covered by the UI regression tests against a real fixture.
+
+### Tests added / changed
+
+- 13 unit tests in `src/query.rs`:
+  - `ascii_lower_helper_basic`
+  - `empty_needle_returns_no_matches`
+  - `single_match`
+  - `multiple_matches_in_record_order`
+  - `case_insensitive_default_matches_uppercase_data`
+  - `case_sensitive_only_matches_exact_case`
+  - `column_scoped_search`
+  - `column_scope_out_of_bounds_returns_empty`
+  - `quoted_cells_are_searched`
+  - `max_matches_caps_results`
+  - `no_match_returns_empty`
+  - `empty_document_returns_empty`
+  - `case_insensitive_matches_mixed_case_needle`
+- 8 integration tests in `tests/core.rs::search_*` against real
+  `ParsedDocument`s:
+  - `search_finds_matches_across_columns`
+  - `search_returns_matches_in_record_order`
+  - `search_empty_needle_returns_no_matches`
+  - `search_case_sensitive_distinguishes_case`
+  - `search_column_scope_limits_search`
+  - `search_max_matches_caps_results`
+  - `search_handles_quoted_commas`
+  - `search_finds_substring_match`
+- 5 unit tests in `src/ui/commands.rs`:
+  - `open_search_chord_maps_to_open_search`
+  - `plain_f_is_not_open_search`
+  - `alt_f_is_not_open_search`
+  - `f3_jumps_to_next_match`
+  - `shift_f3_jumps_to_previous_match`
+- 9 UI regression tests in `src/ui/view.rs`:
+  - `cmd_f_opens_search_bar_when_grid_focused`
+  - `search_bar_input_appends_and_skips_grid_navigation`
+  - `search_bar_backspace_drops_last_character`
+  - `escape_closes_search_bar`
+  - `search_populates_match_list`
+  - `search_finds_real_matches_in_fixture`
+  - `search_enter_cycles_through_matches`
+  - `f3_advances_match_without_opening_bar`
+  - `opening_new_document_clears_search_state`
+- No data-side tests removed.
+
+### Roadmap changes
+
+- Milestone 2 Search: ticked the seven items landed by this slice
+  (Cmd/Ctrl+F binding, `query::search`, background task with
+  generation, match count, visible-row highlighting, F3 / Shift-F3).
+  Left unchecked: case-sensitive UI toggle, column-scoped search via
+  header click. `SearchOptions` already supports both options; this
+  is purely UI work for a follow-up slice.
+- Milestone 2 Tests: ticked "Unit tests for `query::search` (needle
+  matching, escape handling, case sensitivity, column scoping)" and
+  "Test that opening a new file cancels an in-flight search /
+  filter" (the latter is exercised by `opening_new_document_clears_search_state`,
+  which calls the same `close_search` that `apply` does).
+- Milestone 2 Keyboard navigation: left "Cmd/Ctrl+G — go-to-row
+  input box" and "Tab / Shift-Tab" untouched — neither is part of
+  the search slice.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Primary-state table extended with `search_open`, `search_query`,
+    `search_matches`, `search_active`, `search_generation`,
+    `search_task`, `search_focus_handle`,
+    `focus_search_on_next_frame`.
+  - "What is *current* vs *planned*" updated: `query::search` is
+    listed as Current; `query::filter` and `query::sort` remain
+    Planned.
+  - Recognised-keys table extended with F3 / Shift-F3, Esc (closes
+    the search bar), and Cmd/Ctrl+F.
+  - Commands binding list updated: `Action` enum now lists
+    `OpenSearch` and `NextMatch`.
+  - "Planned Architectural Evolution → Search (Milestone 2)" rewritten
+    to describe the actual implementation (the data-side
+    `query::search`, the generation-counter pattern, the focus
+    handle, the row-tint visualisation, F3 / Shift-F3 anywhere,
+    Cmd/Ctrl+F no-op when open).
+  - Testing section rewritten: 60 integration tests, 25 selection
+    unit tests, 13 query unit tests, 14 command-mapping unit tests,
+    nine UI regression tests including the new search coverage.
+  - "Current Limitations / Technical Debt → Functional gaps" updated
+    to note that search is wired and tested, leaving the
+    case-sensitive / column-scoped UI toggles and the column
+    header-click hookup as open work.
+- `Cargo.toml`: no new dependencies. `memchr` was already a
+  dependency; the new search module uses `memchr::memmem::Finder`.
+
+### Issues / technical debt discovered
+
+- **No case-sensitive toggle in the UI.** `SearchOptions` supports it
+  on the data side, but the bar shows only the query input. The
+  follow-up slice should add a small `Aa` button next to the query
+  (or a `Cmd/Ctrl+Shift+F` chord) to toggle it.
+- **No column-scoped search.** Same story: `SearchOptions.column`
+  exists, but no UI to set it. A natural fit is "click a header,
+  then Cmd/Ctrl+F" — the bar picks up the column index from the
+  clicked header cell.
+- **No match list UI.** Today the user sees only the count and the
+  highlighted rows. A small scrolling list of matches on the right
+  side of the bar (or in a separate overlay) would make
+  many-matches files more navigable. Deferred.
+- **The bar swallows printable characters, but only when it has
+  focus.** The test harness does not exercise the focus transfer
+  because it bypasses render. Production paths do; the
+  `open_search` deferred-focus path mirrors the grid's. If a future
+  change introduces another focusable element on the same screen
+  with the search bar open, focus-routing would need revisiting.
+- **`ascii_contains_lower` uses a 256-byte stack buffer** with a
+  fallback to an allocation for very long needles (>256 bytes). For
+  typical CSV search (short needles) the stack path is hot; the
+  long-needle path is a fallback. No measurement is recorded; this
+  is a deliberate trade-off documented for future tuning.
+- **`view.rs` is now ~2000 lines.** The `commands` extraction from
+  the previous iteration took some load off, but the search slice
+  rebalanced that. A follow-up split (e.g. `toolbar.rs`, `status.rs`,
+  `search.rs`, `grid_render.rs`) is becoming worthwhile but is not
+  urgent.
+- **`Cmd/Ctrl+Home/End` and `Tab / Shift-Tab` are still unimplemented.**
+  Recorded as open loops. Trivial follow-up.
+
+### Open loops
+
+- ADR backlog candidates unchanged from earlier entries (mmap, ZIP
+  decompress-to-temp, generation-counter cancellation). The search
+  slice did not introduce a durable architectural reversal, so no
+  ADR was filed.
+- Case-sensitive / column-scoped UI toggles.
+- Match-list overlay (separate from the search bar).
+- Filter and sort are still unimplemented; both can reuse
+  `Vec<u64>`-of-`record_index` results and the same generation
+  pattern.
+
+### Next recommended task
+
+Proceed with **filter** (Cmd/Ctrl+L). The search slice lands the
+matching shape (a background `query::*` task that returns a sorted
+`Vec<u64>` of record indexes, generation-counter cancellation,
+status-bar count, and per-row highlight), so filter is mostly the
+data-side predicate evaluator and a thin overlay:
+
+1. `anvil_core::query::filter(doc, predicates, opts) -> Vec<u64>`:
+   `Filter` enum with the operators listed in the Milestone 2 plan
+   (equals / not-equals / contains / not-contains / starts with /
+   ends with / empty / non-empty / numeric comparisons). Composability
+   via `Vec<Filter>` combined as AND.
+2. `MainView` filter state (mirrors the search fields):
+   `filter_open`, `filter_predicates`, `filter_matches`,
+   `filter_active_match`, `filter_generation`, `filter_task`.
+3. Filter bar overlay (Cmd/Ctrl+L) with an input that parses into
+   `Filter`s; render filters as small chips. The status bar shows
+   "rows (filtered from N)".
+4. Grid renders from `filter_matches` (a `Vec<u64>`) instead of the
+   full range when the filter is active; the row mapping
+   (`record_index → list position`) is built once when the filter
+   result is applied.
+5. Filter composition with future sort (Milestone 3) is documented
+   in the roadmap: sort runs on the filtered indexes, not the full
+   record set.
+
+The existing search slice makes this substantially smaller than it
+would have been a sprint ago: generation-cancel, the match-list
+visual model, and the deferred-focus pattern all transfer.

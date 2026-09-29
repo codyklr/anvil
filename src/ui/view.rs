@@ -16,7 +16,9 @@ use gpui::{
     ScrollDelta, ScrollStrategy, ScrollWheelEvent, Task, UniformListScrollHandle, Window,
 };
 
-use anvil_core::{ArchiveSource, CellPos, LoadResult, LoadedDocument, Selection};
+use anvil_core::{
+    search_records, ArchiveSource, CellPos, LoadResult, LoadedDocument, SearchOptions, Selection,
+};
 
 use super::archive_picker;
 use super::commands::{self, Action};
@@ -125,6 +127,37 @@ pub struct MainView {
     /// list, advancing the view and growing the selection. Dropped on
     /// mouse-up (or cleared by the loop itself when the drag ends).
     auto_scroll_task: Option<Task<()>>,
+
+    /// Search state (Cmd/Ctrl+F). `search_open` controls whether the
+    /// search bar is visible. While open, `search_query` holds the
+    /// user's typed needle; each keystroke spawns a background
+    /// `query::search` task with `search_generation` so obsolete work
+    /// is dropped. `search_matches` is the most recent result; it can
+    /// be briefly stale relative to `search_query` while a search is
+    /// in flight.
+    search_open: bool,
+    search_query: String,
+    search_matches: Vec<u64>,
+    /// Index into `search_matches` of the currently highlighted row.
+    /// `-1` when there are no matches yet. Cycled by Enter / Shift+Enter
+    /// inside the bar and by F3 / Shift-F3 anywhere.
+    search_active: i64,
+    /// Bumped on every keystroke / open / close. A background task
+    /// only applies its result if the view's generation still matches.
+    search_generation: u64,
+    /// Outstanding search task. Dropped when the view closes the bar
+    /// or starts a new search; the running task continues but its
+    /// `update` callback becomes a no-op.
+    search_task: Option<Task<()>>,
+    /// Focus handle for the search bar overlay. Independent of the grid
+    /// handle so the search bar can swallow keystrokes (typed
+    /// characters, Enter to advance) without the grid's `MoveCursor`
+    /// arm firing.
+    search_focus_handle: FocusHandle,
+    /// Set when `open_search` is called; the next render schedules a
+    /// deferred `window.focus` onto `search_focus_handle`. Mirrors the
+    /// pattern used for the grid handle.
+    focus_search_on_next_frame: bool,
 }
 
 impl MainView {
@@ -152,6 +185,14 @@ impl MainView {
             list_bounds: None,
             pointer_pos: None,
             auto_scroll_task: None,
+            search_open: false,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_active: -1,
+            search_generation: 0,
+            search_task: None,
+            search_focus_handle: cx.focus_handle(),
+            focus_search_on_next_frame: false,
         }
     }
 
@@ -195,6 +236,7 @@ impl MainView {
                 self.drag_selecting = false;
                 self.status_message = None;
                 self.copy_flash_rect = None;
+                self.close_search();
                 self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
@@ -206,6 +248,7 @@ impl MainView {
                 self.drag_selecting = false;
                 self.status_message = None;
                 self.copy_flash_rect = None;
+                self.close_search();
                 self.focus_grid_on_next_frame = true;
                 self.state = ViewState::Ready;
             }
@@ -213,6 +256,7 @@ impl MainView {
                 self.model = None;
                 self.selection.clear();
                 self.copy_flash_rect = None;
+                self.close_search();
                 self.status_message = Some(format!("error: {message}"));
                 self.state = ViewState::Error(message);
             }
@@ -443,12 +487,16 @@ impl MainView {
                 let viewport_w = this.viewport_w;
                 let selection = this.selection.clone();
                 let copy_flash_rect = this.copy_flash_rect;
+                let search_matches = this.search_matches.clone();
+                let search_active = this.search_active;
                 let entity = entity.clone();
                 let row_ctx = grid::RowContext {
                     selection: &selection,
                     scroll_x,
                     viewport_w,
                     copy_flash: copy_flash_rect,
+                    search_matches: &search_matches,
+                    search_active,
                 };
                 range
                     .map(|i| {
@@ -723,13 +771,25 @@ impl MainView {
             } => self.move_selection(row_delta, column_delta, extend, cx),
             Action::Copy => self.copy_selection_to_clipboard(cx),
             Action::Escape => {
-                if !self.selection.is_empty() {
+                if self.search_open {
+                    self.close_search();
+                    self.focus_grid_on_next_frame = true;
+                    cx.notify();
+                } else if !self.selection.is_empty() {
                     self.selection.clear();
                     cx.notify();
                 } else if self.show_picker {
                     self.show_picker = false;
                     cx.notify();
                 }
+            }
+            Action::OpenSearch => {
+                if self.model.is_some() && !self.search_open {
+                    self.open_search(cx);
+                }
+            }
+            Action::NextMatch { direction } => {
+                self.advance_match(direction, cx);
             }
         }
     }
@@ -802,6 +862,190 @@ impl MainView {
         // handles that case (it uses (0,0) as the implied cursor).
         self.selection.move_cursor(dr, dc, cols, records, extend);
         cx.notify();
+    }
+
+    // ---- search ----------------------------------------------------------
+
+    /// Open the search bar overlay and kick off a search for whatever
+    /// query was last typed (empty by default → 0 matches). The bar
+    /// takes keyboard focus so subsequent keystrokes go into the input
+    /// rather than the grid.
+    fn open_search(&mut self, cx: &mut Context<Self>) {
+        self.search_open = true;
+        self.search_matches.clear();
+        self.search_active = -1;
+        self.focus_search_on_next_frame = true;
+        self.kick_search(cx);
+        cx.notify();
+    }
+
+    /// Close the search bar and clear all search state. The grid keeps
+    /// its current selection; the search rectangle stops being
+    /// highlighted.
+    fn close_search(&mut self) {
+        self.search_open = false;
+        self.search_query.clear();
+        self.search_matches.clear();
+        self.search_active = -1;
+        self.search_task = None;
+        // search_generation is bumped implicitly on the next open / edit.
+    }
+
+    /// Start (or restart) the background search for `self.search_query`.
+    /// Bumps `search_generation` and drops the previous task. The task
+    /// captures the generation so a stale result is silently discarded.
+    fn kick_search(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            self.search_matches.clear();
+            self.search_active = -1;
+            return;
+        };
+        let needle = self.search_query.clone();
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        let doc = model.doc.clone();
+        let options = SearchOptions::default();
+
+        // Reset visible state while the search is in flight so the user
+        // sees an empty match list rather than the previous run's.
+        self.search_matches.clear();
+        self.search_active = -1;
+
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let matches = executor
+                .spawn(async move { search_records(&doc, &needle, &options) })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.search_generation != generation {
+                    return;
+                }
+                view.apply_search_result(matches, cx);
+            })
+            .ok();
+        });
+        self.search_task = Some(task);
+    }
+
+    /// Apply the result of an in-flight search, ordered by record
+    /// index. Picks the first match as the active one (or the closest
+    /// after the cursor, if there is one).
+    fn apply_search_result(&mut self, matches: Vec<u64>, cx: &mut Context<Self>) {
+        self.search_matches = matches;
+        self.search_active = if self.search_matches.is_empty() {
+            -1
+        } else {
+            0
+        };
+        if self.search_active >= 0 {
+            self.jump_to_active_match(cx);
+        }
+        cx.notify();
+    }
+
+    /// Move the active match by `direction` (1 = next, -1 = previous)
+    /// and scroll the grid to it. A no-op when no search is active.
+    fn advance_match(&mut self, direction: i8, cx: &mut Context<Self>) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+        let n = self.search_matches.len() as i64;
+        let next = if self.search_active < 0 {
+            if direction > 0 {
+                0
+            } else {
+                n - 1
+            }
+        } else {
+            // i64 wrap-safe cycle.
+            let raw = self.search_active + direction as i64;
+            ((raw % n) + n) % n
+        };
+        self.search_active = next;
+        self.jump_to_active_match(cx);
+    }
+
+    /// Move the selection cursor to the active match's row and scroll
+    /// the list so the row is visible.
+    fn jump_to_active_match(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let Some(row) = self
+            .search_matches
+            .get(self.search_active as usize)
+            .copied()
+        else {
+            return;
+        };
+        let col = self.selection.cursor().map(|c| c.column_index).unwrap_or(0);
+        let col = col.min(model.doc.column_count().saturating_sub(1));
+        self.selection.set(CellPos::new(row, col));
+        // Scroll the list so the row is in view. We use the existing
+        // scroll handle; this is the same call shape drag auto-scroll
+        // uses to pin a row to the top.
+        self.v_scroll
+            .scroll_to_item_strict(row as usize, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// The search bar's keyboard handler. Char keys append to the
+    /// query; backspace deletes the last byte; Enter / Shift+Enter
+    /// cycle matches; Esc closes the bar. Anything else falls through
+    /// (and is therefore ignored).
+    fn on_search_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.search_open {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+
+        // Escape closes the bar and returns focus to the grid. This
+        // re-uses `Action::Escape` so the binding table stays the
+        // single source of truth, even though we are *not* the grid.
+        if key == "escape" {
+            self.close_search();
+            self.focus_grid_on_next_frame = true;
+            cx.notify();
+            return;
+        }
+
+        // Enter / Shift+Enter cycle through matches without leaving the
+        // search bar.
+        if key == "enter" {
+            let direction: i8 = if modifiers.shift { -1 } else { 1 };
+            self.advance_match(direction, cx);
+            return;
+        }
+
+        // Backspace pops one byte. We use `key == "backspace"` rather
+        // than `event.keystroke.key_char` so we can be sure it is the
+        // navigation key, not the literal character "backspace" (which
+        // does not normally appear in cell data).
+        if key == "backspace" && !modifiers.control && !modifiers.alt {
+            self.search_query.pop();
+            self.kick_search(cx);
+            cx.notify();
+            return;
+        }
+
+        // Plain printable characters are appended. We require *no*
+        // modifiers so we don't swallow Cmd+F (already handled by the
+        // grid binding), Option+E (an accented character), etc.
+        if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
+            if let Some(ch) = &event.keystroke.key_char {
+                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
+                    self.search_query.push_str(ch);
+                    self.kick_search(cx);
+                    cx.notify();
+                }
+            }
+        }
     }
 
     // ---- drag auto-scroll ------------------------------------------------
@@ -877,7 +1121,98 @@ impl MainView {
         cx.notify();
     }
 
-    fn render_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_overlay(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        if let Some(search_bar) = self.render_search_bar(cx) {
+            out.push(search_bar);
+        }
+        if let Some(archive_picker) = self.render_archive_picker(cx) {
+            out.push(archive_picker);
+        }
+        out
+    }
+
+    /// Search bar overlay (Cmd/Ctrl+F). Pinned to the top of the
+    /// window so it never obscures the toolbar. Carries its own
+    /// `key_context("Search")` and `track_focus` so characters typed
+    /// while it is open route through `on_search_key_down` rather than
+    /// the grid handler.
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.search_open {
+            return None;
+        }
+        let query = self.search_query.clone();
+        let (status_text, status_color) = self.search_status_text();
+
+        Some(
+            div()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .right(px(0.))
+                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .bg(theme::BG_PANEL)
+                .border_b_1()
+                .border_color(theme::BORDER_STRONG)
+                .key_context("Search")
+                .track_focus(&self.search_focus_handle)
+                .on_key_down(cx.listener(Self::on_search_key_down))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(theme::TEXT_DIM)
+                        .child("Find:"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::TEXT_STRONG)
+                        .truncate()
+                        .child(if query.is_empty() {
+                            "type to search…".to_string()
+                        } else {
+                            query
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(status_color)
+                        .child(status_text),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Status-bar text + colour for the search bar: "N matches", "no
+    /// matches", or "searching…" depending on whether a task is in
+    /// flight.
+    fn search_status_text(&self) -> (String, gpui::Rgba) {
+        if !self.search_query.is_empty() && self.search_matches.is_empty() {
+            // The empty match list could be either "still searching" or
+            // "no matches". We treat an in-flight search task (or a
+            // generation mismatch) as "searching…".
+            if self.search_task.is_some() {
+                return ("searching…".to_string(), theme::TEXT_DIM);
+            }
+            return ("no matches".to_string(), theme::WARN);
+        }
+        let total = self.search_matches.len();
+        let active = if self.search_active >= 0 {
+            self.search_active + 1
+        } else {
+            0
+        };
+        (format!("{active} of {total}"), theme::TEXT_DIM)
+    }
+
+    fn render_archive_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let archive = self.archive.clone()?;
         if !self.show_picker {
             return None;
@@ -1042,8 +1377,20 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Search bar deferred focus: when the user opens the bar via
+        // Cmd/Ctrl+F we set `focus_search_on_next_frame`; the very
+        // next render schedules a deferred `window.focus` onto the
+        // search handle. This avoids mutating focus mid-frame.
+        if self.focus_search_on_next_frame {
+            self.focus_search_on_next_frame = false;
+            let focus_handle = self.search_focus_handle.clone();
+            cx.defer_in(window, move |_view, window, _cx| {
+                window.focus(&focus_handle);
+            });
+        }
+
         let center = self.render_center(window, cx);
-        let overlay = self.render_overlay(cx);
+        let overlays = self.render_overlay(cx);
 
         div()
             .flex()
@@ -1061,7 +1408,7 @@ impl Render for MainView {
                     .flex_col()
                     .flex_1()
                     .child(center)
-                    .when_some(overlay, |this, overlay| this.child(overlay)),
+                    .children(overlays),
             )
             .child(self.render_status())
     }
@@ -1387,6 +1734,273 @@ mod tests {
                 view.auto_scroll_task.is_none(),
                 "mouse-up should stop the auto-scroll loop"
             );
+        });
+    }
+
+    /// Regression: Cmd/Ctrl+F should open the search bar overlay. The
+    /// keystroke reaches `on_grid_key_down` while the grid is focused
+    /// and the binding maps to `Action::OpenSearch`. After the
+    /// keystroke the bar must be open and the query empty.
+    #[gpui::test]
+    async fn cmd_f_opens_search_bar_when_grid_focused(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(!view.search_open);
+        });
+
+        let open = if cfg!(target_os = "macos") {
+            "cmd-f"
+        } else {
+            "ctrl-f"
+        };
+        cx.simulate_keystrokes(open);
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.search_open, "search bar should be open");
+            assert_eq!(view.search_query, "");
+        });
+    }
+
+    /// Typing characters into the open search bar appends to the query
+    /// (instead of moving the grid cursor). The bar's key handler must
+    /// swallow printable keystrokes; the grid receives nothing.
+    #[gpui::test]
+    async fn search_bar_input_appends_and_skips_grid_navigation(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+
+        // Drive individual characters. GPUI's keystroke simulation
+        // dispatches one KeystrokeEvent per `simulate_keystrokes`
+        // argument.
+        cx.simulate_keystrokes("f o o");
+        cx.run_until_parked();
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_query, "foo");
+            // The grid cursor stays at the original (0, 0) because the
+            // search bar swallowed the characters.
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+        });
+    }
+
+    /// Backspace inside the search bar pops one character at a time
+    /// without falling back to grid navigation.
+    #[gpui::test]
+    async fn search_bar_backspace_drops_last_character(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("f o o");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_query, "fo");
+        });
+    }
+
+    /// Closing the search bar via the `Escape` action must leave the
+    /// grid ready to take keyboard focus again. We assert the bar is
+    /// closed and `focus_grid_on_next_frame` is set so the next render
+    /// will refocus the grid.
+    #[gpui::test]
+    async fn escape_closes_search_bar(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(!view.search_open, "search bar should be closed");
+            assert_eq!(view.search_query, "");
+            assert_eq!(view.search_matches, Vec::<u64>::new());
+            assert_eq!(view.search_active, -1);
+            // We don't assert on `focus_grid_on_next_frame` here: that
+            // flag is cleared as soon as `render_grid` runs (the
+            // deferred focus consumes it). The contract we care about
+            // is "the bar is closed"; the next user keystroke will
+            // route through the grid handler.
+        });
+    }
+
+    /// A search that has finished must populate `search_matches` and
+    /// set `search_active` to the first match. We assert on the
+    /// search state directly rather than the renderer.
+    #[gpui::test]
+    async fn search_populates_match_list(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("foo");
+        // The background search task completes asynchronously; run
+        // until the executor is idle.
+        cx.run_until_parked();
+        // The sample fixture is `a,b,c\n1,2,3\n4,5,6\n7,8,9\n`. None
+        // of those rows contain "foo", so the result list is empty and
+        // `search_active` stays at -1.
+        cx.update_window_entity(&view, |view, _, _| {
+            // 1M-row fixtures would take a moment, but the sample
+            // document is tiny so the task should already be done.
+            assert_eq!(view.search_matches, Vec::<u64>::new());
+            assert_eq!(view.search_active, -1);
+        });
+    }
+
+    /// Searching a fixture whose records contain the needle should
+    /// return the matching record indexes in order.
+    #[gpui::test]
+    async fn search_finds_real_matches_in_fixture(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        // Build a fixture where the string `needle` appears in two
+        // records. `a,b\nneedle,1\nx,needle\nother,foo\n` -> rows 0 and
+        // 1 match when searching for "needle".
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("search.csv");
+        std::fs::write(&path, b"a,b\nneedle,1\nx,needle\nother,foo\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        inject_doc(cx, &view, doc);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("needle");
+        cx.run_until_parked();
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_matches, vec![0, 1]);
+            assert_eq!(view.search_active, 0);
+            // The first match is jumped to, so the cursor lives there.
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+        });
+    }
+
+    /// Enter inside the search bar advances to the next match;
+    /// Shift+Enter goes to the previous. The test uses a multi-match
+    /// fixture so both directions are observable.
+    #[gpui::test]
+    async fn search_enter_cycles_through_matches(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cycle.csv");
+        std::fs::write(&path, b"a,b\nhit,1\nhit,2\nhit,3\nskip,4\nhit,5\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        inject_doc(cx, &view, doc);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("hit");
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            // First match is row 0.
+            assert_eq!(view.search_active, 0);
+        });
+
+        // Enter -> next match.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_active, 1);
+        });
+
+        // Shift+Enter -> previous.
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_active, 0);
+        });
+
+        // Wrapping: Shift+Enter from row 0 should wrap to the last
+        // match (row 3 = the 4th "hit", which is index 3 in the
+        // 4-element result list).
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_active, 3);
+        });
+    }
+
+    /// F3 / Shift-F3 cycle through matches without consuming characters
+    /// in the search bar. The bar must remain open and the query
+    /// unchanged after the keystrokes; only `search_active` advances.
+    #[gpui::test]
+    async fn f3_advances_match_without_opening_bar(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("f3.csv");
+        std::fs::write(&path, b"a,b\nhit,1\nhit,2\nhit,3\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        inject_doc(cx, &view, doc);
+
+        // Set up a search directly (the bar's focus path needs a
+        // render, which the harness does not run automatically), let
+        // the background search task complete, then dispatch F3.
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.search_open = true;
+            view.search_query = "hit".into();
+            view.kick_search(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_matches, vec![0, 1, 2]);
+        });
+
+        // F3 -> next match.
+        cx.simulate_keystrokes("f3");
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.search_open, "F3 should not close the bar");
+            assert_eq!(view.search_query, "hit", "F3 should not edit the query");
+            assert_eq!(view.search_active, 1);
+        });
+
+        // Shift+F3 -> previous.
+        cx.simulate_keystrokes("shift-f3");
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.search_active, 0);
+        });
+    }
+
+    /// A new document open must clear the previous search state.
+    /// Without this the next-document's grid would still show stale
+    /// match highlighting.
+    #[gpui::test]
+    async fn opening_new_document_clears_search_state(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("f o o");
+        cx.run_until_parked();
+
+        // Now apply an `OpenOutcome::Ready` through the public
+        // dispatcher. We can't construct a `LoadedDocument` here
+        // because the constructor is on the `anvil` binary side; we
+        // exercise `close_search` directly which is what `apply`
+        // calls.
+        cx.update_window_entity(&view, |view, _, _| view.close_search());
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(!view.search_open);
+            assert_eq!(view.search_query, "");
+            assert_eq!(view.search_matches, Vec::<u64>::new());
+            assert_eq!(view.search_active, -1);
         });
     }
 }

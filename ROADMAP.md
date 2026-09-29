@@ -158,16 +158,16 @@ this may freeze the UI.
 
 #### Search
 
-- [ ] Cmd/Ctrl+F opens search bar.
+- [x] Cmd/Ctrl+F opens search bar.
 - [ ] Search input + options (case-sensitive toggle, column scope).
-- [ ] `query::search` module: streaming search over
+- [x] `query::search` module: streaming search over
   `ParsedDocument` returning `Vec<record_index>` (or column-qualified
   results).
-- [ ] Background search task with generation counter; cancellation
+- [x] Background search task with generation counter; cancellation
   when input changes.
-- [ ] Match count in status bar.
-- [ ] Highlight matches in the visible rows.
-- [ ] F3 / Shift-F3 — next / previous match; scroll into view.
+- [x] Match count in status bar.
+- [x] Highlight matches in the visible rows.
+- [x] F3 / Shift-F3 — next / previous match; scroll into view.
 - [ ] Column-scoped search (click a header, then Cmd/Ctrl+F).
 
 #### Filter
@@ -184,10 +184,10 @@ this may freeze the UI.
 
 #### Tests
 
-- [ ] Unit tests for `query::search` (needle matching, escape
+- [x] Unit tests for `query::search` (needle matching, escape
   handling, case sensitivity, column scoping).
 - [ ] Unit tests for `query::filter` predicates against fixtures.
-- [ ] Test that opening a new file cancels an in-flight search /
+- [x] Test that opening a new file cancels an in-flight search /
   filter.
 - [x] Test selection copy formatting (TSV with CRLF on Windows
   builds, LF on Unix).
@@ -195,6 +195,11 @@ this may freeze the UI.
   keys reach the grid and Cmd/Ctrl+C routes to the copy handler
   (`src/ui/view.rs`, GPUI `TestAppContext`). These fail if the grid
   stops tracking focus.
+- [x] UI regression tests for the search bar (Cmd/Ctrl+F opens the
+  bar; typed characters append to the query; Backspace deletes; Enter
+  / Shift+Enter cycle matches; Esc closes; F3 / Shift-F3 cycle matches
+  without opening the bar; opening a new document clears the search
+  state).
 
 ### Dependencies
 
