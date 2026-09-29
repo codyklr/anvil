@@ -14,6 +14,7 @@ pub use error::{AnvilError, Result};
 pub use loader::{index_opened, load, load_entry, LoadResult, LoadedDocument};
 pub use parser::indexing::{build as build_index, parse as parse_opened, IndexResult};
 pub use parser::{Cell, Cells, ColumnIndex, ParseMeta, ParseWarning, ParsedDocument, WarningKind};
+pub use query::filter::{apply as apply_filter, parse as parse_filter, Filter, FilterOp};
 pub use query::{find_ranges, search as search_records, SearchOptions};
 pub use selection::{CellPos, Selection};
 pub use source::archive::{

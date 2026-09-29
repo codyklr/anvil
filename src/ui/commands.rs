@@ -48,6 +48,8 @@ pub(super) enum Action {
     NextMatch { direction: i8 },
     /// Show or hide the file-manager side panel (Cmd/Ctrl+B).
     ToggleFilePanel,
+    /// Open the filter bar (Cmd/Ctrl+L). No-op when already open.
+    OpenFilter,
 }
 
 /// Translate a keystroke into an [`Action`], or `None` when the chord is
@@ -67,6 +69,10 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
 
     if key == "b" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
         return Some(Action::ToggleFilePanel);
+    }
+
+    if key == "l" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::OpenFilter);
     }
 
     if key == "escape" {
@@ -274,5 +280,20 @@ mod tests {
     #[test]
     fn plain_b_is_not_toggle_file_panel() {
         assert_eq!(act("b"), None);
+    }
+
+    #[test]
+    fn open_filter_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-l"
+        } else {
+            "ctrl-l"
+        };
+        assert_eq!(act(chord), Some(Action::OpenFilter));
+    }
+
+    #[test]
+    fn plain_l_is_not_open_filter() {
+        assert_eq!(act("l"), None);
     }
 }

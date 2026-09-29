@@ -18,8 +18,8 @@ use gpui::{
 };
 
 use anvil_core::{
-    search_records, ArchiveSource, CellPos, LoadResult, LoadedDocument, ParsedDocument,
-    SearchOptions, Selection,
+    apply_filter, parse_filter, search_records, ArchiveSource, CellPos, Filter, LoadResult,
+    LoadedDocument, ParsedDocument, SearchOptions, Selection,
 };
 
 use super::archive_picker;
@@ -89,6 +89,18 @@ struct DocumentSnapshot {
     /// until the flash timer clears it.
     copy_flash_rect: Option<(CellPos, CellPos)>,
     copy_flash_generation: u64,
+    /// Text in the filter input (kept per tab so switching away and
+    /// back restores what the user was typing).
+    filter_input: String,
+    /// The applied predicate, or `None` when the tab is unfiltered.
+    filter_applied: Option<Filter>,
+    /// Record indexes that pass the filter, in record order. `None`
+    /// means the tab is unfiltered and the grid renders the whole
+    /// document.
+    filter_rows: Option<Arc<Vec<u64>>>,
+    /// Bumped on every filter apply; a background filter task whose
+    /// generation has moved on discards its result.
+    filter_generation: u64,
 }
 
 impl DocumentSnapshot {
@@ -116,6 +128,10 @@ impl DocumentSnapshot {
             search_generation: 0,
             copy_flash_rect: None,
             copy_flash_generation: 0,
+            filter_input: String::new(),
+            filter_applied: None,
+            filter_rows: None,
+            filter_generation: 0,
         }
     }
 
@@ -140,6 +156,10 @@ impl DocumentSnapshot {
             search_generation: 0,
             copy_flash_rect: None,
             copy_flash_generation: 0,
+            filter_input: String::new(),
+            filter_applied: None,
+            filter_rows: None,
+            filter_generation: 0,
         }
     }
 
@@ -343,6 +363,31 @@ pub struct MainView {
     /// deferred `window.focus` onto `search_focus_handle`. Mirrors the
     /// pattern used for the grid handle.
     focus_search_on_next_frame: bool,
+
+    /// Whether the filter bar (Cmd/Ctrl+L) is visible. The bar's
+    /// visibility is global; the predicate itself is per tab.
+    filter_open: bool,
+    /// Text in the filter input. (Mirror of `documents[active]`.)
+    filter_input: String,
+    /// The applied predicate for the active tab, or `None`.
+    /// (Mirror.)
+    filter_applied: Option<Filter>,
+    /// Record indexes that pass the active tab's filter, or `None` when
+    /// the tab is unfiltered. (Mirror.)
+    filter_rows: Option<Arc<Vec<u64>>>,
+    /// Bumped on every apply; obsolete filter tasks discard their
+    /// results. (Mirror.)
+    filter_generation: u64,
+    /// Parse or evaluation error from the last apply, shown in the bar.
+    filter_error: Option<String>,
+    /// Outstanding background filter task.
+    filter_task: Option<Task<()>>,
+    /// Focus handle for the filter bar. Kept separate from the search
+    /// and grid handles so each bar's keys route correctly.
+    filter_focus_handle: FocusHandle,
+    /// Set when `open_filter` is called; the next render schedules a
+    /// deferred focus onto `filter_focus_handle`.
+    focus_filter_on_next_frame: bool,
 }
 
 impl MainView {
@@ -383,6 +428,15 @@ impl MainView {
             search_task: None,
             search_focus_handle: cx.focus_handle(),
             focus_search_on_next_frame: false,
+            filter_open: false,
+            filter_input: String::new(),
+            filter_applied: None,
+            filter_rows: None,
+            filter_generation: 0,
+            filter_error: None,
+            filter_task: None,
+            filter_focus_handle: cx.focus_handle(),
+            focus_filter_on_next_frame: false,
         }
     }
 
@@ -407,6 +461,10 @@ impl MainView {
         snap.search_generation = self.search_generation;
         snap.copy_flash_rect = self.copy_flash_rect;
         snap.copy_flash_generation = self.copy_flash_generation;
+        snap.filter_input = self.filter_input.clone();
+        snap.filter_applied = self.filter_applied.clone();
+        snap.filter_rows = self.filter_rows.clone();
+        snap.filter_generation = self.filter_generation;
         snap.archive = self.archive.clone();
         snap.entry_name = self.selected_entry.clone();
     }
@@ -428,6 +486,10 @@ impl MainView {
         self.search_generation = 0;
         self.copy_flash_rect = None;
         self.copy_flash_generation = 0;
+        self.filter_input.clear();
+        self.filter_applied = None;
+        self.filter_rows = None;
+        self.filter_generation = 0;
     }
 
     /// Copy `documents[new_active]` into the live per-document fields.
@@ -458,6 +520,10 @@ impl MainView {
         self.search_generation = snap.search_generation;
         self.copy_flash_rect = snap.copy_flash_rect;
         self.copy_flash_generation = snap.copy_flash_generation;
+        self.filter_input = snap.filter_input;
+        self.filter_applied = snap.filter_applied;
+        self.filter_rows = snap.filter_rows;
+        self.filter_generation = snap.filter_generation;
     }
 
     /// Allocate the next unique `DocumentSnapshot` id.
@@ -1113,6 +1179,16 @@ impl MainView {
             ),
             None => (0, 0, 0),
         };
+        // When a filter is active the row count reflects the filtered
+        // set; the original total is shown alongside it.
+        let rows_label = match &self.filter_rows {
+            Some(filtered) => format!(
+                "{} rows (filtered from {})",
+                format_count(filtered.len() as u64),
+                format_count(rows)
+            ),
+            None => format!("{} rows", format_count(rows)),
+        };
         let state = match &self.state {
             ViewState::Empty => "idle".to_string(),
             ViewState::Loading(note) => format!("loading — {note}"),
@@ -1143,7 +1219,7 @@ impl MainView {
             .border_color(theme::BORDER)
             .text_xs()
             .text_color(theme::TEXT_DIM)
-            .child(format!("{} rows", format_count(rows)))
+            .child(rows_label)
             .child(format!("{cols} cols"))
             .child(format!("delim {}", delimiter))
             .child(archive_picker::format_size(size))
@@ -1192,7 +1268,14 @@ impl MainView {
             f32::from(window.viewport_size().width) - f32::from(theme::ROW_NUMBER_WIDTH);
         self.viewport_w = viewport_w.max(0.0);
 
-        let row_count = model.row_count() as usize;
+        // When a filter is active the list renders only the matching
+        // records; `i` is a display position that maps through
+        // `filter_rows` to a record index. Without a filter the two are
+        // the same.
+        let view_rows = self.filter_rows.clone();
+        let row_count = view_rows
+            .as_ref()
+            .map_or(model.row_count() as usize, |rows| rows.len());
         let scroll_x = self.scroll_x;
         let header = grid::render_header(&model, scroll_x, viewport_w);
 
@@ -1219,6 +1302,7 @@ impl MainView {
                 let search_active = this.search_active;
                 let search_query = this.search_query.clone();
                 let search_options = anvil_core::SearchOptions::default();
+                let view_rows = this.filter_rows.clone();
                 let entity = entity.clone();
                 let row_ctx = grid::RowContext {
                     selection: &selection,
@@ -1239,9 +1323,13 @@ impl MainView {
                         // again here is required by the FnMut
                         // contract on `range.map`.
                         let entity_for_row = entity.clone();
+                        let record_index = match &view_rows {
+                            Some(rows) => rows.get(i).copied().unwrap_or(0),
+                            None => i as u64,
+                        };
                         grid::render_row(
                             &model,
-                            i as u64,
+                            record_index,
                             &row_ctx,
                             {
                                 let entity = entity_for_row.clone();
@@ -1527,6 +1615,11 @@ impl MainView {
                 self.file_panel_open = !self.file_panel_open;
                 cx.notify();
             }
+            Action::OpenFilter => {
+                if self.model.is_some() && !self.filter_open {
+                    self.open_filter(cx);
+                }
+            }
         }
     }
 
@@ -1587,16 +1680,44 @@ impl MainView {
         .detach();
     }
 
+    /// Move the selection cursor. With no filter this is a straight
+    /// record-index move (delegated to `Selection::move_cursor`). With
+    /// a filter active, vertical movement walks the *visible* rows so
+    /// the cursor never lands on a hidden record, and horizontal
+    /// movement is unchanged.
     fn move_selection(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
         let Some(model) = &self.model else {
             return;
         };
-        let records = model.row_count();
         let cols = model.doc.column_count();
-        // If there is no selection yet, start at (0, 0) so the first
-        // arrow key makes the cursor visible. `move_cursor` already
-        // handles that case (it uses (0,0) as the implied cursor).
-        self.selection.move_cursor(dr, dc, cols, records, extend);
+        let rows = self.filter_rows.clone();
+        let Some(rows) = rows else {
+            let records = model.row_count();
+            // If there is no selection yet, start at (0, 0) so the
+            // first arrow key makes the cursor visible.
+            self.selection.move_cursor(dr, dc, cols, records, extend);
+            cx.notify();
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let cursor = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
+        let col_max = cols.saturating_sub(1) as i64;
+        let col = (cursor.column_index as i64 + dc).clamp(0, col_max) as usize;
+        // Locate the cursor's display position; if it is on a hidden
+        // record (e.g. the filter changed under it), fall back to the
+        // closest visible position at or before it.
+        let position = rows
+            .binary_search(&cursor.record_index)
+            .unwrap_or_else(|insert| insert.saturating_sub(1));
+        let next_position = (position as i64 + dr).clamp(0, rows.len() as i64 - 1) as usize;
+        let next = CellPos::new(rows[next_position], col);
+        if extend {
+            self.selection.extend_to(next);
+        } else {
+            self.selection.set(next);
+        }
         cx.notify();
     }
 
@@ -1788,6 +1909,123 @@ impl MainView {
         }
     }
 
+    // ---- filter ----------------------------------------------------------
+
+    /// Open the filter bar (Cmd/Ctrl+L). The input already holds the
+    /// tab's current predicate so the user can edit rather than
+    /// retype. Nothing is applied until Enter.
+    fn open_filter(&mut self, cx: &mut Context<Self>) {
+        self.filter_open = true;
+        self.filter_error = None;
+        self.focus_filter_on_next_frame = true;
+        cx.notify();
+    }
+
+    /// Close the filter bar without changing the applied predicate.
+    fn close_filter(&mut self, cx: &mut Context<Self>) {
+        self.filter_open = false;
+        self.filter_error = None;
+        self.focus_grid_on_next_frame = true;
+        cx.notify();
+    }
+
+    /// Parse the filter input and, when valid, evaluate it on the
+    /// background executor. An empty input clears the filter. A parse
+    /// error is shown inline and leaves the previous predicate in
+    /// place.
+    fn apply_filter_input(&mut self, cx: &mut Context<Self>) {
+        let Some(doc) = self.model.as_ref().map(|m| m.doc.clone()) else {
+            return;
+        };
+        let input = self.filter_input.trim().to_string();
+        if input.is_empty() {
+            self.clear_filter(cx);
+            return;
+        }
+        let filter = match parse_filter(&input, &doc.meta.headers, doc.column_count()) {
+            Ok(filter) => filter,
+            Err(message) => {
+                self.filter_error = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        self.filter_applied = Some(filter.clone());
+        self.filter_error = None;
+        self.filter_generation = self.filter_generation.wrapping_add(1);
+        let generation = self.filter_generation;
+        // Clear the previous result so the grid does not show stale
+        // rows while the new predicate runs.
+        self.filter_rows = None;
+
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let rows = executor
+                .spawn(async move { apply_filter(&doc, &[filter]) })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.filter_generation != generation {
+                    return;
+                }
+                view.filter_rows = Some(Arc::new(rows));
+                cx.notify();
+            })
+            .ok();
+        });
+        self.filter_task = Some(task);
+        cx.notify();
+    }
+
+    /// Remove the applied filter and restore the full document.
+    fn clear_filter(&mut self, cx: &mut Context<Self>) {
+        self.filter_input.clear();
+        self.filter_applied = None;
+        self.filter_rows = None;
+        self.filter_error = None;
+        self.filter_generation = self.filter_generation.wrapping_add(1);
+        self.filter_task = None;
+        cx.notify();
+    }
+
+    /// The filter bar's key handler. Enter applies, Esc closes,
+    /// Backspace edits, and printable characters append. Unlike search
+    /// the filter is not re-evaluated on every keystroke; the user
+    /// commits with Enter.
+    fn on_filter_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.filter_open {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+
+        if key == "escape" {
+            self.close_filter(cx);
+            return;
+        }
+        if key == "enter" {
+            self.apply_filter_input(cx);
+            return;
+        }
+        if key == "backspace" && !modifiers.control && !modifiers.alt {
+            self.filter_input.pop();
+            cx.notify();
+            return;
+        }
+        if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
+            if let Some(ch) = &event.keystroke.key_char {
+                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
+                    self.filter_input.push_str(ch);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     // ---- drag auto-scroll ------------------------------------------------
 
     /// Start the auto-scroll tick loop if it is not already running. Safe
@@ -1950,6 +2188,76 @@ impl MainView {
             0
         };
         (format!("{active} of {total}"), theme::TEXT_DIM)
+    }
+
+    /// Filter bar overlay (Cmd/Ctrl+L). A normal-flow child of the
+    /// grid body, above the search bar, so it never overlaps the grid.
+    /// Shows the input plus a status suffix (error / row count).
+    fn render_filter_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.filter_open {
+            return None;
+        }
+        let input = self.filter_input.clone();
+        let (status_text, status_color) = self.filter_status_text();
+
+        Some(
+            div()
+                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
+                .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .bg(theme::BG_PANEL)
+                .border_b_1()
+                .border_color(theme::BORDER_STRONG)
+                .key_context("Filter")
+                .track_focus(&self.filter_focus_handle)
+                .on_key_down(cx.listener(Self::on_filter_key_down))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(theme::TEXT_DIM)
+                        .child("Filter:"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme::TEXT_STRONG)
+                        .truncate()
+                        .child(if input.is_empty() {
+                            "column op value — e.g. country == US".to_string()
+                        } else {
+                            input
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(status_color)
+                        .child(status_text),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Status suffix for the filter bar: a parse error, a "filtering…"
+    /// note, the row count, or "none".
+    fn filter_status_text(&self) -> (String, gpui::Rgba) {
+        if let Some(error) = &self.filter_error {
+            return (error.clone(), theme::WARN);
+        }
+        match (&self.filter_applied, &self.filter_rows) {
+            (Some(_), Some(rows)) if rows.is_empty() => ("no matches".to_string(), theme::WARN),
+            (Some(_), Some(rows)) => (
+                format!("{} rows", format_count(rows.len() as u64)),
+                theme::TEXT_DIM,
+            ),
+            (Some(_), None) => ("filtering…".to_string(), theme::TEXT_DIM),
+            (None, _) => ("none".to_string(), theme::TEXT_DIM),
+        }
     }
 
     fn render_archive_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2166,15 +2474,25 @@ impl Render for MainView {
                 window.focus(&focus_handle);
             });
         }
+        // Same deferred-focus dance for the filter bar, so opening it
+        // with Cmd/Ctrl+L moves the caret into the input.
+        if self.focus_filter_on_next_frame {
+            self.focus_filter_on_next_frame = false;
+            let focus_handle = self.filter_focus_handle.clone();
+            cx.defer_in(window, move |_view, window, _cx| {
+                window.focus(&focus_handle);
+            });
+        }
 
         let center = self.render_center(window, cx);
         let search_bar = self.render_search_bar(cx);
+        let filter_bar = self.render_filter_bar(cx);
         let overlays = self.render_overlay(cx);
 
         // The grid body and the optional file panel share a row. The
-        // search bar (when open) sits in the normal flex column above
-        // the grid; this pushes the grid down by the bar's height
-        // instead of letting the bar overlap the top of the grid,
+        // search and filter bars (when open) sit in the normal flex
+        // column above the grid; this pushes the grid down by their
+        // height instead of letting them overlap the top of the grid,
         // which previously hid the active-match highlight when a
         // match was at row 0.
         let body = div()
@@ -2183,6 +2501,7 @@ impl Render for MainView {
             .flex_col()
             .flex_1()
             .overflow_hidden()
+            .children(filter_bar)
             .children(search_bar)
             .child(center)
             .children(overlays);
@@ -3302,6 +3621,155 @@ mod tests {
         cx.update_window_entity(&view, |view, _, _| {
             assert_eq!(view.documents.len(), 1);
             assert_eq!(view.active, Some(0));
+        });
+    }
+
+    // ---- filter ------------------------------------------------------
+
+    /// A small two-column fixture with headers, used by the filter
+    /// tests. Rows: (US,10), (UK,20), (US,30).
+    fn country_document() -> anvil_core::ParsedDocument {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("country.csv");
+        std::fs::write(&path, b"country,amount\nUS,10\nUK,20\nUS,30\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        anvil_core::index_opened(opened)
+    }
+
+    /// Cmd/Ctrl+L opens the filter bar through the grid keyboard path.
+    #[gpui::test]
+    async fn cmd_l_opens_filter_bar(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject(cx, &view);
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(!view.filter_open);
+        });
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-l"
+        } else {
+            "ctrl-l"
+        };
+        cx.simulate_keystrokes(chord);
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.filter_open, "Cmd/Ctrl+L should open the bar");
+        });
+    }
+
+    /// Enter parses the input and, on success, populates `filter_rows`
+    /// from the background evaluation. The fixture's `country == US`
+    /// rows are 0 and 2.
+    #[gpui::test]
+    async fn filter_input_applies_on_enter(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject_doc(cx, &view, country_document());
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.filter_input = "country == US".into();
+            view.apply_filter_input(cx);
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.filter_applied.is_some());
+            assert!(view.filter_error.is_none());
+            let rows = view.filter_rows.as_ref().expect("filter rows");
+            assert_eq!(&**rows, &[0, 2]);
+        });
+    }
+
+    /// A parse error is shown and leaves the previous predicate in
+    /// place; no rows are installed.
+    #[gpui::test]
+    async fn filter_parse_error_is_shown(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject_doc(cx, &view, country_document());
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.filter_input = "nonsense".into();
+            view.apply_filter_input(cx);
+        });
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.filter_error.is_some());
+            assert!(view.filter_applied.is_none());
+            assert!(view.filter_rows.is_none());
+        });
+    }
+
+    /// Clearing the filter restores the unfiltered document.
+    #[gpui::test]
+    async fn clear_filter_restores_document(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject_doc(cx, &view, country_document());
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.filter_input = "country == US".into();
+            view.apply_filter_input(cx);
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.filter_rows.is_some());
+        });
+
+        cx.update_window_entity(&view, |view, _, cx| view.clear_filter(cx));
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.filter_applied.is_none());
+            assert!(view.filter_rows.is_none());
+            assert!(view.filter_input.is_empty());
+        });
+    }
+
+    /// With a filter active, Down moves to the next *visible* record,
+    /// skipping hidden ones. Rows are (US,10), (UK,20), (US,30) and the
+    /// filter keeps 0 and 2, so Down from record 0 lands on record 2.
+    #[gpui::test]
+    async fn filter_vertical_navigation_skips_hidden_rows(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject_doc(cx, &view, country_document());
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.filter_input = "country == US".into();
+            view.apply_filter_input(cx);
+        });
+        cx.run_until_parked();
+        // The filter bar holds focus while open, so close it (which
+        // returns focus to the grid) before driving arrow keys.
+        cx.update_window_entity(&view, |view, _, cx| view.close_filter(cx));
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            view.selection.set(CellPos::new(0, 0));
+        });
+
+        cx.simulate_keystrokes("down");
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+        });
+
+        // Up from the last visible row goes back to the first.
+        cx.simulate_keystrokes("up");
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+        });
+    }
+
+    /// The status label reports the filtered count and the original
+    /// total when a filter is active.
+    #[gpui::test]
+    async fn filter_status_label_reports_counts(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject_doc(cx, &view, country_document());
+
+        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
+        cx.update_window_entity(&view, |view, _, cx| {
+            view.filter_input = "country == US".into();
+            view.apply_filter_input(cx);
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, _, _| {
+            let (text, _) = view.filter_status_text();
+            assert!(text.contains("2 rows"), "got {text:?}");
         });
     }
 }

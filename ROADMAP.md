@@ -217,21 +217,33 @@ this may freeze the UI.
 
 #### Filter
 
-- [ ] Cmd/Ctrl+L opens filter bar.
-- [ ] Filter predicates: equals, not equals, contains, not contains,
-  starts with, ends with, empty, non-empty, numeric `>`, `>=`, `<`,
-  `<=`.
-- [ ] `query::filter` evaluates predicates on background executor and
-  returns a `Vec<u64>` of matching record indexes.
-- [ ] Grid renders the filtered list rather than the full range.
-- [ ] Filtered row count in status bar (`rows (filtered from N)`).
-- [ ] Filter cancellation / invalidation by generation counter.
+- [x] Cmd/Ctrl+L opens filter bar.
+- [x] `query::filter` module: `Filter` / `FilterOp`, a one-line
+  expression parser (`<column> <op> [value]`, header name / index /
+  `#N`), and `apply` returning the matching record indexes in order.
+  Operators: `==`, `!=`, `contains`, `!contains`, `startswith`,
+  `endswith`, `empty`, `notempty`, numeric `>`, `>=`, `<`, `<=`.
+  Text operators are ASCII case-insensitive; ordering operators skip
+  non-numeric cells. Multiple filters combine with AND.
+- [x] Application runs on the background executor; a generation
+  counter discards obsolete results when the predicate changes.
+- [x] Grid renders the filtered list rather than the full range; a
+  display-position -> record-index mapping is applied per row.
+- [x] Filtered row count in status bar (`rows (filtered from N)`).
+- [x] Vertical arrow navigation walks the visible rows, skipping
+  hidden records.
+- [ ] A richer expression language (`AND` / `OR`, parentheses); the
+  data-side already composes a `Vec<Filter>` with AND, so this is a
+  parser and UI extension.
+- [ ] Saved filters / filter chips.
 
 #### Tests
 
 - [x] Unit tests for `query::search` (needle matching, escape
   handling, case sensitivity, column scoping).
-- [ ] Unit tests for `query::filter` predicates against fixtures.
+- [x] Unit tests for `query::filter` predicates against fixtures
+  (resolution, every operator, case folding, numeric parsing,
+  missing cells, AND composition, parse errors).
 - [x] Test that opening a new file cancels an in-flight search /
   filter.
 - [x] Test selection copy formatting (TSV with CRLF on Windows

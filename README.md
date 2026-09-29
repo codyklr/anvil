@@ -99,7 +99,7 @@ is safe. The UI thread only ever renders the already-built index.
 ## Tests
 
 ```sh
-cargo test        # 60 data-side + 43 binary (UI / command / geometry) tests
+cargo test        # 64 data-side + 56 binary (UI / command / geometry) tests
 cargo test --release --test core -- --ignored measure_large   # throughput
 ```
 

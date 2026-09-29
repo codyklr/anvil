@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use anvil_core::source::local::open_local;
 use anvil_core::{
-    open_path, parse_opened, search_records, ArchiveSource, CellPos, ColumnIndex, LoadResult,
-    OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
+    apply_filter, open_path, parse_filter, parse_opened, search_records, ArchiveSource, CellPos,
+    ColumnIndex, LoadResult, OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -574,6 +574,40 @@ fn measure_large_fixture() {
     assert_eq!(doc.column_count(), 20);
 }
 
+/// Throughput of a text filter over the generated 1M-row fixture.
+///
+/// Run with: cargo test --release --test core -- --ignored measure_filter
+#[test]
+#[ignore]
+fn measure_filter_large_fixture() {
+    let path = std::path::Path::new("fixtures/large.csv");
+    if !path.exists() {
+        eprintln!("fixtures/large.csv not present; run gen_fixture first");
+        return;
+    }
+    let opened = open_local(path).expect("open fixture");
+    let result = parse_opened(&opened);
+    let doc = ParsedDocument {
+        opened,
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    };
+    // `country == US` is roughly 10% of the generated rows.
+    let filter =
+        parse_filter("country == US", &doc.meta.headers, doc.column_count()).expect("parse filter");
+    let started = std::time::Instant::now();
+    let matches = apply_filter(&doc, &[filter]);
+    let elapsed = started.elapsed();
+    eprintln!(
+        "filtered {} rows -> {} matches in {:.0?}",
+        doc.record_count(),
+        matches.len(),
+        elapsed
+    );
+    assert!(!matches.is_empty());
+    assert!(elapsed.as_secs_f64() < 2.0, "filter took {elapsed:?}");
+}
+
 #[test]
 fn archive_auto_opens_csv_over_readme_txt() {
     let (_d, path) = make_zip(
@@ -891,4 +925,40 @@ fn search_finds_substring_match() {
     let (doc, _d) = parse_bytes(b"a,b\nfoobar,1\nfo,2\nbaz,3\n");
     let matches = search_records(&doc, "foo", &SearchOptions::default());
     assert_eq!(matches, vec![0]);
+}
+
+// ---- filter ------------------------------------------------------------
+
+#[test]
+fn filter_matches_by_column_name_and_operator() {
+    let (doc, _d) = parse_bytes(b"country,amount\nUS,10\nUS,200\nUK,200\n");
+    let country = parse_filter("country == US", &doc.meta.headers, doc.column_count())
+        .expect("parse country filter");
+    assert_eq!(apply_filter(&doc, &[country]), vec![0, 1]);
+
+    let amount = parse_filter("amount > 100", &doc.meta.headers, doc.column_count())
+        .expect("parse amount filter");
+    assert_eq!(apply_filter(&doc, &[amount]), vec![1, 2]);
+}
+
+#[test]
+fn filter_combines_predicates_with_and() {
+    let (doc, _d) = parse_bytes(b"country,amount\nUS,10\nUS,200\nUK,200\n");
+    let a = parse_filter("country == US", &doc.meta.headers, doc.column_count()).unwrap();
+    let b = parse_filter("amount > 100", &doc.meta.headers, doc.column_count()).unwrap();
+    assert_eq!(apply_filter(&doc, &[a, b]), vec![1]);
+}
+
+#[test]
+fn filter_parse_error_is_reported() {
+    let (doc, _d) = parse_bytes(b"a,b\n1,2\n");
+    assert!(parse_filter("nope == 1", &doc.meta.headers, doc.column_count()).is_err());
+    assert!(parse_filter("a bogus 1", &doc.meta.headers, doc.column_count()).is_err());
+}
+
+#[test]
+fn filter_text_operators_are_case_insensitive() {
+    let (doc, _d) = parse_bytes(b"name,id\nALICE,1\nbob,2\n");
+    let f = parse_filter("name contains ali", &doc.meta.headers, doc.column_count()).unwrap();
+    assert_eq!(apply_filter(&doc, &[f]), vec![0]);
 }

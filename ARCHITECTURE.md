@@ -95,6 +95,10 @@ anvil/
 │   │   ├── mod.rs              # Cells iterator, Cell<'a>, ParsedDocument
 │   │   ├── delimit.rs          # delimiter / quote / header detection
 │   │   └── indexing.rs         # record byte-offset index + diagnostics
+│   ├── selection.rs            # GPUI-free selection model
+│   ├── query.rs                # search + match-range helpers (GPUI-free)
+│   ├── query/
+│   │   └── filter.rs           # predicate filter: parse + apply
 │   ├── source/
 │   │   ├── mod.rs              # DataSource, OpenedSource, MmapSource,
 │   │   │                       # ArchiveCandidate, open_path dispatch
@@ -113,7 +117,7 @@ anvil/
 │   └── bin/
 │       └── gen_fixture.rs      # synthetic CSV + ZIP generator
 └── tests/
-    └── core.rs                 # 60 integration tests for the data side
+    └── core.rs                 # 64 integration tests for the data side
 ```
 
 ### What is *current* vs *planned*
@@ -241,13 +245,23 @@ reading a single set of names.
 | `search_task: Option<Task<()>>` | Outstanding background search task. |
 | `search_focus_handle: FocusHandle` | Keyboard focus target for the search bar overlay; independent of the grid handle. |
 | `focus_search_on_next_frame: bool` | Set when the search bar opens; the next `Render::render` schedules a deferred `window.focus` for the bar. |
+| `filter_open: bool` | Whether the filter bar is visible. Global, not per tab. |
+| `filter_input: String` | Text in the filter input. (Mirror.) |
+| `filter_applied: Option<Filter>` | The active tab's parsed predicate, or `None`. (Mirror.) |
+| `filter_rows: Option<Arc<Vec<u64>>>` | Record indexes passing the active predicate; `None` means unfiltered. (Mirror.) |
+| `filter_generation: u64` | Discards obsolete background filter results. (Mirror.) |
+| `filter_error: Option<String>` | Last parse error, shown inline in the bar. |
+| `filter_task: Option<Task<()>>` | Outstanding background filter task. |
+| `filter_focus_handle: FocusHandle` | Keyboard focus target for the filter bar. |
+| `focus_filter_on_next_frame: bool` | Set when the filter bar opens; deferred focus for it. |
 
 `DocumentSnapshot` owns the per-document state that survives a tab
 switch: a stable `id`, an optional parsed `Arc<ParsedDocument>`
 (`None` for a ZIP entry that has not been extracted yet), the archive
 / entry pair for ZIP-backed tabs, a `loading` guard, the selection,
 the horizontal scroll offset, the vertical scroll handle, the search
-state, and the copy-flash state. `MainView::snapshot_active` copies
+state, the filter state, and the copy-flash state.
+`MainView::snapshot_active` copies
 the live fields into `documents[active]`; `MainView::load_active`
 copies the other way. `switch_to`, `close_active_at`, and `apply` are
 the only callers that change `active`, so the mirror is always
@@ -1215,6 +1229,11 @@ probe time: 253ms
 The `measure_large_fixture` test in `tests/core.rs` reports
 **~650 MiB/s** indexing throughput on the 165 MiB fixture.
 
+The `measure_filter_large_fixture` test measures a full-column text
+filter (`country == US`) over the same 1,000,000-row fixture: **~33 ms**
+for 99,479 matches (roughly 10% of rows), well under the Milestone 2
+acceptance budget of 2 s.
+
 `anvil --probe fixtures/archive.zip` finishes in ~1 s on the same
 machine (extract + re-index). The 1 s vs. ~0.25 s delta is the cost
 of decompression + temp-file write + mmap.
@@ -1242,15 +1261,16 @@ of decompression + temp-file write + mmap.
 
 ### What exists today
 
-`tests/core.rs` — 60 integration tests in one file. They run without
+`tests/core.rs` — 64 integration tests in one file. They run without
 a GUI and are the primary CI signal. `src/selection.rs` additionally
 carries 25 unit tests. `src/query.rs` carries 22 unit tests for
 `search` / `SearchOptions` / `find_ranges` / the `ascii_lower`
-helper.
+helper, and `src/query/filter.rs` carries 18 for `FilterOp` /
+`parse` / `apply`.
 
 `src/ui/view.rs` has a `#[cfg(test)]` module using GPUI's headless
 `TestAppContext` (`gpui` `test-support` dev-dependency) with
-twenty-eight UI regression tests plus unit tests for the pure
+thirty-four UI regression tests plus unit tests for the pure
 helpers:
 
 * `arrow_keys_move_selection_when_grid_focused` — injects a ready
@@ -1319,9 +1339,16 @@ both ways through the grid keyboard path.
 * `group_documents_groups_by_archive_identity` — direct files are
 top-level; ZIP entries nest under their archive keyed by `Arc`
 identity.
-* `file_panel_navigation_uses_tab_lifecycle` — the switch / close
-paths the panel rows call still move `active` correctly, including
-lazy-loading the newly active pending tab.
+* `cmd_l_opens_filter_bar` — Cmd/Ctrl+L opens the filter bar.
+* `filter_input_applies_on_enter` — `country == US` populates
+`filter_rows = [0, 2]` after the background pass.
+* `filter_parse_error_is_shown` — a bad expression sets
+`filter_error` and installs no rows.
+* `clear_filter_restores_document` — clearing restores the full
+record set and empties the input.
+* `filter_vertical_navigation_skips_hidden_rows` — with rows `[0, 2]`,
+Down from record 0 lands on record 2 and Up returns.
+* `filter_status_label_reports_counts` — the label reads "2 rows".
 
 The focus tests were confirmed to fail when `.track_focus(&self.focus_handle)`
 is removed from the grid, the drag test when the cell `on_mouse_move`
@@ -1329,10 +1356,10 @@ wiring is removed, and the auto-scroll test when the global-listener
 `auto_scroll_step` call is removed — so they genuinely guard each
 behaviour.
 
-`src/ui/commands.rs` has sixteen pure unit tests for keystroke
+`src/ui/commands.rs` has eighteen pure unit tests for keystroke
 mapping (copy chord per platform, plain/Alt+C, arrow/Shift-arrow,
 Page keys, Home/End, Esc, F3/Shift-F3, Cmd/Ctrl+F, plain-F/Alt-F,
-Cmd/Ctrl+B, plain-B, and unbound keys). `src/ui/grid.rs` has two unit tests for `rect_contains`, the
+Cmd/Ctrl+B, plain-B, Cmd/Ctrl+L, plain-L, and unbound keys). `src/ui/grid.rs` has two unit tests for `rect_contains`, the
 inclusive rectangle test used for the copy flash (inside / edge /
 outside / `None`).
 
@@ -1347,12 +1374,14 @@ outside / `None`).
 | Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
 | Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
 | Search                 | empty needle, single match, multi-match order, case-sensitive vs case-insensitive, column-scoped (in / out of bounds / column-0 vs column-1), `max_matches` cap, quoted commas, substring match — against real `ParsedDocument`s |
+| Filter                 | parse (header name / index / `#N`, unknown column, unknown operator, value-less ops, spaces in values), every operator, case folding, numeric ordering and non-numeric skips, missing cells as empty, AND composition, empty filter list — in `src/query/filter.rs` and `tests/core.rs` |
 | Commands (binary)     | `commands::action_for` maps chords to `Action` intents (14 unit tests) |
 | UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
 | UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
 | UI / search (binary)   | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state |
 | UI / tabs (binary)     | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; every usable ZIP entry becomes a tab synchronously; each pending tab lazy-loads on activation; a pre-opened favourite is the ready active tab |
 | UI / file panel (binary) | Cmd/Ctrl+B toggles the panel; `group_documents` nests ZIP entries under their archive by `Arc` identity; panel switch / close reuse the tab lifecycle |
+| UI / filter (binary)   | Cmd/Ctrl+L opens the bar; a valid predicate populates `filter_rows`; a parse error is shown and installs nothing; clearing restores the document; vertical navigation skips hidden rows; the status label reports the filtered count |
 | Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash                    |
 | Performance (ignored)  | `measure_large_fixture` (requires `fixtures/large.csv`)               |
 
@@ -1436,8 +1465,11 @@ Notes:
   visits, but there is no cap or grouping yet.
 - Closing a tab does not prompt for unsaved state (there is none yet)
   and does not remember recently-closed tabs.
-- No filter, no sort, no type inference, no column statistics.
-  Milestones 2–3.
+- No sort, no type inference, no column statistics. Milestone 3.
+- The filter expression language is a single predicate per apply; the
+  data side already ANDs a `Vec<Filter>`, so `AND` / `OR` / parentheses
+  are a parser/UI extension. There is no filter UI for picking a
+  column or operator from a menu, and no saved filters.
 - The status bar reports a warning count but cannot navigate to the
   offending row. Milestone 4.
 - No progress UI for extraction / indexing. Milestone 5.
@@ -1619,11 +1651,24 @@ restructuring. Specifically:
   row 0. UI regression tests cover the open/close cycle, character
   append, Backspace, Enter cycling, F3 cycling, and the generation
   guard.
-- **Filter (Milestone 2).** A `query::filter` predicate set held on
-  `MainView`, evaluated on the background executor over the
-  `ParsedDocument`, returning a sorted `Vec<u64>` of record indexes.
-  The grid renders from this vector rather than the full range; the
-  underlying document is unchanged.
+- **Filter (Milestone 2, landed).** `query::filter` (in
+  `src/query/filter.rs`) owns the predicate model. `FilterOp` covers
+  `==`, `!=`, `contains`, `!contains`, `startswith`, `endswith`,
+  `empty`, `notempty`, and the numeric orderings `>`, `>=`, `<`,
+  `<=`. `parse` turns a one-line expression (`<column> <op>
+  [value]`, where column is a header name, a 0-based index, or `#N`)
+  into a `Filter`. `apply` evaluates a slice of filters (AND) over the
+  `ParsedDocument` and returns the matching record indexes in order;
+  text operators fold ASCII case, ordering operators skip non-numeric
+  and missing cells, and a missing cell counts as empty. The UI keeps
+  `filter_input` / `filter_applied` / `filter_rows` / `filter_generation`
+  per tab (mirrored into the active document) and runs `apply` on the
+  background executor with generation-based obsolescence. The grid
+  maps each display position through `filter_rows` to a record index,
+  so the row renderer, selection, and search highlighting all keep
+  working on record indexes unchanged. `move_selection` walks the
+  visible rows so arrow keys never land on a hidden record. The
+  status bar shows `N rows (filtered from M)`.
 - **Sort (Milestone 3).** A `query::sort` module that produces a
   `Vec<u64>` permutation; the same rendering path as filters.
   Inferred column types (Milestone 3) inform the comparator.

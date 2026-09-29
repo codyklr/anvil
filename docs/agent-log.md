@@ -2109,3 +2109,164 @@ and the file panel. The standing deferred work is **filter**
 (Cmd/Ctrl+L). Before that, though, splitting `view.rs` (~3100 lines)
 would materially reduce the cost of every future UI change; the file
 panel and the tab/lazy-load code are the two clearest extractions.
+
+## 2026-10-13 — Milestone 2 filter (Cmd/Ctrl+L)
+
+### Context
+
+Filter was the last major Milestone 2 feature after search. This
+iteration lands the whole vertical: a data-side predicate module with
+a parser, a filter bar, background evaluation with generation-based
+obsolescence, grid rendering from the filtered set, filtered-count
+status, and filter-aware vertical navigation. It also reports the
+first filter throughput measurement.
+
+### Implemented
+
+Data side (`src/query/filter.rs`, module `query::filter`):
+
+- `FilterOp`: `Eq`, `Ne`, `Contains`, `NotContains`, `StartsWith`,
+  `EndsWith`, `Empty`, `NonEmpty`, `Gt`, `Ge`, `Lt`, `Le`, with a
+  permissive `parse` (`=`, `<>`, `!contains`, `starts`, `ends`,
+  `notempty`, …).
+- `Filter { column, op, value }`.
+- `parse(input, headers, column_count)`: one-line expression
+  `<column> <op> [value]`; column resolved by case-insensitive header
+  name, bare 0-based index, or `#N`; values may contain spaces;
+  `empty` / `notempty` take no value. Clear error strings for unknown
+  column / operator / out-of-range index.
+- `apply(doc, &[Filter]) -> Vec<u64>`: values are pre-lowercased and
+  pre-parsed once, then each record is decoded lazily. Text operators
+  fold ASCII case; ordering operators skip non-numeric and missing
+  cells; a missing cell counts as empty. Multiple filters AND.
+
+UI (`src/ui/view.rs`, `src/ui/commands.rs`):
+
+- New `Action::OpenFilter` (Cmd/Ctrl+L).
+- Per-tab filter state on `DocumentSnapshot` (`filter_input`,
+  `filter_applied`, `filter_rows`, `filter_generation`) mirrored into
+  `MainView`, plus global `filter_open`, `filter_error`, `filter_task`,
+  `filter_focus_handle`, `focus_filter_on_next_frame`.
+- `open_filter` / `close_filter` (bar visibility), `apply_filter_input`
+  (parse + background `apply_filter`, clearing rows while in flight),
+  `clear_filter`, and `on_filter_key_down` (Enter applies, Esc closes,
+  Backspace edits, printable characters append — no live re-evaluation).
+- `render_filter_bar` is a normal-flow child above the search bar with
+  its own focus handle, so it never overlaps the grid. `filter_status_text`
+  shows a parse error, "filtering…", "N rows", or "none".
+- `render_grid` maps each display position through `filter_rows` to a
+  record index; the row renderer, selection, and search highlighting
+  keep using record indexes unchanged.
+- `move_selection` walks the visible rows when filtered, so arrow keys
+  never land on a hidden record; horizontal movement is unchanged.
+- `render_status` shows `N rows (filtered from M)`.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 185 passed (65 lib + 56 binary + 64
+  integration), 0 failed, 2 ignored (the two throughput tests).
+- `cargo test --release --lib filter` — 18 passed.
+- `cargo test --release --bin anvil filter` — 8 passed.
+- `cargo test --release --test core filter` — 4 passed.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `cargo test --release --test core -- --ignored measure_filter
+  --nocapture` — **1,000,000 rows filtered in 33 ms, 99,479 matches
+  (~10%)** for `country == US`. Milestone 2 budget is < 2 s.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, 20 cols, ~350 ms.
+- `./target/release/anvil` — launches, runs 5 s without panic.
+
+### Tests added / changed
+
+- 18 unit tests in `src/query/filter.rs` covering parser resolution,
+  rejections, value-less operators, spaces in values, every operator,
+  case folding, numeric ordering (including non-numeric skips),
+  missing cells, AND composition, empty filter list, and quoted value
+  unescaping.
+- 4 integration tests in `tests/core.rs` against the public API.
+- 2 command-binding tests (`open_filter_chord`,
+  `plain_l_is_not_open_filter`).
+- 6 UI tests (`cmd_l_opens_filter_bar`, `filter_input_applies_on_enter`,
+  `filter_parse_error_is_shown`, `clear_filter_restores_document`,
+  `filter_vertical_navigation_skips_hidden_rows`,
+  `filter_status_label_reports_counts`).
+- 1 ignored throughput test `measure_filter_large_fixture`.
+
+### Roadmap changes
+
+- Milestone 2 Filter: all six tasks ticked, with a note on the exact
+  operator set and the display->record mapping. Two follow-ups added:
+  a richer expression language (`AND` / `OR`, parentheses) and saved
+  filters / chips.
+- Milestone 2 Tests: "Unit tests for `query::filter` predicates
+  against fixtures" ticked.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Repository tree gained `selection.rs`, `query.rs`, and
+    `query/filter.rs`; integration-test count 60 -> 64.
+  - Primary-state table gained `filter_open`, `filter_input`,
+    `filter_applied`, `filter_rows`, `filter_generation`,
+    `filter_error`, `filter_task`, `filter_focus_handle`,
+    `focus_filter_on_next_frame`; `DocumentSnapshot` paragraph notes
+    the per-tab filter state.
+  - Planned Evolution "Filter (Milestone 2)" rewritten as landed, with
+    the operator set, parser, background evaluation, grid mapping, and
+    navigation.
+  - Performance Characteristics records the 33 ms / 99,479-match
+    measurement.
+  - Testing section updated (64 integration, 18 filter unit tests, 34
+    UI tests, 18 command tests) with a Filter table row and a UI /
+    filter row.
+  - Functional gaps now record the single-predicate expression
+    language and the lack of a column/operator picker or saved
+    filters.
+- `README.md`: test-count line updated.
+
+### Issues / technical debt discovered
+
+- The expression language is one predicate per apply. `apply` already
+  ANDs a slice, so `AND` / `OR` / parentheses is parser + UI work, not
+  a data-model change.
+- The filter bar requires typing the column and operator by hand; there
+  is no completion, no dropdown, and no column picker. Error messages
+  are plain strings. A richer input (chips, a column dropdown) is the
+  natural follow-up.
+- `filter_open` is global while the predicate is per tab. Switching
+  tabs with the bar open shows the new tab's input, which is
+  reasonable, but the bar never closes on its own.
+- The grid row number shows the original record index, not the display
+  position. That is deliberate (the user wants to know the true CSV
+  row) but could surprise when scrolling a filtered set.
+- `view.rs` is now ~3700 lines. The split recommendation is overdue;
+  filter added another ~350 lines. The search bar, filter bar, file
+  panel, and tab/lazy-load model are all natural extractions.
+- `filter_rows` is recomputed from scratch on every apply. For 1M rows
+  that is 33 ms, so fine; a future incremental filter is unnecessary
+  at current data sizes.
+
+### Open loops
+
+- Compound filter expressions (`AND` / `OR`, parentheses).
+- Filter input affordances: column dropdown, operator menu, chips,
+  saved filters.
+- Split `view.rs` before the next large UI feature.
+- Sort (Milestone 3) can reuse the same display->record mapping, but
+  must compose with the active filter (sort the filtered indexes, not
+  the whole document).
+- Carried over: cap / group large archives, lazy-extraction
+  cancellation, `search_task` / `copy_flash_generation` per-tab, panel
+  resize/reorder, case-sensitive / column-scoped search toggles.
+
+### Next recommended task
+
+Extract the UI modules from `view.rs` before starting Milestone 3.
+`view.rs` is ~3700 lines and every recent feature has added to it; the
+search bar, filter bar, file panel, and document/tab model are four
+clean extractions that would each be a small, verifiable slice. After
+that, Milestone 3 sort is the natural feature: it reuses the
+display->record mapping introduced here and must compose with the
+filter (sort the filtered indexes).

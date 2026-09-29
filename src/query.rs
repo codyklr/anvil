@@ -17,6 +17,8 @@
 //! filtered / highlighted views all dereference into the original
 //! `ParsedDocument`.
 
+pub mod filter;
+
 use crate::parser::{Cell, Cells, ColumnIndex, ParsedDocument};
 
 /// Per-call options for [`search`].
