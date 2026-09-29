@@ -127,6 +127,9 @@ this may freeze the UI.
 - [x] Mouse-click selection on the grid canvas.
 - [x] Shift-click range selection.
 - [x] Click-and-drag range selection.
+- [x] Drag auto-scroll: holding the drag past the top/bottom edge
+  scrolls the list and grows the selection, including while the
+  pointer is held still.
 
 #### Keyboard navigation
 

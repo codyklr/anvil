@@ -884,3 +884,119 @@ Still the `commands` module extraction, then search (`Cmd/Ctrl+F`).
 Drag-select was the last selection-model gap; the selection surface is
 now feature-complete for Milestone 2 except for the drag auto-scroll
 follow-up.
+
+---
+
+## 2026-10-05 — Drag auto-scroll
+
+### Context
+
+The previous iteration landed drag-select but left one gap: dragging
+past the top/bottom edge of the list did nothing, so a selection could
+only extend to currently visible rows. This iteration closes it.
+
+### Implemented
+
+- An overlay `canvas` is added to the grid list container
+  (`.absolute().size_full()`). A plain `canvas` has no hitbox, so it
+  does not intercept clicks or hover. It has two jobs:
+  1. record the scroll area's window-space bounds into
+     `MainView.list_bounds` each frame; and
+  2. install a global `window.on_mouse_event` mouse-move listener that
+     stores `MainView.pointer_pos` and, while `drag_selecting`, calls
+     `auto_scroll_step`.
+  Per-cell `on_mouse_move` cannot see the pointer once it leaves the
+  grid, so a global listener is required for edge auto-scroll.
+- `MainView::auto_scroll_step`: when the pointer is above/below
+  `list_bounds` (pure `auto_scroll_direction` helper), it extends the
+  selection to the row at that edge and asks the list to pin the next
+  row to the top via `scroll_to_item_strict(.., ScrollStrategy::Top)`.
+  The column cursor is preserved.
+- `MainView::start_auto_scroll` / `stop_auto_scroll` and
+  `auto_scroll_task`: a `cx.spawn` loop that ticks every
+  `AUTO_SCROLL_TICK` (30 ms) and repeats `auto_scroll_step` while
+  `drag_selecting`, so holding the pointer still past the edge keeps
+  scrolling. The loop exits when `drag_selecting` clears; it is also
+  dropped on mouse-up.
+- Cell mouse-down now records the initial `pointer_pos` and calls
+  `start_auto_scroll`; the mouse-move handler also records
+  `pointer_pos`. Mouse-up (bubble or `on_mouse_up_out`) clears
+  `drag_selecting` and stops the loop.
+- The list container became `.relative()` to anchor the absolute
+  overlay canvas.
+
+### Verified
+
+- Reproduced the gap as a test first: `drag_past_bottom_edge_starts_auto_scroll`
+fails when the global listener's `auto_scroll_step` call is removed
+(selection stays at row 0) and passes with it.
+- `cargo test --release` — 84 passed (25 lib + 7 binary + 52
+integration), 0 failed, 1 ignored.
+- `cargo test --release --bin anvil` — 7 pass: the four UI tests plus
+three unit tests.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `cargo build --release`, `./target/release/anvil` (runs 5 s, no
+panic), and `anvil --probe fixtures/large.csv` (351 ms) all fine, so
+the overlay canvas does not disturb the open/render path or
+throughput.
+
+### Tests added / changed
+
+- `auto_scroll_direction_detects_edges` — pure above / on-edge /
+inside / below cases.
+- `drag_past_bottom_edge_starts_auto_scroll` — 1000-row document,
+synthesised drag past the bottom edge, asserts the selection extended
+past the first visible row and `base_handle.offset().y < 0` (the list
+actually scrolled). Also asserts mouse-up clears `drag_selecting` and
+stops the task.
+- Test helper `large_document(rows)` and `inject_doc(cx, view, doc)`;
+`inject` now delegates to `inject_doc(sample_document())`.
+- No data-side tests changed.
+
+### Roadmap changes
+
+- Milestone 2 Selection model: added and ticked "Drag auto-scroll".
+
+### Architecture changes
+
+- `ARCHITECTURE.md` state table: added `list_bounds`, `pointer_pos`,
+`auto_scroll_task`.
+- Selection model → Grid integration: documented the auto-scroll
+mechanism (overlay canvas, global listener, tick loop).
+- Open loops narrowed to "no proximity margin / no acceleration"; the
+old "does not auto-scroll" loop is removed.
+- Functional gaps, Planned Evolution, and Testing updated; test group
+table row expanded.
+
+### Issues / technical debt discovered
+
+- Auto-scroll triggers only once the pointer is fully outside the
+  list's vertical bounds. A proximity margin (start scrolling when
+  within N px of the edge) and proportional speed (faster the further
+  out) would feel better; both are recorded as open loops.
+- The global mouse-move listener runs `entity.update` on every move in
+  the window, even when no drag is active. The work is a single field
+  write plus an early return, but a future optimisation could gate
+  registration on `drag_selecting`.
+- The overlay canvas's `list_bounds` is written every frame via
+  `entity.update` without `notify`; harmless, but it means each frame
+  mutates the view. If it shows up in a profile, compare bounds before
+  writing.
+- Vertical auto-scroll uses `scroll_to_item_strict(.., Top)`, which
+  snaps the target row to the top (row-by-row, 30 ms ticks). Smooth
+  pixel scrolling via `set_offset` would be smoother but needs careful
+  sign handling; deferred until it matters.
+- `view.rs` is now ~1420 lines including tests. The `commands`
+  extraction is well overdue.
+
+### Open loops
+
+- Auto-scroll proximity margin and proportional acceleration (above).
+- Non-contiguous multi-select, select-all, and configurable copy
+  format remain in `ROADMAP.md` Future Ideas.
+
+### Next recommended task
+
+Extract the `commands` module, then land search (`Cmd/Ctrl+F`). The
+selection model and drag interaction are now complete for Milestone 2.

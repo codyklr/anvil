@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Context, ExternalPaths,
-    FocusHandle, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollDelta,
-    ScrollWheelEvent, Task, UniformListScrollHandle, Window,
+    canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Bounds, Context, ExternalPaths,
+    FocusHandle, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
+    ScrollDelta, ScrollStrategy, ScrollWheelEvent, Task, UniformListScrollHandle, Window,
 };
 
 use anvil_core::{ArchiveSource, CellPos, LoadResult, LoadedDocument, Selection};
@@ -30,6 +30,10 @@ const PAGE_STEP: i64 = 20;
 /// How long the green "copied" flash stays over the selection before it
 /// fades back to the normal selection colour.
 const COPY_FLASH_DURATION: Duration = Duration::from_millis(450);
+
+/// How often the drag auto-scroll task advances the view while the
+/// pointer is held outside the grid's top or bottom edge.
+const AUTO_SCROLL_TICK: Duration = Duration::from_millis(30);
 
 /// Writes text to the system clipboard. Stored on `MainView` so UI
 /// tests can substitute a recorder and assert the exact TSV without
@@ -111,6 +115,20 @@ pub struct MainView {
     /// a flash is active restarts the flash instead of being cleared
     /// early by the previous timer.
     copy_flash_generation: u64,
+
+    /// Window-space bounds of the scrollable grid area, recorded by the
+    /// overlay canvas each frame. Used to decide when a drag has left
+    /// the list vertically and should auto-scroll.
+    list_bounds: Option<Bounds<Pixels>>,
+    /// Last observed pointer position in window coordinates, updated by
+    /// the overlay canvas's global mouse-move listener. Reported even
+    /// when the pointer is outside the grid, which per-cell handlers
+    /// cannot see.
+    pointer_pos: Option<Point<Pixels>>,
+    /// Ticks while a drag is active and the pointer sits outside the
+    /// list, advancing the view and growing the selection. Dropped on
+    /// mouse-up (or cleared by the loop itself when the drag ends).
+    auto_scroll_task: Option<Task<()>>,
 }
 
 impl MainView {
@@ -135,6 +153,9 @@ impl MainView {
             clipboard: Arc::new(system_clipboard_write),
             copy_flash_rect: None,
             copy_flash_generation: 0,
+            list_bounds: None,
+            pointer_pos: None,
+            auto_scroll_task: None,
         }
     }
 
@@ -451,15 +472,20 @@ impl MainView {
                                 move |ev, row, col, app_cx| {
                                     let pos = CellPos::new(row, col);
                                     let extend = ev.modifiers.shift;
+                                    let pointer = ev.position;
                                     entity.update(app_cx, |view, cx| {
                                         if extend {
                                             view.selection.extend_to(pos);
                                         } else {
                                             view.selection.set(pos);
                                         }
-                                        // A press arms drag-select; the
-                                        // matching mouse-up disarms it.
+                                        // A press arms drag-select and
+                                        // starts the edge auto-scroll
+                                        // loop; the matching mouse-up
+                                        // disarms both.
                                         view.drag_selecting = true;
+                                        view.pointer_pos = Some(pointer);
+                                        view.start_auto_scroll(cx);
                                         cx.notify();
                                     });
                                 }
@@ -467,12 +493,12 @@ impl MainView {
                             {
                                 let entity = entity_for_row;
                                 move |ev, row, col, app_cx| {
-                                    if !ev.dragging() {
-                                        return;
-                                    }
+                                    let dragging = ev.dragging();
+                                    let pointer = ev.position;
                                     let pos = CellPos::new(row, col);
                                     entity.update(app_cx, |view, cx| {
-                                        if view.drag_selecting {
+                                        view.pointer_pos = Some(pointer);
+                                        if dragging && view.drag_selecting {
                                             view.selection.extend_to(pos);
                                             cx.notify();
                                         }
@@ -487,6 +513,32 @@ impl MainView {
         .size_full()
         .track_scroll(self.v_scroll.clone());
 
+        // Overlay canvas: records the scroll area's window-space bounds
+        // and installs a global mouse-move listener. The listener sees
+        // moves outside the grid, which per-cell handlers cannot, and is
+        // what drives drag auto-scroll. The canvas has no hitbox, so it
+        // does not intercept clicks or hover.
+        let entity_for_canvas = cx.entity();
+        let auto_scroll_overlay = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, app_cx| {
+                entity_for_canvas.update(app_cx, |view, _| view.list_bounds = Some(bounds));
+                let entity = entity_for_canvas.clone();
+                window.on_mouse_event(move |ev: &MouseMoveEvent, _, _, app_cx| {
+                    entity.update(app_cx, |view, cx| {
+                        view.pointer_pos = Some(ev.position);
+                        if view.drag_selecting {
+                            view.auto_scroll_step(cx);
+                        }
+                    });
+                });
+            },
+        )
+        .absolute()
+        .top(px(0.))
+        .left(px(0.))
+        .size_full();
+
         div()
             .flex()
             .flex_col()
@@ -495,6 +547,7 @@ impl MainView {
             .child(header)
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .overflow_hidden()
                     .key_context("Grid")
@@ -512,15 +565,22 @@ impl MainView {
                     .on_scroll_wheel(cx.listener(Self::on_grid_scroll))
                     // End a drag-select on release, whether the pointer
                     // is still over the grid (bubble) or has left it
-                    // (capture).
+                    // (capture); stop the auto-scroll loop too.
                     .on_mouse_up(
                         gpui::MouseButton::Left,
-                        cx.listener(|view, _, _, _cx| view.drag_selecting = false),
+                        cx.listener(|view, _, _, _cx| {
+                            view.drag_selecting = false;
+                            view.stop_auto_scroll();
+                        }),
                     )
                     .on_mouse_up_out(
                         gpui::MouseButton::Left,
-                        cx.listener(|view, _, _, _cx| view.drag_selecting = false),
+                        cx.listener(|view, _, _, _cx| {
+                            view.drag_selecting = false;
+                            view.stop_auto_scroll();
+                        }),
                     )
+                    .child(auto_scroll_overlay)
                     .child(list),
             )
             .child(self.render_h_scrollbar(cx))
@@ -762,6 +822,79 @@ impl MainView {
         cx.notify();
     }
 
+    // ---- drag auto-scroll ------------------------------------------------
+
+    /// Start the auto-scroll tick loop if it is not already running. Safe
+    /// to call on every cell press.
+    fn start_auto_scroll(&mut self, cx: &mut Context<Self>) {
+        if self.auto_scroll_task.is_some() {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(AUTO_SCROLL_TICK).await;
+            let keep_going = this
+                .update(cx, |view, cx| {
+                    if !view.drag_selecting {
+                        return false;
+                    }
+                    view.auto_scroll_step(cx);
+                    true
+                })
+                .unwrap_or(false);
+            if !keep_going {
+                break;
+            }
+        });
+        self.auto_scroll_task = Some(task);
+    }
+
+    /// Stop the auto-scroll loop. Called on mouse-up so the tick does not
+    /// linger for a frame after the drag ends.
+    fn stop_auto_scroll(&mut self) {
+        self.auto_scroll_task = None;
+    }
+
+    /// One auto-scroll step: if the pointer is outside the grid's top or
+    /// bottom edge, scroll the list by one row and extend the selection
+    /// to the row at that edge. A no-op otherwise.
+    fn auto_scroll_step(&mut self, cx: &mut Context<Self>) {
+        let (Some(bounds), Some(pointer)) = (self.list_bounds, self.pointer_pos) else {
+            return;
+        };
+        let Some(model) = &self.model else {
+            return;
+        };
+        let records = model.row_count();
+        if records == 0 {
+            return;
+        }
+        let Some(direction) = auto_scroll_direction(pointer.y, bounds) else {
+            return;
+        };
+
+        let row_h = f32::from(theme::ROW_HEIGHT);
+        let visible_rows = (f32::from(bounds.size.height) / row_h).floor().max(1.0) as u64;
+        let first_visible = self.v_scroll.0.borrow().base_handle.top_item() as u64;
+        let last_visible = (first_visible + visible_rows - 1).min(records - 1);
+        let cursor_col = self.selection.cursor().map(|c| c.column_index).unwrap_or(0);
+
+        // Extend to the row currently at the dragged edge, and pin the
+        // next row to the top so the view advances by one per tick.
+        let (target_row, scroll_to_first) = match direction {
+            AutoScrollDirection::Up => (first_visible, first_visible.saturating_sub(1)),
+            AutoScrollDirection::Down => {
+                let next = (first_visible + 1).min(records.saturating_sub(1));
+                (last_visible, next)
+            }
+        };
+
+        self.v_scroll
+            .scroll_to_item_strict(scroll_to_first as usize, ScrollStrategy::Top);
+        self.selection
+            .extend_to(CellPos::new(target_row, cursor_col));
+        cx.notify();
+    }
+
     fn render_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let archive = self.archive.clone()?;
         if !self.show_picker {
@@ -997,6 +1130,28 @@ fn plural(n: u64) -> &'static str {
     }
 }
 
+/// Which way a drag past the grid's vertical edges should auto-scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoScrollDirection {
+    Up,
+    Down,
+}
+
+/// Decide the auto-scroll direction from the pointer's window-space `y`
+/// and the grid's window-space bounds. `None` when the pointer is within
+/// (or on) the vertical bounds, so no scrolling is needed.
+fn auto_scroll_direction(pointer_y: Pixels, bounds: Bounds<Pixels>) -> Option<AutoScrollDirection> {
+    let top = bounds.origin.y;
+    let bottom = bounds.origin.y + bounds.size.height;
+    if pointer_y < top {
+        Some(AutoScrollDirection::Up)
+    } else if pointer_y > bottom {
+        Some(AutoScrollDirection::Down)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,14 +1167,36 @@ mod tests {
         anvil_core::index_opened(opened)
     }
 
+    /// A wider-than-viewport document, for tests that need to scroll.
+    fn large_document(rows: usize) -> anvil_core::ParsedDocument {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.csv");
+        let mut csv = String::from("a,b,c\n");
+        for i in 0..rows {
+            csv.push_str(&format!("{i},{i},{i}\n"));
+        }
+        std::fs::write(&path, csv).expect("write fixture");
+        let opened = anvil_core::source::local::open_local(&path).expect("open local");
+        anvil_core::index_opened(opened)
+    }
+
     /// Inject a ready document and focus the grid the way `render_grid`
     /// does after an open. Returns a recorder standing in for the system
     /// clipboard so the copy path can be asserted without side effects.
     fn inject(cx: &mut VisualTestContext, view: &Entity<MainView>) -> Arc<Mutex<Vec<String>>> {
+        inject_doc(cx, view, sample_document())
+    }
+
+    /// As `inject`, but with a caller-supplied document.
+    fn inject_doc(
+        cx: &mut VisualTestContext,
+        view: &Entity<MainView>,
+        doc: anvil_core::ParsedDocument,
+    ) -> Arc<Mutex<Vec<String>>> {
         let written: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = written.clone();
         cx.update_window_entity(view, |view, window, cx| {
-            view.model = Some(GridModel::new(Arc::new(sample_document())));
+            view.model = Some(GridModel::new(Arc::new(doc)));
             view.state = ViewState::Ready;
             view.selection.set(CellPos::new(0, 0));
             view.status_message = None;
@@ -1158,5 +1335,76 @@ mod tests {
             vec![format!("1\t2{ending}4\t5{ending}")],
             "dragged block should copy as TSV"
         );
+    }
+
+    #[test]
+    fn auto_scroll_direction_detects_edges() {
+        let bounds = Bounds {
+            origin: gpui::point(px(0.), px(100.)),
+            size: gpui::size(px(400.), px(200.)),
+        };
+        assert_eq!(
+            auto_scroll_direction(px(50.), bounds),
+            Some(AutoScrollDirection::Up)
+        );
+        assert_eq!(
+            auto_scroll_direction(px(350.), bounds),
+            Some(AutoScrollDirection::Down)
+        );
+        // Inside (and exactly on) the vertical bounds: no scroll.
+        assert_eq!(auto_scroll_direction(px(100.), bounds), None);
+        assert_eq!(auto_scroll_direction(px(200.), bounds), None);
+        assert_eq!(auto_scroll_direction(px(300.), bounds), None);
+    }
+
+    /// Dragging past the bottom edge should scroll the list and grow the
+    /// selection past the initially visible rows without any further
+    /// pointer movement (the tick loop keeps it going); this asserts the
+    /// immediate step driven by the mouse-move listener.
+    #[gpui::test]
+    async fn drag_past_bottom_edge_starts_auto_scroll(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+        inject_doc(cx, &view, large_document(1000));
+
+        let start = cell_center(cx, &view, 0, 0);
+        let bounds = cx
+            .debug_bounds("anvil-grid-list")
+            .expect("grid list bounds");
+        let below = gpui::point(start.x, bounds.origin.y + bounds.size.height + px(40.0));
+        let modifiers = gpui::Modifiers::default();
+
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(below, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(below, gpui::MouseButton::Left, modifiers);
+
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(view.drag_selecting, "drag should still be active");
+            let cursor = view
+                .selection
+                .cursor()
+                .expect("auto-scroll should extend the selection");
+            assert!(
+                cursor.record_index > 0,
+                "selection should extend past the first visible row, got {cursor:?}"
+            );
+            // The list actually scrolled (the deferred scroll from each
+            // step is applied by the following frame, so assert on the
+            // resulting offset rather than the pending request).
+            // Scrolling down makes the offset negative.
+            let offset_y = view.v_scroll.0.borrow().base_handle.offset().y;
+            assert!(
+                offset_y < px(0.0),
+                "auto-scroll should move the list down, got offset {offset_y:?}"
+            );
+        });
+
+        cx.simulate_mouse_up(below, gpui::MouseButton::Left, modifiers);
+        cx.update_window_entity(&view, |view, _, _| {
+            assert!(!view.drag_selecting);
+            assert!(
+                view.auto_scroll_task.is_none(),
+                "mouse-up should stop the auto-scroll loop"
+            );
+        });
     }
 }
