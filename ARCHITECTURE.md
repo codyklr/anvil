@@ -186,10 +186,11 @@ anvil/
   [`DistinctCount`], duplicate count, min/max, longest/shortest,
   samples, and the top-N frequent values. Every displayed value is the
   exact cell value, padding included, and values that differ only in
-  padding are counted as distinct (ADR 0003); `min`/`max` still *order*
-  by trimmed, case-insensitive or numeric comparison, and a
-  whitespace-only cell still counts as empty so the inspector agrees
-  with the filter `empty` operator.
+  padding are counted as distinct (ADR 0003); `min`/`max` order text
+  columns by exact bytes (case-sensitive, padding-preserving) and
+  numeric columns numerically. A cell is empty only when it has zero
+  bytes: a whitespace-only cell is a value, matching the filter `empty`
+  operator (`bytes.is_empty()`).
 - `encoding` — `scan(doc) -> EncodingReport` makes one pass over the
   data records counting non-UTF-8 cells per column and detects a
   leading UTF-8 BOM. `Cell::is_utf8` is the per-cell flag; without it

@@ -72,10 +72,11 @@ pragmatic and are documented as such.
   apart from the existing text copy.
 - The inspector can now report a higher `distinct` count on padded data,
   and its `frequent` list shows the exact spellings.
-- Deviations that remain open, now tracked in `ROADMAP.md`: `min`/`max`
-  ordering and text sorting still compare trimmed, case-insensitive
-  values, and a whitespace-only cell still counts as empty so that the
-  inspector agrees with the filter `empty` operator.
+- Follow-up decisions (Iteration 8): text `min`/`max` ordering and text
+  sorting now compare exact bytes with a deterministic tiebreak, and a
+  whitespace-only cell is a value, not empty. The filter `empty`
+  operator already used `bytes.is_empty()`, so the inspector was
+  changed to agree with it rather than the other way round.
 - Tests lock both behaviours: the escaping in `tests/core.rs`
   (`invalid_utf8_cells_are_shown_exactly`,
   `exact_string_escapes_only_when_it_has_to`) and the padded inspector

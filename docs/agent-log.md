@@ -6714,3 +6714,70 @@ record-index tiebreak).
 
 Iteration 8b: decide whether a whitespace-only cell is empty, per
 ADR 0003.
+
+---
+
+## 2026-09-30 — Iteration 8b: a whitespace-only cell is a value
+
+### Context
+
+Second part of Iteration 8. The roadmap claimed the inspector and the
+filter `empty` operator both treated a whitespace-only cell as empty.
+Inspecting the code showed the filter already used `bytes.is_empty()`
+(zero bytes); only the inspector disagreed. ADR 0003's byte-faithful
+answer is that a whitespace-only cell holds bytes and is therefore a
+value.
+
+### Implemented
+
+- `schema::stats`: the inspector now treats a cell as empty only when it
+  has zero bytes. A whitespace-only cell counts as non-empty, appears in
+  `min`/`max`/`samples`/distinct, and no longer inflates the `empty`
+  count. The `trimmed` binding in the scan loop is gone (numeric
+  comparison trims internally).
+- Recorded the decision in `ARCHITECTURE.md` (`schema::stats` bullet)
+  and in ADR 0003's follow-up note. The filter `empty` operator was
+  already correct, so no filter behaviour changed; a regression test
+  now documents the agreement.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **454 passed, 7 ignored** (199 library, 171
+  binary, 83 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean.
+- `whitespace_only_cells_are_values` asserts `empty == 0`,
+  `non_empty == 2`, and exact-byte min/max.
+- `whitespace_only_cells_are_not_empty` (filter) asserts `v empty`
+  matches only the zero-byte row and `v notempty` only the
+  whitespace-only row.
+- Zero-byte empty counting (`counts_empties_and_distinct`) is unchanged.
+
+### Tests added / changed
+
+- `schema/stats.rs`: `whitespace_only_cells_still_count_as_empty`
+  replaced by `whitespace_only_cells_are_values`.
+- `query/filter.rs`: added `whitespace_only_cells_are_not_empty`.
+
+### Roadmap changes
+
+- Milestone 5 data fidelity: "Decide whether a whitespace-only cell is
+  empty" ticked, noting the filter already used zero-byte semantics and
+  that sorting still places whitespace-only values last per 8a.
+
+### Architecture changes
+
+`ARCHITECTURE.md` `schema::stats` description and ADR 0003 updated.
+
+### Issues / technical debt discovered
+
+- `schema::infer` and `sample_distinct` still trim before classifying a
+  value; a whitespace-only cell may still infer as `Empty`. That is a
+  type-inference heuristic, not the inspector/filter emptiness
+  question, and is left unchanged.
+
+### Next recommended task
+
+Iteration 8c: strip or handle a UTF-8 BOM so it never appears inside the
+first header's name, while still reporting the BOM in diagnostics.

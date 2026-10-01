@@ -7,8 +7,11 @@
 //! `"42"`. Ordering (min/max) compares exact bytes for a text column
 //! (case-sensitive, padding-preserving), so values differing only in
 //! padding or case are never equal; numeric columns keep their numeric
-//! comparison. `trimmed` is only used to classify emptiness (and
-//! internally by the numeric parse).
+//! comparison.
+//!
+//! A cell is empty only when it has **zero bytes**. A whitespace-only
+//! cell (`"   "`) is a value, matching the filter `empty` operator
+//! (`bytes.is_empty()`) and the byte-faithful rule in ADR 0003.
 //!
 //! Distinct counting is exact while the
 //! value set stays under a threshold; past that it switches to a
@@ -111,12 +114,10 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
             continue;
         };
         // `exact` is what the inspector displays: the value as it exists
-        // in the file, padding included. `trimmed` is only used to
-        // classify emptiness and to order min/max, so a padded value is
-        // still compared the way it always was.
+        // in the file, padding included. A cell is empty only when it has
+        // zero bytes; a whitespace-only cell is a value (ADR 0003).
         let exact = cell.to_exact_string();
-        let trimmed = exact.trim();
-        if trimmed.is_empty() {
+        if exact.is_empty() {
             empty += 1;
             continue;
         }
@@ -387,12 +388,16 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_cells_still_count_as_empty() {
+    fn whitespace_only_cells_are_values() {
+        // ADR 0003: a whitespace-only cell holds bytes, so it is a value,
+        // not empty. The filter `empty` operator already agrees.
         let doc = doc_from(b"v,pad\n\"   \",x\nz,x\n");
         let stats = stats(&doc, 0, &StatsOptions::default());
-        assert_eq!(stats.empty, 1);
-        assert_eq!(stats.non_empty, 1);
-        assert_eq!(stats.min.as_deref(), Some("z"));
+        assert_eq!(stats.empty, 0);
+        assert_eq!(stats.non_empty, 2);
+        // Exact-byte min: "   " (0x20) < "z".
+        assert_eq!(stats.min.as_deref(), Some("   "));
+        assert_eq!(stats.max.as_deref(), Some("z"));
     }
 
     #[test]

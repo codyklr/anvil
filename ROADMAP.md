@@ -720,10 +720,12 @@ make what exists feel finished.
   index tiebreak; `schema::stats::compare_values` uses exact bytes for
   a text column. Numeric sorting and numeric min/max are unchanged, and
   empty / whitespace-only values still sort last.
-- [ ] Decide whether a whitespace-only cell is empty. The inspector and
-  the filter `empty` operator currently both treat it as empty, which
-  conflicts with the fidelity rule now that a value holds bytes and is
-  displayed as-is.
+- [x] Decide whether a whitespace-only cell is empty. Per ADR 0003 the
+  byte-faithful answer is "no, it is a value". The filter `empty`
+  operator already used `bytes.is_empty()`; the inspector was changed
+  to match (`schema::stats` now counts only zero-byte cells as empty).
+  Recorded in `ARCHITECTURE.md` and ADR 0003. Text sorting still places
+  whitespace-only values last per the 8a "empty last" rule.
 - [x] Add an affordance to reveal the full value of a cell that the grid
   has elided, so a user never needs to copy a truncated-looking cell to
   read it. Cmd/Ctrl+Enter toggles a right-hand **Cell** panel showing

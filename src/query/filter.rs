@@ -888,6 +888,15 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_cells_are_not_empty() {
+        // ADR 0003: `empty` means zero bytes, so a whitespace-only cell
+        // is a value and neither matches `empty` nor fails `notempty`.
+        let doc = parse_csv("v,pad\n\"   \",x\n,y\n");
+        assert_eq!(apply_expr(&doc, &expr("v empty", &doc)), vec![1]);
+        assert_eq!(apply_expr(&doc, &expr("v notempty", &doc)), vec![0]);
+    }
+
+    #[test]
     fn row_scope_any_contains_is_case_insensitive() {
         let doc = parse_csv("a,b\nfoo,\n,zap\n");
         assert_eq!(apply_expr(&doc, &expr("any contains ZAP", &doc)), vec![1]);
