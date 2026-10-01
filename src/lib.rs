@@ -20,8 +20,8 @@ pub use parser::indexing::{
     IndexResult, DEFAULT_MAX_RECORD_BYTES,
 };
 pub use parser::{
-    column_label, Cell, Cells, ColumnIndex, HeaderMode, ParseMeta, ParseWarning, ParsedDocument,
-    WarningKind,
+    column_label, exact_string, Cell, Cells, ColumnIndex, HeaderMode, ParseMeta, ParseWarning,
+    ParsedDocument, WarningKind,
 };
 pub use query::filter::{
     apply as apply_filter, apply_expr as apply_filter_expr, parse as parse_filter,

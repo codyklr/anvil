@@ -209,6 +209,82 @@ impl<'a> Cell<'a> {
     pub fn as_bytes(&self) -> &[u8] {
         &self.inner
     }
+
+    /// The cell's bytes as exact, displayable text.
+    ///
+    /// Valid UTF-8 is returned verbatim. A cell that contains at least
+    /// one byte sequence that is not valid UTF-8 is escaped rather than
+    /// hidden or replaced, so the grid and the clipboard always show
+    /// bytes that are really in the file. See [`exact_string`].
+    pub fn to_exact_string(&self) -> Cow<'_, str> {
+        exact_string(&self.inner)
+    }
+}
+
+/// Render a cell's bytes as exact text without losing information.
+///
+/// When the bytes are valid UTF-8 the string is returned borrowed and
+/// unchanged, so the common path costs nothing. Otherwise the value is
+/// escaped: a literal backslash becomes `\\` and each invalid byte
+/// becomes `\xNN` (lowercase hex). Escaping backslashes across the whole
+/// cell - not just the invalid runs - is what makes the mapping
+/// reversible, because a `\\` can never be confused with the start of
+/// an escape. Nothing is ever replaced with U+FFFD and nothing is
+/// dropped.
+///
+pub fn exact_string(bytes: &[u8]) -> Cow<'_, str> {
+    match std::str::from_utf8(bytes) {
+        Ok(valid) => Cow::Borrowed(valid),
+        Err(_) => Cow::Owned(escape_invalid_utf8(bytes)),
+    }
+}
+
+/// Copy the valid parts of `text` into `out`, doubling literal
+/// backslashes so escaped output stays unambiguous.
+fn push_valid(out: &mut String, text: &str) {
+    for ch in text.chars() {
+        if ch == '\\' {
+            out.push_str("\\\\");
+        } else {
+            out.push(ch);
+        }
+    }
+}
+
+/// Escape a byte slice that is not valid UTF-8: valid runs verbatim
+/// (with backslashes doubled) and every invalid byte as `\xNN`.
+fn escape_invalid_utf8(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(bytes.len() + 8);
+    let mut i = 0;
+    while i < bytes.len() {
+        match std::str::from_utf8(&bytes[i..]) {
+            Ok(tail) => {
+                push_valid(&mut out, tail);
+                break;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                if valid > 0 {
+                    // The prefix is valid UTF-8 by construction.
+                    let prefix = std::str::from_utf8(&bytes[i..i + valid]).unwrap_or_default();
+                    push_valid(&mut out, prefix);
+                    i += valid;
+                }
+                let bad = err.error_len().unwrap_or(bytes.len() - i);
+                for byte in &bytes[i..i + bad] {
+                    if *byte == b'\\' {
+                        out.push_str("\\\\");
+                    } else {
+                        let _ = write!(out, "\\x{byte:02x}");
+                    }
+                }
+                i += bad;
+            }
+        }
+    }
+    out
 }
 
 /// Iterator over the cells of a single record.

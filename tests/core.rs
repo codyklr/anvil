@@ -8,10 +8,10 @@ use std::path::PathBuf;
 
 use anvil_core::source::local::open_local;
 use anvil_core::{
-    apply_filter, infer_schema, open_path, parse_filter, parse_opened, parse_opened_with, reindex,
-    scan_encoding, search_records, sort_rows, ArchiveSource, CellPos, ColumnIndex, HeaderMode,
-    IndexOptions, LoadResult, OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
-    SortKind, SortOrder, SortSpec,
+    apply_filter, exact_string, infer_schema, open_path, parse_filter, parse_opened,
+    parse_opened_with, reindex, scan_encoding, search_records, sort_rows, ArchiveSource, CellPos,
+    ColumnIndex, HeaderMode, IndexOptions, LoadResult, OpenResult, OpenedSource, ParsedDocument,
+    SearchOptions, Selection, SortKind, SortOrder, SortSpec,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -387,6 +387,54 @@ fn encoding_scan_flags_invalid_column() {
     assert_eq!(report.columns[0].column, 1);
     assert_eq!(report.columns[0].name, "b");
     assert_eq!(report.columns[0].invalid_cells, 2);
+}
+
+/// Data fidelity: bytes that are not valid UTF-8 must stay visible. The
+/// old behaviour rendered such a cell as if it were empty, which hid the
+/// value entirely.
+#[test]
+fn invalid_utf8_cells_are_shown_exactly() {
+    let (doc, _d) = parse_bytes(b"a,b\n1,\xff\n2,x\\y\xfe\n");
+
+    // Record 0 is the first data row; the header is not a record.
+    let first = doc.cell(0, ColumnIndex(1)).expect("cell");
+    assert!(!first.is_utf8());
+    assert_eq!(first.to_exact_string(), "\\xff");
+
+    // A literal backslash inside a cell that also holds an invalid byte
+    // is doubled, so the escaped form stays reversible.
+    let second = doc.cell(1, ColumnIndex(1)).expect("cell");
+    assert_eq!(second.to_exact_string(), "x\\\\y\\xfe");
+
+    // A cell of valid UTF-8 is returned unchanged, backslash included.
+    let plain = doc.cell(0, ColumnIndex(0)).expect("cell");
+    assert!(plain.is_utf8());
+    assert_eq!(plain.to_exact_string(), "1");
+}
+
+#[test]
+fn exact_string_escapes_only_when_it_has_to() {
+    assert_eq!(exact_string(b"plain"), "plain");
+    // Valid UTF-8 keeps a real backslash exactly as written.
+    assert_eq!(exact_string(b"a\\b"), r"a\b");
+    assert_eq!(exact_string(b"\xff"), r"\xff");
+    assert_eq!(exact_string(b"ok\x80\x81"), r"ok\x80\x81");
+    // Invalid cell: every backslash is doubled to keep the escapes
+    // unambiguous.
+    assert_eq!(exact_string(b"a\\b\xff"), r"a\\b\xff");
+    // A truncated multi-byte sequence at the end of the cell.
+    assert_eq!(exact_string(b"\xe2\x82"), r"\xe2\x82");
+}
+
+/// A header that is not valid UTF-8 is part of the data too, so it must
+/// reach the UI escaped rather than as U+FFFD.
+#[test]
+fn invalid_utf8_headers_are_escaped_not_replaced() {
+    let (doc, _d) = parse_bytes(b"a,\xffh\n1,2\n");
+    assert_eq!(
+        doc.meta.headers,
+        vec!["a".to_string(), "\\xffh".to_string()]
+    );
 }
 
 #[test]

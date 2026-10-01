@@ -5915,3 +5915,82 @@ what already exists.
 
 Unchanged: verify the real GLiNER model (scope + binding), then add
 `FilterExpr::Not` and `NOT` / `set membership`.
+
+---
+
+## 2026-09-30 — Byte-faithful display (never transform data)
+
+### Context
+
+The owner stated a core philosophy: no data may ever be transformed.
+Values must be visible exactly as they exist in the file, never with
+leading or trailing whitespace or zeroes stripped, never truncated. An
+audit of the render, inspection and clipboard paths found three places
+where the code contradicted that.
+
+### Implemented
+
+- **Column inspector** (`src/schema/stats.rs`): `min`, `max`,
+  `longest`, `shortest`, `samples` and `frequent` now carry the exact
+  cell value. Previously everything was stored from
+  `cell.as_str().trim()`, so `" 42 "` was reported as `42`. Values that
+  differ only in padding are now counted as distinct values (the counts
+  map and the HLL sketch are keyed by the exact value). `min`/`max`
+  *ordering* still compares the trimmed value, and a whitespace-only
+  cell still counts as empty, so the inspector keeps agreeing with the
+  filter `empty` operator; both deviations are recorded in `ROADMAP.md`.
+- **Invalid UTF-8 must stay visible** (`src/parser/mod.rs`): added
+  `exact_string` and `Cell::to_exact_string`. Valid UTF-8 is returned
+  borrowed and unchanged. A cell containing at least one invalid byte is
+  escaped reversibly: valid runs verbatim, a literal backslash doubled,
+  and each invalid byte as `\xNN`. Doubling backslashes across the whole
+  cell is what makes the mapping unambiguous.
+- **Grid** (`src/ui/grid.rs`): renders through `exact_string`, and the
+  `∅` marker now means a genuinely zero-byte cell. Previously
+  `str::from_utf8(bytes).unwrap_or("")` made a cell of invalid bytes
+  render as empty, hiding the data completely.
+- **Clipboard** (`src/ui/view.rs`): `copy_selection_to_clipboard` copies
+  `to_exact_string()` instead of `into_string()`, so an invalid-UTF-8
+  cell copies its escaped bytes instead of U+FFFD.
+- **Probe and headers** (`src/main.rs`, `src/parser/delimit.rs`): the
+  `--probe` sample rows print `to_exact_string()`, and
+  `ParseMeta.headers` is built with `exact_string` rather than
+  `String::from_utf8_lossy`, so an invalid header is no longer shown as
+  U+FFFD. Both were found by running `--probe` on a file with invalid
+  bytes and watching the first row print as `""`.
+- **Docs**: new `docs/adr/0003-byte-faithful-display.md`; a **Data
+  Fidelity** section and a core principle in `VISION.md`; a
+  byte-faithful bullet in `README.md`; architectural invariant 12 plus
+  updated inspector and clipboard sections in `ARCHITECTURE.md`; the new
+  Milestone 5 **Data fidelity** block in `ROADMAP.md`.
+
+### Verified
+
+- `cargo test`: 421 tests, 415 pass, 6 ignored (190 library, 146 binary,
+  84 `tests/core.rs` of which 5 ignored, 1 style guard). Four tests are
+  new; nothing was weakened.
+- `cargo clippy --all-targets`: clean apart from the pre-existing
+  future-incompatibility notice for `block` / `proc-macro-error2`.
+- `anvil --probe` on a file containing `\xff\xfe` now prints
+  `["1", "\\xff\\xfe"]` for the first row instead of an empty string,
+  and the run still completes in under 1 ms.
+- Behaviour is covered by `invalid_utf8_cells_are_shown_exactly`,
+  `exact_string_escapes_only_when_it_has_to` and
+  `invalid_utf8_headers_are_escaped_not_replaced` (`tests/core.rs`) plus
+  `padded_values_are_reported_exactly` and
+  `whitespace_only_cells_still_count_as_empty` (`schema::stats`).
+- Manual GUI exercise of the new cell rendering was not performed; the
+  change is confined to the text handed to GPUI, and the string path is
+  unit-tested.
+
+### Issues / technical debt discovered
+
+- Sorting and search still treat values that differ only in case or
+  padding as equal, and `empty` still means whitespace-only. Both are
+  semantic (not display) choices and are now explicit roadmap items
+  rather than undocumented behaviour.
+
+### Next recommended task
+
+Work the new Milestone 5 Data fidelity items: exact-value comparison
+with a byte tiebreak, then the whitespace-only `empty` decision.

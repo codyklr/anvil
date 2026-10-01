@@ -2,7 +2,12 @@
 //!
 //! Scans one column and produces the metrics the inspector shows:
 //! counts, distinct cardinality, min/max, longest/shortest, samples,
-//! and the most frequent values. Distinct counting is exact while the
+//! and the most frequent values. Every displayed value is the exact cell
+//! value: padding is preserved and `" 42 "` is a different value from
+//! `"42"`. Ordering (min/max) still ignores surrounding whitespace, which
+//! is why `trimmed` exists alongside `exact`.
+//!
+//! Distinct counting is exact while the
 //! value set stays under a threshold; past that it switches to a
 //! HyperLogLog estimate so a high-cardinality column does not blow up
 //! memory. This is GPUI-free and lives in `anvil_core`.
@@ -41,13 +46,23 @@ pub struct ColumnStats {
     pub distinct: DistinctCount,
     /// `non_empty - distinct` when the distinct count is exact.
     pub duplicate_count: Option<u64>,
+    /// Smallest value by the column's ordering, exactly as it appears in
+    /// the file (padding included).
     pub min: Option<String>,
+    /// Largest value by the column's ordering, exactly as it appears in
+    /// the file.
     pub max: Option<String>,
+    /// The longest non-empty value, exactly as it appears in the file;
+    /// the length is counted on that exact value.
     pub longest: Option<String>,
+    /// The shortest non-empty value, exactly as it appears in the file.
     pub shortest: Option<String>,
-    /// The first few non-empty values, in row order.
+    /// The first few non-empty values, in row order and exactly as they
+    /// appear in the file.
     pub samples: Vec<String>,
-    /// The `top_values` most frequent values (exact mode only).
+    /// The `top_values` most frequent values (exact mode only), exactly as
+    /// they appear in the file. Values that differ only in padding are
+    /// counted separately, because they are different values.
     pub frequent: Vec<ValueCount>,
 }
 
@@ -92,7 +107,12 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
         let Some(cell) = doc.cell(row, ColumnIndex(column)) else {
             continue;
         };
-        let trimmed = cell.as_str().trim();
+        // `exact` is what the inspector displays: the value as it exists
+        // in the file, padding included. `trimmed` is only used to
+        // classify emptiness and to order min/max, so a padded value is
+        // still compared the way it always was.
+        let exact = cell.to_exact_string();
+        let trimmed = exact.trim();
         if trimmed.is_empty() {
             empty += 1;
             continue;
@@ -100,45 +120,47 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
         non_empty += 1;
 
         if samples.len() < options.samples {
-            samples.push(trimmed.to_string());
+            samples.push(exact.to_string());
         }
 
         match &min {
-            None => min = Some(trimmed.to_string()),
+            None => min = Some(exact.to_string()),
             Some(current) => {
-                if compare_values(trimmed, current, numeric) == Ordering::Less {
-                    min = Some(trimmed.to_string());
+                if compare_values(trimmed, current.trim(), numeric) == Ordering::Less {
+                    min = Some(exact.to_string());
                 }
             }
         }
         match &max {
-            None => max = Some(trimmed.to_string()),
+            None => max = Some(exact.to_string()),
             Some(current) => {
-                if compare_values(trimmed, current, numeric) == Ordering::Greater {
-                    max = Some(trimmed.to_string());
+                if compare_values(trimmed, current.trim(), numeric) == Ordering::Greater {
+                    max = Some(exact.to_string());
                 }
             }
         }
 
-        let char_len = trimmed.chars().count();
+        let char_len = exact.chars().count();
         let longer = match longest.as_ref() {
             None => true,
             Some((_, len)) => char_len > *len,
         };
         if longer {
-            longest = Some((trimmed.to_string(), char_len));
+            longest = Some((exact.to_string(), char_len));
         }
         let shorter = match shortest.as_ref() {
             None => true,
             Some((_, len)) => char_len < *len,
         };
         if shorter {
-            shortest = Some((trimmed.to_string(), char_len));
+            shortest = Some((exact.to_string(), char_len));
         }
 
         let mut switch = false;
         if let Some(map) = counts.as_mut() {
-            *map.entry(trimmed.to_string()).or_insert(0) += 1;
+            // Counted by the exact value, so `" 42 "` and `42` stay two
+            // distinct values instead of being silently merged.
+            *map.entry(exact.to_string()).or_insert(0) += 1;
             switch = map.len() > options.max_exact_distinct;
         }
         if switch {
@@ -151,7 +173,7 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
             hll = Some(sketch);
         } else if counts.is_none() {
             if let Some(sketch) = hll.as_mut() {
-                sketch.add(trimmed);
+                sketch.add(&exact);
             }
         }
     }
@@ -359,6 +381,30 @@ mod tests {
         // Several values are two characters; the first one seen wins.
         assert_eq!(stats.longest.as_deref(), Some("10"));
         assert_eq!(stats.shortest.as_deref(), Some("2"));
+    }
+
+    /// Data fidelity: the inspector must show the value as it exists in
+    /// the file, so padding is preserved. Ordering still ignores padding,
+    /// which is why `7` is still the numeric minimum of `" 42 "` and `7`.
+    #[test]
+    fn padded_values_are_reported_exactly() {
+        let doc = doc_from(b"v,pad\n\" 42 \",x\n7,x\n");
+        let stats = stats(&doc, 0, &StatsOptions::default());
+        assert_eq!(stats.samples.first().map(String::as_str), Some(" 42 "));
+        assert_eq!(stats.min.as_deref(), Some("7"));
+        assert_eq!(stats.max.as_deref(), Some(" 42 "));
+        // Lengths are counted on the exact value, padding included.
+        assert_eq!(stats.longest.as_deref(), Some(" 42 "));
+        assert_eq!(stats.shortest.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn whitespace_only_cells_still_count_as_empty() {
+        let doc = doc_from(b"v,pad\n\"   \",x\nz,x\n");
+        let stats = stats(&doc, 0, &StatsOptions::default());
+        assert_eq!(stats.empty, 1);
+        assert_eq!(stats.non_empty, 1);
+        assert_eq!(stats.min.as_deref(), Some("z"));
     }
 
     #[test]

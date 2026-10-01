@@ -2423,7 +2423,7 @@ impl MainView {
         let selection = self.selection.clone();
         let text = selection.copy_text_with(|r, c| {
             doc.cell(r, anvil_core::ColumnIndex(c))
-                .map(|cell| cell.into_string())
+                .map(|cell| cell.to_exact_string().into_owned())
         });
         match (self.clipboard)(&text) {
             Ok(()) => {

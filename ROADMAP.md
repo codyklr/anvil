@@ -639,6 +639,30 @@ make what exists feel finished.
 - [ ] Theme toggle (light mode).
 - [ ] Optional distro packaging (`brew`, `apt`, `.deb`, etc.).
 
+#### Data fidelity
+
+- [x] Byte-faithful display (ADR 0003). The column inspector reports
+  the exact cell value for `min` / `max` / `longest` / `shortest` /
+  `samples` / `frequent` and counts values that differ only in padding
+  as distinct; the grid, the clipboard, `--probe` sample rows and the
+  column **headers** all show cells that are not valid UTF-8 in a
+  reversible escaped form (`\xNN`, with backslashes doubled) instead of
+  hiding them or writing U+FFFD. `parser::exact_string` is the single
+  implementation and `ParseMeta.headers` is built with it rather than
+  `from_utf8_lossy`; regression tests live in `tests/core.rs` and
+  `schema::stats`.
+- [ ] Make `min` / `max` ordering and text sorting compare the exact
+  value rather than the trimmed, case-insensitive form, with the exact
+  bytes as a deterministic tiebreak, so two values that differ only in
+  padding or case never compare as equal.
+- [ ] Decide whether a whitespace-only cell is empty. The inspector and
+  the filter `empty` operator currently both treat it as empty, which
+  conflicts with the fidelity rule now that a value holds bytes and is
+  displayed as-is.
+- [ ] Add an affordance to reveal the full value of a cell that the grid
+  has elided, so a user never needs to copy a truncated-looking cell to
+  read it.
+
 #### Diagnostics UI
 
 - [x] Diagnostics panel (side panel or modal) listing every warning

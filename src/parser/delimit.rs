@@ -10,7 +10,7 @@
 
 use std::borrow::Cow;
 
-use crate::parser::{Cells, HeaderMode, ParseMeta, ParseWarning, WarningKind};
+use crate::parser::{exact_string, Cells, HeaderMode, ParseMeta, ParseWarning, WarningKind};
 
 /// Candidate delimiters we try. Order is the final tie-break (comma first,
 /// because it is by far the most common data format).
@@ -86,9 +86,11 @@ pub fn detect_with(bytes: &[u8], mode: HeaderMode) -> DetectOutcome {
         HeaderMode::Auto => looks_like_header_in_context(&first_cells, &lines[1..], delim),
     };
     let headers = if likely_header {
+        // Byte-faithful like every other displayed value: a header that
+        // is not valid UTF-8 is escaped rather than replaced with U+FFFD.
         first_cells
             .iter()
-            .map(|c| String::from_utf8_lossy(c.as_ref()).into_owned())
+            .map(|c| exact_string(c.as_ref()).into_owned())
             .collect()
     } else {
         Vec::new()

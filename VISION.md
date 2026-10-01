@@ -19,7 +19,35 @@ Anvil is not intended to be a spreadsheet replacement.
 - Treat archives such as ZIP files as first-class data sources
 - Avoid unnecessary copies and memory usage
 - Surface malformed or suspicious data instead of hiding it
+- Show data exactly as it exists: never transform, trim, normalise or
+  truncate a value
 - Optimize for investigation and troubleshooting
+
+## Data Fidelity
+
+Anvil shows data exactly as it exists in the file. A value is never
+normalised, reformatted, rounded, re-encoded or truncated on its way to
+the screen.
+
+- Leading and trailing whitespace is preserved: `" 42 "` is displayed
+  as `" 42 "`, not as `42`.
+- Leading zeroes and trailing digits are preserved: `007` stays `007`
+  and `1.10` stays `1.10`. Numeric text is never reformatted.
+- Nothing is silently replaced. Bytes that are not valid UTF-8 are shown
+  in an escaped, reversible form (`\xff`) and reported by the diagnostics
+  panel, rather than being dropped or turned into a replacement
+  character.
+- Values are never truncated. Long values are elided in the grid only to
+  fit the column, and the full value is always available in the column
+  inspector and on copy.
+- Values that differ only in padding or case are treated as the distinct
+  values they are when values are counted or listed.
+
+Where Anvil must interpret structure - the delimiter, CSV quoting, line
+endings, the character encoding - it does so in order to reveal the field
+value, and it reports what it found instead of rewriting it. That is why
+the parser strips the record's line terminator and unescapes doubled
+quotes, but never touches the bytes inside a field.
 
 ## Core Workflow
 

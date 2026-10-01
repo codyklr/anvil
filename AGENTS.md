@@ -154,6 +154,10 @@ Agents must **not**:
   Land refactors in their own iteration.
 - Convert Anvil into a generic spreadsheet application.
 - Introduce browser / webview stacks.
+- Transform data on its way to the screen. Values must be displayed
+  exactly as they exist in the file: never trim, reformat, round,
+  re-encode or truncate a value. See the Data Fidelity section of
+  `VISION.md` and `docs/adr/0003-byte-faithful-display.md`.
 - Perform large scans on the UI thread.
 - Sacrifice large-file behaviour for implementation convenience.
 - Add dependencies without weighing the maintenance cost.

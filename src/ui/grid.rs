@@ -14,7 +14,8 @@ use gpui::{
 };
 
 use anvil_core::{
-    find_ranges, CellPos, Cells, ParsedDocument, SearchOptions, Selection, WarningKind,
+    exact_string, find_ranges, CellPos, Cells, ParsedDocument, SearchOptions, Selection,
+    WarningKind,
 };
 
 use super::theme;
@@ -423,7 +424,9 @@ where
             Some(cell) => cell.as_ref(),
             None => &[],
         };
-        let text = std::str::from_utf8(bytes).unwrap_or("");
+        // Byte-exact text: a cell that is not valid UTF-8 is escaped
+        // rather than rendered as if it were empty.
+        let text = exact_string(bytes);
         let is_selected = selection.contains(index, col);
         let is_flashed = rect_contains(copy_flash, index, col);
         let down_handler = mouse_down.clone();
@@ -438,7 +441,7 @@ where
         } else if is_selected {
             cell_div = cell_div.bg(theme::BG_SELECTED);
         }
-        if text.is_empty() {
+        if bytes.is_empty() {
             cell_div = cell_div.text_color(theme::TEXT_EMPTY).child("∅");
         } else if should_highlight(search_options, col) {
             if let Some(needle) = needle_bytes {

@@ -180,7 +180,12 @@ anvil/
 - `schema::stats` — `stats(doc, column, &StatsOptions) -> ColumnStats`
   scans one column for the inspector: counts, an exact-then-HLL
   [`DistinctCount`], duplicate count, min/max, longest/shortest,
-  samples, and the top-N frequent values.
+  samples, and the top-N frequent values. Every displayed value is the
+  exact cell value, padding included, and values that differ only in
+  padding are counted as distinct (ADR 0003); `min`/`max` still *order*
+  by trimmed, case-insensitive or numeric comparison, and a
+  whitespace-only cell still counts as empty so the inspector agrees
+  with the filter `empty` operator.
 - `encoding` — `scan(doc) -> EncodingReport` makes one pass over the
   data records counting non-UTF-8 cells per column and detects a
   leading UTF-8 BOM. `Cell::is_utf8` is the per-cell flag; without it
@@ -749,7 +754,10 @@ lives in `anvil_core`; the platform call lives in the UI crate.
 `Selection::copy_text_with<F>(&self, cell_at: F) -> String` where
 `cell_at: Fn(u64, usize) -> Option<String>`. The closure decouples
 the formatter from `ParsedDocument` so unit tests can use mock cells
-and the UI passes `|r, c| doc.cell(r, ColumnIndex(c)).map(...).into_string())`.
+and the UI passes `|r, c| doc.cell(r, ColumnIndex(c)).map(|cell| cell.to_exact_string().into_owned())`.
+The UI must pass the byte-faithful form, so a cell that is not valid
+UTF-8 is copied in its escaped, reversible form rather than as U+FFFD
+(ADR 0003).
 
 The output is RFC 4180-style quoted TSV:
 
@@ -1552,13 +1560,13 @@ it back without a benchmark.
 
 ### What exists today
 
-`cargo test` runs 416 tests: 188 in the `anvil_core` library, 146 in
-the `anvil` binary (145 passing, one ignored), 81 in `tests/core.rs`
-(76 passing, five ignored performance tests) and one repository style
-guard. 410 pass; the 6 `#[ignore]`d tests need a generated
+`cargo test` runs 421 tests: 190 in the `anvil_core` library, 146 in
+the `anvil` binary (145 passing, one ignored), 84 in `tests/core.rs`
+(79 passing, five ignored performance tests) and one repository style
+guard. 415 pass; the 6 `#[ignore]`d tests need a generated
 `fixtures/large.csv`.
 
-`tests/core.rs` — 76 integration tests in one file. They run without
+`tests/core.rs` — 79 integration tests in one file. They run without
 a GUI and are the primary CI signal. `tests/style.rs` adds one
 repository style guard: no `.rs` source file may contain an em-dash
 (U+2014), so a typographic dash cannot creep back into UI strings or
@@ -1568,7 +1576,7 @@ carries 32 unit tests. `src/query.rs` carries 22 unit tests for
 helper, and `src/query/filter.rs` carries 35 for `FilterOp` /
 `parse` / `apply` and the `FilterExpr` compound grammar
 (`parse_expr` / `apply_expr`). `src/schema.rs` carries 9 for `infer`,
-`src/schema/stats.rs` carries 14 for `stats` and `sample_distinct`,
+`src/schema/stats.rs` carries 16 for `stats` and `sample_distinct`,
 `src/query/sort.rs`
 carries 9 for `SortSpec` / `apply`, `src/query/suggest.rs` carries 21
 for the autocomplete slot machine and candidate filtering, and
@@ -1981,6 +1989,19 @@ change architecture and update this file.
     key events to the focused path, so dropping `track_focus`
     silently disables every grid shortcut. The UI regression tests
     in `src/ui/view.rs` fail if this regresses.
+12. **Display and copy are byte-faithful.** A value rendered in the
+grid, shown in the inspector, or copied to the clipboard is the exact
+cell value: no trimming, no numeric reformatting, no truncation, and
+no lossy decoding. Cells that are not valid UTF-8 go through
+`parser::exact_string`, which returns valid UTF-8 borrowed and
+otherwise escapes (`\\` for a backslash, `\xNN` per invalid byte).
+`Cell::as_str` and `Cell::into_string` are lossy and are internal-only:
+never use them for display or clipboard. This covers the grid, the
+inspector, the clipboard, `--probe` sample rows and the header row
+(`ParseMeta.headers` is built with `exact_string`). Grid ellipsis
+(`truncate()`) is a layout concern and never changes the underlying
+value. See ADR 0003; this invariant has regression tests in
+`tests/core.rs` and `schema::stats`.
 
 ## Planned Architectural Evolution
 

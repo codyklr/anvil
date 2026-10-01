@@ -148,11 +148,13 @@ fn print_loaded(loaded: &LoadedDocument, elapsed: std::time::Duration) {
 
     let show = meta.headers.iter().take(6).collect::<Vec<_>>();
     println!("header row: {:?}", show);
+    // Sample rows are shown byte-faithfully, like the grid: a cell that
+    // is not valid UTF-8 prints in its escaped form rather than as "".
     if doc.record_count() > 0 {
         let first: Vec<String> = (0..doc.column_count().min(6))
             .map(|col| {
                 doc.cell(0, ColumnIndex(col))
-                    .map(|c| c.into_string())
+                    .map(|c| c.to_exact_string().into_owned())
                     .unwrap_or_default()
             })
             .collect();
@@ -161,7 +163,7 @@ fn print_loaded(loaded: &LoadedDocument, elapsed: std::time::Duration) {
         let last_vals: Vec<String> = (0..doc.column_count().min(6))
             .map(|col| {
                 doc.cell(last, ColumnIndex(col))
-                    .map(|c| c.into_string())
+                    .map(|c| c.to_exact_string().into_owned())
                     .unwrap_or_default()
             })
             .collect();

@@ -29,6 +29,13 @@ The design that makes that possible:
   inconsistent row widths, very long records, empty and duplicate
   headers, encoding problems, suspicious archive entries: each one is
   counted, listed, and clickable so you can jump straight to the row.
+- **Byte-faithful display.** Every value is shown exactly as it exists in
+  the file. Nothing is trimmed, rounded or reformatted: `007` stays
+  `007`, `1.10` stays `1.10`, padding is preserved, and bytes that are
+  not valid UTF-8 are shown escaped (`\xff`) instead of being dropped or
+  replaced. The same applies to column headers and to `--probe` output.
+  The grid elides long text only to fit the column; the full value is
+  always in the inspector and on the clipboard.
 
 ## Features
 
