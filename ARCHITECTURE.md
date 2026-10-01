@@ -1825,7 +1825,7 @@ no-op / anchor-from-empty).
 | Dependency          | Version | Responsibility                                  | Why it is here                         | Architectural constraint                             |
 |---------------------|---------|-------------------------------------------------|----------------------------------------|------------------------------------------------------|
 | `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core` |
-| `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; no async          |
+| `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; sync API. On Linux a target-specific entry selects the pure-Rust `xdg-portal` backend so the build script does not panic |
 | `memchr`            | 2       | SIMD-accelerated `memchr` for byte scanning      | Indexer needs `\n` searches            | Used in `delimit.rs` and `indexing.rs`; tiny API     |
 | `memmap2`           | 0.9     | Memory-mapped file handle                        | Bounded memory + random access         | Wrapped in `MmapSource`; `unsafe` mmap is centralised |
 | `zip`               | 2.4     | ZIP reading / writing                            | Required archive format                | `deflate` and `bzip2` features only; encryption not supported |
@@ -1880,6 +1880,21 @@ tracked in `ROADMAP.md` (Milestone 5 cross-platform support) and the
 CI workflow was validated for syntax and for its individual commands
 on macOS only; a real GitHub Actions run on all three runners has not
 yet happened.
+
+Separately, the Linux release build failed at dependency build time.
+`rfd` was declared with `default-features = false` and no backend
+feature, and `rfd`'s build script panics on Linux when neither `gtk3`
+nor `xdg-portal` is selected. macOS and Windows were unaffected
+because the build script's Linux branch is not compiled there, which
+is why the earlier macOS-only verification missed it. `Cargo.toml` now
+selects `xdg-portal` (a pure-Rust backend that adds only `pollster`)
+through a `[target.'cfg(target_os = "linux")'.dependencies]` entry,
+leaving the generic entry for macOS/Windows unchanged. The failure and
+the fix were reproduced and confirmed for the `x86_64-unknown-linux-gnu`
+target with a focused cross-check: the `rfd` build script panics
+without the feature and compiles with it. The full Linux
+build/test/probe could not be run on the macOS verification host and
+still needs a real Linux or GitHub Actions run.
 
 ### Native Ask model
 

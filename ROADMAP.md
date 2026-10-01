@@ -658,9 +658,14 @@ make what exists feel finished.
   `cargo fmt --check`, `cargo build --release`, `cargo test --release`,
   and `anvil --probe fixtures/large.csv`. `.github/workflows/ci.yml`
   now defines the three-OS matrix and the Linux dependency install
-  step, and every one of its commands was run locally on macOS. The
-  workflow has only been validated for syntax; no real GitHub Actions
-  run has executed yet, and the Linux and Windows legs are unverified.
+  step, and every one of its commands was run locally on macOS. A
+  missed Linux-only dependency failure was found and fixed: `rfd` had
+  no backend feature selected, so its build script panicked on Linux;
+  `Cargo.toml` now selects `xdg-portal` through a Linux target entry,
+  verified for `x86_64-unknown-linux-gnu` with a focused cross-check.
+  The workflow has only been validated for syntax; no real GitHub
+  Actions run has executed yet, and the full Linux and Windows legs
+  are unverified.
 - [ ] Enable a real GPUI window backend on Linux. The release build
   uses `gpui` with `default-features = false, features = ["font-kit"]`,
   so neither `x11` nor `wayland` is compiled and

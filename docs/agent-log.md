@@ -7049,3 +7049,94 @@ rendering are still in `view.rs`.
 
 Finish the `ui/view.rs` split (tabs, file panel, grid rendering) as a
 separate refactor-only iteration, then re-run the full suite.
+
+---
+
+## 2026-10-01 — Iteration 11: fix the Linux release build (rfd backend)
+
+### Context
+
+An independent review on x86-64 Linux reported that all 468 tests pass
+once the Linux native packages are installed, but that
+`cargo build --release` fails as shipped because `Cargo.toml` declared
+`rfd` with `default-features = false` and no backend. The prior work had
+only ever been verified on macOS, where the failure does not occur.
+
+### Implemented
+
+- Reproduced the root cause: `rfd` 0.17.2's `build.rs` panics with
+  `You need to choose at least one backend: gtk3 or xdg-portal features
+  for x86_64-linux` when neither backend feature is enabled and
+  `CARGO_CFG_TARGET_OS == "linux"`. macOS and Windows take a different
+  branch of the build script, so the earlier macOS-only verification
+  never hit it.
+- `Cargo.toml`: kept the generic
+  `rfd = { version = "0.17", default-features = false }` for
+  macOS/Windows and added a
+  `[target.'cfg(target_os = "linux")'.dependencies]` entry selecting
+  `features = ["xdg-portal"]`. `xdg-portal` is pure Rust and adds only
+  `pollster` (`pollster 0.4.0` is now in `Cargo.lock`), so no new
+  system packages are required. The sync `FileDialog::pick_file()`
+  used at `src/ui/view.rs:1371` is implemented by `rfd` via
+  `pollster::block_on`, so switching to `gtk3` was not necessary.
+- Re-read `.github/workflows/ci.yml`; the Linux package list is
+  sufficient once a backend is selected, so no CI change was made.
+
+### Verified
+
+- macOS build/test unchanged: `cargo build --release` succeeds;
+  `cargo test --release` — **468 passed, 7 ignored** (208 library, 173
+  binary with 1 ignored, 86 `tests/core.rs` with 6 ignored, 1 style
+  guard), identical to the pre-change count.
+- `cargo fmt --check` clean; `cargo clippy --release --all-targets`
+  clean.
+- `cargo run --release --bin gen_fixture -- fixtures 2000` and
+  `cargo run --release --bin anvil -- --probe fixtures/large.csv` run
+  (the 1M fixture was regenerated afterwards).
+- Focused Linux-target cross-check, since this host is macOS/arm64 and
+  has no Linux VM or running Docker: in a throwaway crate,
+  `cargo check --target x86_64-unknown-linux-gnu` with
+  `rfd default-features = false` panics exactly as reported, and with
+  the Linux target entry plus `features = ["xdg-portal"]` it finishes
+  successfully. `cargo tree --target x86_64-unknown-linux-gnu` confirms
+  `xdg-portal` + `pollster` are active for the target.
+
+### Not verified
+
+- The full Linux `cargo build --release`, `cargo test --release` and
+  `--probe` were **not** run: the verification host is macOS/arm64, the
+  Docker daemon is unavailable, and there is no Linux runner here.
+  GitHub Actions was not run. The Linux and Windows legs of the CI
+  matrix therefore remain unverified until a real runner executes them.
+  The Linux GUI backend remains an open item.
+
+### Tests added / changed
+
+None.
+
+### Roadmap changes
+
+- The `[~]` "Add a CI build/test matrix" item now records the missed
+  Linux-only `rfd` failure and its fix. It stays `[~]` because no real
+  CI run has happened.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the cross-platform build limitation now documents the
+`rfd` root cause and the fix, and the dependency table records the Linux
+`xdg-portal` target entry.
+
+### Issues / technical debt discovered
+
+- The `agent/iterative-improvements` branch ref no longer exists; it was
+  fast-forwarded into `master` (see reflog), so work continues on
+  `master` @ `ecba98b`.
+- Worker delegation tooling was unusable in this session (scope
+  validation errors on confirmed regular files; one trivial scout task
+  hit the model-turn limit), so this iteration was implemented locally
+  after explicit recovery routing.
+
+### Next recommended task
+
+Iteration 2: fix range selection under an active sort by keeping the
+selection in display-position space.

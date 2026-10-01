@@ -46,6 +46,15 @@ gliner-rs = { version = "=0.2.3", optional = true, default-features = false }
 serde_json = { version = "1", optional = true }
 gliner-tokenizers = { package = "tokenizers", version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 
+# rfd's build script requires one Linux dialog backend to be selected, or
+# it panics with "You need to choose at least one backend". The upstream
+# default is `xdg-portal` (a pure-Rust backend that needs no extra system
+# libraries), so select it explicitly on Linux while leaving macOS/Windows
+# resolution untouched. The generic `rfd` entry in [dependencies] above
+# still applies everywhere else.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
 [dev-dependencies]
 crc32fast = "1"
 # Enable GPUI's headless test harness only for tests. `test-support`
