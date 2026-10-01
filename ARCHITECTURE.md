@@ -369,7 +369,8 @@ switch: a stable `id`, an optional parsed `Arc<ParsedDocument>`
 (`None` for a ZIP entry that has not been extracted yet), the archive
 / entry pair for ZIP-backed tabs, a `loading` guard, the selection,
 the horizontal scroll offset, the vertical scroll handle, the search
-state, the filter state, and the copy-flash state.
+state, the filter state, the copy-flash state, and the per-tab column
+widths from a manual header resize.
 `MainView::snapshot_active` copies
 the live fields into `documents[active]`; `MainView::load_active`
 copies the other way. `switch_to`, `close_active_at`, and `apply` are
@@ -1297,6 +1298,15 @@ column and picks the widest cell (plus padding) as the column width.
 Only the first `MAX_MEASURED_COLUMNS` (4096) columns are actually
 measured; columns beyond that use `DEFAULT_COLUMN_WIDTH`. Widths are
 clamped to `[MIN_COLUMN_WIDTH, MAX_AUTO_WIDTH]` (48 px – 360 px).
+
+A manual header drag rebuilds the layout through
+`ColumnLayout::resized(column, width)`, which clamps to
+`[MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH]` (48 px – 1200 px, deliberately
+wider than the automatic cap) and recomputes `offsets` and `total` via
+`from_widths`, so the header, body cells and horizontal scrollbar all
+use the new geometry on the next frame. The resulting widths are saved
+on the tab's `DocumentSnapshot` and restored by `load_active` after a
+tab switch.
 
 `ColumnLayout::visible(scroll_x, viewport_w)` uses `binary_search_by`
 on `offsets` to find the first visible column, then walks forward

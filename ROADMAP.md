@@ -688,7 +688,14 @@ make what exists feel finished.
   unknown total falls back to an indeterminate stub. The indexer's
   per-byte check is behind a const generic, so the no-progress path is
   unchanged (251 ms on the 1M fixture).
-- [ ] Column resize: drag column boundary in the header.
+- [x] Column resize: drag column boundary in the header. Each header
+  cell carries a thin right-edge handle; pressing it starts a drag and
+  a global mouse-move rebuilds `ColumnLayout` (`resized` clamps to
+  `[MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH]` and recomputes offsets and
+  total, so header, body and the horizontal scrollbar stay aligned).
+  Widths are stored per tab on `DocumentSnapshot` and restored on tab
+  switch. Covered by a `ColumnLayout` clamp/offset unit test, a UI drag
+  test, and a tab-switch restore test.
 - [ ] Keyboard shortcut cheatsheet (Cmd/Ctrl+?).
 - [ ] Theme toggle (light mode).
 - [ ] Optional distro packaging (`brew`, `apt`, `.deb`, etc.).

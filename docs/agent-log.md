@@ -6479,3 +6479,88 @@ a progress-overhead subsection.
 
 Iteration 6: column resize by dragging the header boundary, with a
 width model test and one UI drag test.
+
+---
+
+## 2026-09-30 — Iteration 6: column resize
+
+### Context
+
+Sixth slice of the improvement run (branch
+`agent/iterative-improvements`). Headers were fixed-width: the only way
+to see a wide column was horizontal scrolling. The roadmap wanted a
+drag on the header boundary, with body/header alignment, correct
+horizontal scroll and scrollbar, and per-tab widths.
+
+### Implemented
+
+- `theme::MAX_COLUMN_WIDTH` (1200 px), deliberately wider than the
+  automatic `MAX_AUTO_WIDTH` so a manual resize can exceed it.
+- `ColumnLayout::from_widths` (rebuild offsets + total) and
+  `ColumnLayout::resized(column, width)` (clamp to
+  `[MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH]`, then rebuild). Replacing the
+  `Arc<ColumnLayout>` on `GridModel` updates header, body and scrollbar
+  together because all three read the one layout.
+- `grid::render_header` now takes an `on_resize_start` callback and
+  renders a 5 px `cursor_ew_resize` handle on each header's right edge.
+  The handle calls `App::stop_propagation` so the press does not also
+  cycle the sort.
+- `MainView.column_drag: Option<(column, press_x, press_width)>`.
+  The header handle starts the drag; the grid's existing global
+  mouse-move listener updates the width (`column_drag_move`) and a new
+  global mouse-up listener ends it (`end_column_drag`).
+- `DocumentSnapshot.column_widths: Option<Vec<f32>>` persists the
+  widths per tab. `snapshot_active` saves the live layout widths on
+  drag end (and on any tab switch); `load_active` restores them when
+  the length still matches the document's column count.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **446 passed, 7 ignored** (196 library, 167
+  binary, 82 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean apart from the
+  pre-existing future-incompat notice.
+- `resized_clamps_and_recomputes_offsets` checks min/max clamp, exact
+  in-range resize, shifted offsets, the new total, and a no-op for an
+  out-of-range column.
+- `header_drag_resizes_column` drives real mouse events on the
+  `header-resize-0` handle and asserts the layout grew by ~40 px and
+  the tab snapshot stored the width.
+- `resized_widths_restore_after_tab_switch` resizes, opens a second
+  tab, switches back, and asserts the width was restored.
+- **Not verified:** no manual GUI run; the drag is exercised by the
+  headless UI test only. Double-click-to-autofit is not implemented (it
+  was optional).
+
+### Tests added / changed
+
+- `ui/grid.rs`: `resized_clamps_and_recomputes_offsets`.
+- `ui/view/tests.rs`: `header_drag_resizes_column`,
+  `resized_widths_restore_after_tab_switch`.
+
+### Roadmap changes
+
+- Milestone 5 UX: "Column resize: drag column boundary in the header"
+  ticked.
+
+### Architecture changes
+
+`ARCHITECTURE.md` Column rendering section documents `resized` /
+`from_widths`, the wider manual cap, and per-tab persistence; the
+`DocumentSnapshot` summary lists the stored widths.
+
+### Issues / technical debt discovered
+
+- The resize handle is 5 px wide and relies on `stop_propagation` to
+  avoid the sort click. There is no visual "active" state during a
+  drag beyond the hover highlight, and no double-click auto-fit.
+- Column widths are stored as absolute pixels, so they do not scale
+  with a window resize (consistent with the rest of the grid, which
+  uses pixel widths).
+
+### Next recommended task
+
+Iteration 7: reveal the full exact value of a cell (Cmd/Ctrl+Enter or
+a cell detail panel), handling multi-MB cells without freezing.

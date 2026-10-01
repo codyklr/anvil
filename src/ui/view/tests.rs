@@ -3041,3 +3041,74 @@ async fn loading_progress_without_total_is_indeterminate(cx: &mut TestAppContext
         view.clear_progress(cx);
     });
 }
+
+/// Dragging a header boundary widens the column, keeps the live layout
+/// and the persisted per-tab widths in sync, and stores the width for
+/// the tab so it survives a switch.
+#[gpui::test]
+async fn header_drag_resizes_column(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    let before = view.read_with(cx, |view, _| {
+        view.model.as_ref().expect("model").layout.widths[0]
+    });
+    let handle = cx
+        .debug_bounds("header-resize-0")
+        .expect("column 0 resize handle should be rendered");
+    let start = gpui::point(
+        handle.origin.x + handle.size.width / 2.0,
+        handle.origin.y + handle.size.height / 2.0,
+    );
+    let end = gpui::point(start.x + px(40.), start.y);
+    let modifiers = gpui::Modifiers::default();
+
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    // Two moves: the first updates the hover hit test, the second is
+    // delivered to the now-hovered handle.
+    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(view.column_drag.is_none(), "mouse-up should end the drag");
+        let after = view.model.as_ref().expect("model").layout.widths[0];
+        assert!(
+            (after - (before + 40.0)).abs() < 1.0,
+            "expected width {before}+40, got {after}"
+        );
+        // The tab snapshot carries the resized width.
+        let snap = &view.documents[view.active.expect("active tab")];
+        let stored = snap.column_widths.as_ref().expect("stored widths");
+        assert_eq!(stored[0], after);
+    });
+}
+
+/// A manually-resized width is stored per tab and restored when the tab
+/// becomes active again.
+#[gpui::test]
+async fn resized_widths_restore_after_tab_switch(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    let resized = cx.update_window_entity(&view, |view, _, cx| {
+        let before = view.model.as_ref().expect("model").layout.widths[0];
+        view.start_column_drag(0, 0.0, before, cx);
+        view.column_drag_move(300.0, cx);
+        view.end_column_drag(cx);
+        view.model.as_ref().expect("model").layout.widths[0]
+    });
+    assert!(resized > 0.0);
+
+    cx.update_window_entity(&view, |view, _, _| {
+        // Open a second tab (which becomes active), then switch back.
+        push_loaded_tab(view, Arc::new(sample_document()));
+        view.active = Some(0);
+        view.load_active();
+        let restored = view.model.as_ref().expect("model").layout.widths[0];
+        assert!(
+            (restored - resized).abs() < 0.001,
+            "expected restored width {resized}, got {restored}"
+        );
+    });
+}

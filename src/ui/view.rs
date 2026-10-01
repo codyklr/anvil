@@ -189,6 +189,10 @@ struct DocumentSnapshot {
     /// heuristic; `Header` / `Headerless` are explicit user overrides
     /// applied by re-indexing the same opened source.
     header_mode: HeaderMode,
+    /// Per-column widths after a manual header resize, or `None` for the
+    /// automatic widths. Restored when the tab becomes active so widths
+    /// survive tab switches.
+    column_widths: Option<Vec<f32>>,
 }
 
 impl DocumentSnapshot {
@@ -226,6 +230,7 @@ impl DocumentSnapshot {
             search_case_sensitive: false,
             search_column: None,
             header_mode: HeaderMode::Auto,
+            column_widths: None,
         }
     }
 
@@ -260,6 +265,7 @@ impl DocumentSnapshot {
             search_case_sensitive: false,
             search_column: None,
             header_mode: HeaderMode::Auto,
+            column_widths: None,
         }
     }
 
@@ -382,6 +388,10 @@ pub struct MainView {
     /// `(mouse_x_at_drag_start, scroll_x_at_drag_start)` while the user
     /// drags the horizontal scrollbar thumb.
     h_drag: Option<(f32, f32)>,
+    /// Active column-resize drag: `(column, pointer x at press, width
+    /// at press)`. Set by a header boundary handle; a global mouse-move
+    /// updates the width and mouse-up ends the drag.
+    column_drag: Option<(usize, f32, f32)>,
 
     selection: Selection,
     /// How the active document's first row is interpreted. Mirrors
@@ -678,6 +688,7 @@ impl MainView {
             viewport_w: 1600.0,
             v_scroll: UniformListScrollHandle::new(),
             h_drag: None,
+            column_drag: None,
             selection: Selection::empty(),
             header_mode: HeaderMode::Auto,
             drag_selecting: false,
@@ -792,6 +803,7 @@ impl MainView {
         snap.header_mode = self.header_mode;
         snap.archive = self.archive.clone();
         snap.entry_name = self.selected_entry.clone();
+        snap.column_widths = self.model.as_ref().map(|model| model.layout.widths.clone());
     }
 
     /// Reset all live per-document fields to the "no document"
@@ -846,6 +858,13 @@ impl MainView {
         // code shows a loading placeholder for it until the lazy load
         // completes.
         self.model = snap.doc.clone().map(GridModel::new);
+        // Restore manually-resized column widths for this tab. The
+        // length check guards a reindex that changed the column count.
+        if let (Some(model), Some(widths)) = (self.model.as_mut(), snap.column_widths.as_ref()) {
+            if model.layout.widths.len() == widths.len() {
+                model.layout = Arc::new(grid::ColumnLayout::from_widths(widths.clone()));
+            }
+        }
         self.archive = snap.archive;
         self.selected_entry = snap.entry_name;
         self.selection = snap.selection;
@@ -1944,6 +1963,20 @@ impl MainView {
                     });
                 }
             },
+            {
+                let entity = entity.clone();
+                move |col, ev, app_cx| {
+                    let pointer_x = f32::from(ev.position.x);
+                    entity.update(app_cx, |view, cx| {
+                        let width = view
+                            .model
+                            .as_ref()
+                            .map(|model| model.layout.widths.get(col).copied().unwrap_or(0.0))
+                            .unwrap_or(0.0);
+                        view.start_column_drag(col, pointer_x, width, cx);
+                    });
+                }
+            },
         );
 
         let list = uniform_list(
@@ -2063,8 +2096,18 @@ impl MainView {
                 window.on_mouse_event(move |ev: &MouseMoveEvent, _, _, app_cx| {
                     entity.update(app_cx, |view, cx| {
                         view.pointer_pos = Some(ev.position);
-                        if view.drag_selecting {
+                        if view.column_drag.is_some() {
+                            view.column_drag_move(f32::from(ev.position.x), cx);
+                        } else if view.drag_selecting {
                             view.auto_scroll_step(cx);
+                        }
+                    });
+                });
+                let entity = entity_for_canvas.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, _, _, app_cx| {
+                    entity.update(app_cx, |view, cx| {
+                        if view.column_drag.is_some() {
+                            view.end_column_drag(cx);
                         }
                     });
                 });
@@ -2123,6 +2166,45 @@ impl MainView {
             )
             .child(self.render_h_scrollbar(cx))
             .into_any_element()
+    }
+
+    // ---- column resize ---------------------------------------------------
+
+    /// Begin a column-resize drag from a header boundary. `pointer_x` is
+    /// the press position and `width` the column's width at press time.
+    fn start_column_drag(
+        &mut self,
+        column: usize,
+        pointer_x: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.column_drag = Some((column, pointer_x, width));
+        cx.notify();
+    }
+
+    /// Update the dragged column's width from the current pointer x. The
+    /// width is clamped by `ColumnLayout::resized`, which also rebuilds
+    /// the offsets and total so the header, body cells and horizontal
+    /// scrollbar stay aligned.
+    fn column_drag_move(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        let Some((column, start_x, start_width)) = self.column_drag else {
+            return;
+        };
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let new_width = start_width + (pointer_x - start_x);
+        model.layout = Arc::new(model.layout.resized(column, new_width));
+        cx.notify();
+    }
+
+    /// End a column-resize drag and persist the widths to the active tab.
+    fn end_column_drag(&mut self, cx: &mut Context<Self>) {
+        if self.column_drag.take().is_some() {
+            self.snapshot_active();
+            cx.notify();
+        }
     }
 
     fn render_h_scrollbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

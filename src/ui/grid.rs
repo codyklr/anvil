@@ -78,6 +78,39 @@ impl ColumnLayout {
         }
     }
 
+    /// Rebuild a layout from an explicit width vector, recomputing the
+    /// offsets and total. Used to restore per-tab widths after a tab
+    /// switch and to apply a manual resize.
+    pub fn from_widths(widths: Vec<f32>) -> Self {
+        let mut offsets = Vec::with_capacity(widths.len() + 1);
+        let mut acc = 0.0f32;
+        for &w in &widths {
+            offsets.push(acc);
+            acc += w;
+        }
+        offsets.push(acc);
+        Self {
+            widths,
+            offsets,
+            total: acc,
+        }
+    }
+
+    /// A copy with `column` set to `width`, clamped to
+    /// `[MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH]`. Offsets and total are
+    /// recomputed, so the header, body cells and horizontal scrollbar
+    /// stay aligned.
+    pub fn resized(&self, column: usize, width: f32) -> Self {
+        let mut widths = self.widths.clone();
+        if let Some(slot) = widths.get_mut(column) {
+            *slot = width.clamp(
+                f32::from(theme::MIN_COLUMN_WIDTH),
+                f32::from(theme::MAX_COLUMN_WIDTH),
+            );
+        }
+        Self::from_widths(widths)
+    }
+
     /// Columns intersecting `[scroll_x, scroll_x + viewport_w)`.
     pub fn visible(&self, scroll_x: f32, viewport_w: f32) -> Range<usize> {
         let n = self.widths.len();
@@ -280,16 +313,18 @@ fn warning_color(kind: WarningKind) -> gpui::Rgba {
 /// the clicked column and the mouse-down event so the view can tell a
 /// plain click (sort) from a modifier click (search scope). It uses
 /// the same `entity.update` closure pattern as the per-cell handlers.
-pub fn render_header<F>(
+pub fn render_header<F, G>(
     model: &GridModel,
     scroll_x: f32,
     viewport_w: f32,
     scoped_column: Option<usize>,
     sort: Option<(usize, bool)>,
     on_header_click: F,
+    on_resize_start: G,
 ) -> impl IntoElement
 where
     F: Fn(usize, &MouseDownEvent, &mut gpui::App) + Clone + 'static,
+    G: Fn(usize, &MouseDownEvent, &mut gpui::App) + Clone + 'static,
 {
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
@@ -304,6 +339,7 @@ where
         }
         let click = on_header_click.clone();
         let mut cell = div()
+            .relative()
             .flex_shrink_0()
             .w(model.layout.width_of(col))
             .px(theme::CELL_PAD_X)
@@ -319,6 +355,24 @@ where
         cell = cell.on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
             click(col, ev, app_cx);
         });
+        // A thin drag handle on the column's right edge. It claims the
+        // press so the header click (sort / scope) does not also fire.
+        let resize = on_resize_start.clone();
+        cell = cell.child(
+            div()
+                .absolute()
+                .right(px(0.))
+                .top(px(0.))
+                .h_full()
+                .w(px(5.))
+                .cursor_ew_resize()
+                .hover(|s| s.bg(theme::ACCENT))
+                .debug_selector(move || format!("header-resize-{col}"))
+                .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+                    app_cx.stop_propagation();
+                    resize(col, ev, app_cx);
+                }),
+        );
         cells.push(cell.child(label));
     }
 
@@ -723,6 +777,34 @@ mod tests {
         assert!(!should_highlight(&scoped, 0));
         assert!(should_highlight(&scoped, 2));
         assert!(!should_highlight(&scoped, 3));
+    }
+
+    /// A manual resize clamps to the min/max and recomputes offsets and
+    /// the total so header, body and scrollbar stay aligned.
+    #[test]
+    fn resized_clamps_and_recomputes_offsets() {
+        let layout = ColumnLayout::from_widths(vec![100.0, 200.0, 300.0]);
+        assert_eq!(layout.offsets, vec![0.0, 100.0, 300.0, 600.0]);
+        assert_eq!(layout.total, 600.0);
+
+        // Clamp low and high.
+        let shrunk = layout.resized(1, 1.0);
+        assert_eq!(shrunk.widths[1], f32::from(theme::MIN_COLUMN_WIDTH));
+        let grown = layout.resized(1, 100_000.0);
+        let max = f32::from(theme::MAX_COLUMN_WIDTH);
+        assert_eq!(grown.widths[1], max);
+        assert_eq!(grown.offsets[2], 100.0 + max);
+        assert_eq!(grown.total, 100.0 + max + 300.0);
+
+        // An in-range resize is exact and shifts later offsets.
+        let normal = layout.resized(0, 150.0);
+        assert_eq!(normal.widths, vec![150.0, 200.0, 300.0]);
+        assert_eq!(normal.offsets, vec![0.0, 150.0, 350.0, 650.0]);
+        assert_eq!(normal.total, 650.0);
+
+        // An out-of-range column leaves the layout unchanged.
+        let untouched = layout.resized(9, 500.0);
+        assert_eq!(untouched.widths, vec![100.0, 200.0, 300.0]);
     }
 
     /// The bounded visible-range cache returns identical text on a hit,
