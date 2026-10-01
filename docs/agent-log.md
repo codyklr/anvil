@@ -6987,3 +6987,65 @@ and the `describe` parenthesization rule.
 
 Iteration 10: split `ui/view.rs` into cohesive modules with no
 behaviour change.
+
+---
+
+## 2026-09-30 — Iteration 10: split ui/view.rs (part 1)
+
+### Context
+
+Tenth (and final planned) slice: `src/ui/view.rs` had grown to ~3,860
+lines. The task was a behaviour-neutral split following the existing
+`ui/view/{search,filter,ask,diagnostics}.rs` pattern. Candidate modules
+were tabs, file panel, inspector, and sorting.
+
+### Implemented
+
+- New `ui/view/sort.rs`: `view_rows`, `cycle_sort`, `kick_sort`,
+  `sort_label` (methods made `pub(super)` so `view.rs` and sibling
+  modules can call them).
+- New `ui/view/cell_detail.rs`: `toggle_cell_detail`,
+  `open_cell_detail`, `close_cell_detail`, `kick_cell_detail`,
+  `render_cell_detail`.
+- New `ui/view/inspector.rs`: `render_inspector`, `toggle_inspector`,
+  `kick_inspector`, plus the free helpers `metric_row` and
+  `render_column_stats`.
+- `view.rs` gained `mod cell_detail; mod inspector; mod sort;` and
+  dropped ~500 lines (3,859 -> 3,362). The methods were moved verbatim;
+  only their visibility changed.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **468 passed, 7 ignored**, unchanged from
+  before the refactor (no test file was edited; the whole suite is the
+  behaviour guard).
+- `cargo clippy --release --all-targets` — clean.
+
+### Tests added / changed
+
+None. This iteration is refactor-only and deliberately changes no
+behaviour, so the existing suite must pass unmodified.
+
+### Roadmap changes
+
+None (the split is not a roadmap checkbox).
+
+### Architecture changes
+
+`ARCHITECTURE.md` module tree lists the new submodules, and the
+functional-gaps note records that the tab strip / file panel / grid
+rendering are still in `view.rs`.
+
+### Issues / technical debt discovered
+
+- The split is partial: the tab strip, file panel, and grid/scrollbar
+  rendering remain in `view.rs`. They are coherent next extractions
+  but `group_documents` is referenced directly by `ui/view/tests.rs`,
+  so that move needs an import-path change in the test module.
+
+### Next recommended task
+
+Finish the `ui/view.rs` split (tabs, file panel, grid rendering) as a
+separate refactor-only iteration, then re-run the full suite.

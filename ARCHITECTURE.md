@@ -129,6 +129,9 @@ anvil/
 │   │   │   ├── goto.rs         # go-to-row bar: display-row jump
 │   │   │   ├── ask.rs          # Ask bar: preview, interpretation, apply
 │   │   │   ├── diagnostics.rs  # warnings panel + click-to-navigate
+│   │   │   ├── inspector.rs    # column inspector: scan lifecycle + panel
+│   │   │   ├── cell_detail.rs  # full-cell panel: cursor cell lifecycle
+│   │   │   ├── sort.rs         # sort cycle, background permutation, label
 │   │   │   └── tests.rs        # `#[cfg(test)]` UI + unit suite
 │   │   ├── grid.rs             # virtualized layout, header + row renderers
 │   │   ├── input.rs            # shared editable-text render/hit-test
@@ -1905,6 +1908,12 @@ Default builds exclude this stack. If both features are enabled, GLiNER
 takes precedence over the existing generative backend.
 
 ### Functional gaps
+
+- `ui/view.rs` is still the largest module (~3,360 lines). Iteration 10
+  moved the column inspector, full-cell panel, and sorting into
+  `ui/view/{inspector,cell_detail,sort}.rs`. The tab strip, file panel,
+  and grid/scrollbar rendering remain in `view.rs` and are the next
+  extraction candidates.
 
 - Selection (click / shift-click / click-and-drag with edge
   auto-scroll), keyboard navigation (arrow keys, Page Up/Down,
