@@ -3169,3 +3169,37 @@ async fn cell_detail_caps_a_huge_value(cx: &mut TestAppContext) {
         assert!(view.cell_detail_generation >= 1);
     });
 }
+
+/// With a filter active, the column inspector scans only the visible
+/// rows and reports that view's metrics.
+#[gpui::test]
+async fn inspector_scopes_to_the_filtered_view(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, country_document());
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "country == US".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.close_filter(cx);
+        view.selection.set(CellPos::new(0, 1));
+        view.toggle_inspector(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        let stats = view.inspector_stats.as_ref().expect("inspector stats");
+        // `country == US` keeps records 0 and 2 (amount 10 and 30).
+        assert_eq!(
+            stats.total_rows, 2,
+            "the inspector must scan the visible view, not the whole file"
+        );
+        assert_eq!(stats.min.as_deref(), Some("10"));
+        assert_eq!(stats.max.as_deref(), Some("30"));
+        assert!(view.view_rows().is_some());
+    });
+}

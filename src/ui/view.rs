@@ -25,12 +25,12 @@ use gpui::{
 };
 
 use anvil_core::{
-    apply_filter_expr, column_stats, describe_nl, find_ranges, infer_schema, parse_filter_expr,
-    parse_nl, reindex, sample_distinct, scan_encoding, search_records, sort_rows,
-    suggest_candidates, suggest_context, ArchiveSource, CellPos, ColumnIndex, ColumnStats,
-    DistinctCount, EncodingReport, FilterExpr, HeaderMode, IndexOptions, LoadPhase, LoadProgress,
-    LoadResult, LoadedDocument, NlColumn, NlResult, NlSchema, ParsedDocument, SearchOptions,
-    Selection, Slot, SortKind, SortOrder, SortSpec, StatsOptions,
+    apply_filter_expr, column_stats, column_stats_rows, describe_nl, find_ranges, infer_schema,
+    parse_filter_expr, parse_nl, reindex, sample_distinct, scan_encoding, search_records,
+    sort_rows, suggest_candidates, suggest_context, ArchiveSource, CellPos, ColumnIndex,
+    ColumnStats, DistinctCount, EncodingReport, FilterExpr, HeaderMode, IndexOptions, LoadPhase,
+    LoadProgress, LoadResult, LoadedDocument, NlColumn, NlResult, NlSchema, ParsedDocument,
+    SearchOptions, Selection, Slot, SortKind, SortOrder, SortSpec, StatsOptions,
 };
 
 use super::archive_picker;
@@ -475,6 +475,9 @@ pub struct MainView {
     inspector_stats: Option<Arc<ColumnStats>>,
     /// Bumped on every inspector request; stale results are discarded.
     inspector_generation: u64,
+    /// The `(filter_generation, sort_generation)` the current stats were
+    /// computed for, so a filter/sort change rescans the open inspector.
+    inspector_view_key: (u64, u64),
     /// Outstanding background column-stats task.
     inspector_task: Option<Task<()>>,
 
@@ -733,6 +736,7 @@ impl MainView {
             inspector_column: None,
             inspector_stats: None,
             inspector_generation: 0,
+            inspector_view_key: (0, 0),
             inspector_task: None,
             diagnostics_open: false,
             encoding_report: None,
@@ -1802,6 +1806,17 @@ impl MainView {
                 .into_any_element(),
         };
 
+        // Make it obvious what the numbers describe when a filter or sort
+        // is active; the scan is scoped to the visible rows then.
+        let scope_label = match self.view_rows() {
+            Some(rows) => format!(
+                "scoped to current view ({} of {} rows)",
+                format_count(rows.len() as u64),
+                format_count(self.model.as_ref().map(|m| m.row_count()).unwrap_or(0))
+            ),
+            None => "whole document".to_string(),
+        };
+
         div()
             .flex_shrink_0()
             .w(theme::INSPECTOR_WIDTH)
@@ -1812,6 +1827,14 @@ impl MainView {
             .border_l_1()
             .border_color(theme::BORDER)
             .child(header)
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(theme::TEXT_DIM)
+                    .child(scope_label),
+            )
             .child(
                 div()
                     .id("inspector-body")
@@ -2869,13 +2892,21 @@ impl MainView {
         let Some(column) = self.selection.cursor().map(|c| c.column_index) else {
             return;
         };
-        if self.inspector_column == Some(column) && self.inspector_stats.is_some() {
+        // Rescan when the column changes or when a filter/sort change has
+        // moved the view under the open inspector.
+        let view_key = (self.filter_generation, self.sort_generation);
+        if self.inspector_column == Some(column)
+            && self.inspector_stats.is_some()
+            && self.inspector_view_key == view_key
+        {
             return;
         }
         let Some(doc) = self.model.as_ref().map(|m| m.doc.clone()) else {
             return;
         };
+        let view_rows = self.view_rows();
         self.inspector_column = Some(column);
+        self.inspector_view_key = view_key;
         self.inspector_generation = self.inspector_generation.wrapping_add(1);
         let generation = self.inspector_generation;
         self.inspector_stats = None;
@@ -2883,7 +2914,16 @@ impl MainView {
         let executor = cx.background_executor().clone();
         let task = cx.spawn(async move |this, cx| {
             let stats = executor
-                .spawn(async move { column_stats(&doc, column, &StatsOptions::default()) })
+                .spawn(async move {
+                    // A filtered/sorted view is scanned on its own; only
+                    // the visible rows are counted, measured and sampled.
+                    match &view_rows {
+                        Some(rows) => {
+                            column_stats_rows(&doc, column, rows, &StatsOptions::default())
+                        }
+                        None => column_stats(&doc, column, &StatsOptions::default()),
+                    }
+                })
                 .await;
             this.update(cx, |view, cx| {
                 if view.inspector_generation != generation {
@@ -3040,6 +3080,8 @@ impl MainView {
                     return;
                 }
                 view.sort_rows = Some(Arc::new(sorted));
+                // A scoped inspector must reflect the new visible set.
+                view.kick_inspector(cx);
                 cx.notify();
             })
             .ok();

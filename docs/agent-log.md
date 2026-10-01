@@ -6846,3 +6846,69 @@ note BOM handling.
 
 Iteration 8d: scope the column inspector to the filtered/sorted view
 when one is active, and label it clearly.
+
+---
+
+## 2026-09-30 — Iteration 8d: scope the inspector to the current view
+
+### Context
+
+Final part of Iteration 8. The column inspector always scanned the whole
+document, so with a filter or sort active its counts, min/max and
+samples did not describe the rows the user was looking at.
+
+### Implemented
+
+- `schema::stats::stats_rows(doc, column, rows, options)` scans only the
+  supplied record indexes; `stats` is refactored onto a shared
+  `stats_scan` with an optional row list. Exported as
+  `column_stats_rows`.
+- The UI passes `view_rows()` (filtered/sorted) when present and the
+  whole document otherwise. `MainView.inspector_view_key` records
+  `(filter_generation, sort_generation)` so an open inspector rescans
+  when the view changes; the filter and sort completion paths now call
+  `kick_inspector`.
+- `render_inspector` labels the scope: "scoped to current view (N of M
+  rows)" when a filter or sort is active, "whole document" otherwise.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **460 passed, 7 ignored** (201 library, 172
+  binary, 86 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean.
+- `stats_rows_scopes_to_the_given_rows` asserts a two-row view yields
+  `total_rows == 2` with the view's min/max/samples, versus three for
+  the whole document; `stats_rows_empty_view_has_zero_rows` covers the
+  empty view.
+- `inspector_scopes_to_the_filtered_view` filters `country == US`, opens
+  the inspector on `amount`, and asserts `total_rows == 2`, min `10`,
+  max `30`.
+
+### Tests added / changed
+
+- `schema/stats.rs`: `stats_rows_scopes_to_the_given_rows`,
+  `stats_rows_empty_view_has_zero_rows`.
+- `ui/view/tests.rs`: `inspector_scopes_to_the_filtered_view`.
+
+### Roadmap changes
+
+- Milestone 3 column inspector: "The inspector scans the whole document,
+  not the filtered/sorted view" ticked.
+
+### Architecture changes
+
+`ARCHITECTURE.md` `schema::stats` description documents `stats_rows` and
+the UI scoping.
+
+### Issues / technical debt discovered
+
+- `infer_column` still samples the whole document, so a scoped view's
+  inferred type can reflect values that are filtered out. That only
+  selects numeric-vs-text comparison and is a separate follow-up.
+
+### Next recommended task
+
+Iteration 9: `FilterExpr::Not` with `NOT` parsing, `apply_expr`
+evaluation, and `describe` round-trip.

@@ -93,11 +93,35 @@ impl Default for StatsOptions {
     }
 }
 
-/// Compute the inspector metrics for `column`.
+/// Compute the inspector metrics for `column` over the whole document.
 pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> ColumnStats {
+    stats_scan(doc, column, None, options)
+}
+
+/// Compute the inspector metrics for `column` over `rows` only. `rows`
+/// are record indexes in display order (a filtered/sorted view), so the
+/// counts, min/max and samples describe exactly that view.
+pub fn stats_rows(
+    doc: &ParsedDocument,
+    column: usize,
+    rows: &[u64],
+    options: &StatsOptions,
+) -> ColumnStats {
+    stats_scan(doc, column, Some(rows), options)
+}
+
+fn stats_scan(
+    doc: &ParsedDocument,
+    column: usize,
+    rows: Option<&[u64]>,
+    options: &StatsOptions,
+) -> ColumnStats {
     let profile = infer_column(doc, column);
     let numeric = profile.column_type.is_numeric();
-    let total_rows = doc.record_count();
+    let total_rows = match rows {
+        Some(rows) => rows.len() as u64,
+        None => doc.record_count(),
+    };
 
     let mut non_empty = 0u64;
     let mut empty = 0u64;
@@ -109,7 +133,11 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
     let mut shortest: Option<(String, usize)> = None;
     let mut samples: Vec<String> = Vec::with_capacity(options.samples);
 
-    for row in 0..total_rows {
+    for position in 0..total_rows {
+        let row = match rows {
+            Some(rows) => rows[position as usize],
+            None => position,
+        };
         let Some(cell) = doc.cell(row, ColumnIndex(column)) else {
             continue;
         };
@@ -550,5 +578,42 @@ mod tests {
     fn sample_distinct_of_an_empty_column_is_empty() {
         let doc = doc_from(b"a,b\n1,\n2,\n");
         assert!(sample_distinct(&doc, 1, 100, 100).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+
+    fn doc_from(bytes: &[u8]) -> ParsedDocument {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scoped.csv");
+        std::fs::write(&path, bytes).expect("write");
+        let opened = crate::source::local::open_local(&path).expect("open");
+        crate::index_opened(opened)
+    }
+
+    /// `stats_rows` describes exactly the supplied view, not the whole
+    /// document, so the inspector matches a filtered/sorted grid.
+    #[test]
+    fn stats_rows_scopes_to_the_given_rows() {
+        let doc = doc_from(b"v,pad\na,a\nb,a\nc,a\n");
+        assert_eq!(stats(&doc, 0, &StatsOptions::default()).total_rows, 3);
+
+        let scoped = stats_rows(&doc, 0, &[0u64, 2], &StatsOptions::default());
+        assert_eq!(scoped.total_rows, 2);
+        assert_eq!(scoped.non_empty, 2);
+        assert_eq!(scoped.min.as_deref(), Some("a"));
+        assert_eq!(scoped.max.as_deref(), Some("c"));
+        assert_eq!(scoped.samples, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn stats_rows_empty_view_has_zero_rows() {
+        let doc = doc_from(b"v,pad\na,a\n");
+        let scoped = stats_rows(&doc, 0, &[], &StatsOptions::default());
+        assert_eq!(scoped.total_rows, 0);
+        assert_eq!(scoped.non_empty, 0);
+        assert_eq!(scoped.min, None);
     }
 }

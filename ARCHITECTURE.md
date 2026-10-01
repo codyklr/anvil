@@ -187,7 +187,11 @@ anvil/
 - `schema::stats` — `stats(doc, column, &StatsOptions) -> ColumnStats`
   scans one column for the inspector: counts, an exact-then-HLL
   [`DistinctCount`], duplicate count, min/max, longest/shortest,
-  samples, and the top-N frequent values. Every displayed value is the
+  samples, and the top-N frequent values. `stats` scans the whole
+  document; `stats_rows` scans only the supplied record indexes, which
+  the UI uses to scope the inspector to the active filtered/sorted
+  view (and it reruns the scan when that view changes). Every
+  displayed value is the
   exact cell value, padding included, and values that differ only in
   padding are counted as distinct (ADR 0003); `min`/`max` order text
   columns by exact bytes (case-sensitive, padding-preserving) and

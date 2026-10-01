@@ -71,6 +71,8 @@ impl MainView {
                 if view.sort_spec.is_some() {
                     view.kick_sort(cx);
                 }
+                // A scoped inspector must reflect the new visible set.
+                view.kick_inspector(cx);
                 cx.notify();
             })
             .ok();
@@ -91,6 +93,8 @@ impl MainView {
         self.filter_popup_open = false;
         // Re-sort the full set if a sort is active.
         self.kick_sort(cx);
+        // The inspector now describes the whole document again.
+        self.kick_inspector(cx);
         cx.notify();
     }
 

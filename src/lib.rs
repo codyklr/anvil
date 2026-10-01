@@ -45,7 +45,8 @@ pub use query::suggest::{
 };
 pub use query::{find_ranges, search as search_records, SearchOptions};
 pub use schema::stats::{
-    sample_distinct, stats as column_stats, ColumnStats, DistinctCount, StatsOptions, ValueCount,
+    sample_distinct, stats as column_stats, stats_rows as column_stats_rows, ColumnStats,
+    DistinctCount, StatsOptions, ValueCount,
 };
 pub use schema::{infer as infer_schema, infer_column, ColumnProfile, ColumnType};
 pub use selection::{CellPos, Selection};

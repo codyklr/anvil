@@ -414,8 +414,12 @@ column-level metadata.
   switches to a dependency-free HyperLogLog sketch (1024 registers,
   with the small-range linear-counting correction) and reports
   `DistinctCount::Approximate`.
-- [ ] The inspector scans the whole document, not the filtered/sorted
-  view. Scoping stats to the current view is a follow-up.
+- [x] The inspector scans the whole document, not the filtered/sorted
+  view. Iteration 8d: `schema::stats::stats_rows` scans just the
+  supplied record indexes, and the UI passes `view_rows()` when a filter
+  or sort is active (rescanning on a view change via
+  `inspector_view_key`). The panel labels the scope
+  ("scoped to current view (N of M rows)" / "whole document").
 
 #### Tests
 
