@@ -619,7 +619,7 @@ async fn filter_suggestions_arrow_and_enter_accept(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     cx.update_window_entity(&view, |view, _, _| {
-        assert_eq!(view.filter_suggestions.len(), 4);
+        assert_eq!(view.filter_suggestions.len(), 5);
         assert_eq!(view.filter_suggestion_selected, 0);
     });
 
@@ -3201,5 +3201,29 @@ async fn inspector_scopes_to_the_filtered_view(cx: &mut TestAppContext) {
         assert_eq!(stats.min.as_deref(), Some("10"));
         assert_eq!(stats.max.as_deref(), Some("30"));
         assert!(view.view_rows().is_some());
+    });
+}
+
+/// The filter bar accepts a `NOT` expression and applies it through the
+/// normal background filter path.
+#[gpui::test]
+async fn filter_bar_applies_not(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, country_document());
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "NOT country == US".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(
+            view.filter_rows.as_ref().map(|rows| rows.as_slice()),
+            Some(&[1u64][..]),
+            "NOT country == US should keep only the UK row"
+        );
+        assert!(view.filter_error.is_none());
     });
 }

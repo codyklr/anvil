@@ -1191,6 +1191,9 @@ pub fn describe(expr: &FilterExpr, headers: &[String]) -> String {
         FilterExpr::AllColumn(filter) => describe_row_scope("all", filter),
         FilterExpr::And(a, b) => format!("{} AND {}", describe(a, headers), describe(b, headers)),
         FilterExpr::Or(a, b) => format!("({} OR {})", describe(a, headers), describe(b, headers)),
+        // Always parenthesize the operand so a nested `And` / `Or`
+        // round-trips as `NOT (a AND b)` rather than `NOT a AND b`.
+        FilterExpr::Not(inner) => format!("NOT ({})", describe(inner, headers)),
     }
 }
 
@@ -1356,6 +1359,26 @@ mod tests {
             let parsed = crate::query::filter::parse_expr(text, &headers, 2).unwrap();
             let rendered = describe(&parsed, &headers);
             let reparsed = crate::query::filter::parse_expr(&rendered, &headers, 2).unwrap();
+            assert_eq!(parsed, reparsed, "{text} -> {rendered}");
+        }
+    }
+
+    #[test]
+    fn describe_round_trips_not() {
+        let headers = vec![
+            "country".to_string(),
+            "amount".to_string(),
+            "status".to_string(),
+        ];
+        for text in [
+            "NOT country == US",
+            "NOT (country == US OR amount > 5)",
+            "NOT any empty",
+            "country == US AND NOT amount > 5",
+        ] {
+            let parsed = crate::query::filter::parse_expr(text, &headers, 3).unwrap();
+            let rendered = describe(&parsed, &headers);
+            let reparsed = crate::query::filter::parse_expr(&rendered, &headers, 3).unwrap();
             assert_eq!(parsed, reparsed, "{text} -> {rendered}");
         }
     }

@@ -101,6 +101,9 @@ pub enum FilterExpr {
     AllColumn(Filter),
     And(Box<FilterExpr>, Box<FilterExpr>),
     Or(Box<FilterExpr>, Box<FilterExpr>),
+    /// `NOT <factor>`: the factor's matches are inverted. Binds tighter
+    /// than `AND`, so `NOT a AND b` is `(NOT a) AND b`.
+    Not(Box<FilterExpr>),
 }
 
 /// Parse a one-line filter expression.
@@ -280,6 +283,17 @@ fn keyword_of(token: &Token) -> Option<bool> {
     }
 }
 
+/// True for an unquoted `NOT` (case-insensitive).
+fn is_not_keyword(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Word {
+            text,
+            quoted: false,
+        } if text.eq_ignore_ascii_case("not")
+    )
+}
+
 /// Split `input` into tokens. `(` and `)` are standalone even when
 /// adjacent to a word. A double-quoted run becomes one word with the
 /// quotes removed and `\"` unescaped; an unterminated quote is an error.
@@ -401,6 +415,11 @@ impl Parser<'_> {
     }
 
     fn parse_factor(&mut self) -> Result<FilterExpr, String> {
+        if self.peek().cloned().as_ref().is_some_and(is_not_keyword) {
+            self.pos += 1;
+            let inner = self.parse_factor()?;
+            return Ok(FilterExpr::Not(Box::new(inner)));
+        }
         match self.peek().cloned() {
             Some(Token::LParen) => {
                 self.pos += 1;
@@ -433,7 +452,9 @@ impl Parser<'_> {
             // of input, so `city == New York AND ...` keeps the space.
             while let Some(token) = self.tokens.get(self.pos).cloned() {
                 match token {
-                    Token::Word { text, .. } if keyword_of(&token).is_none() => {
+                    Token::Word { text, .. }
+                        if keyword_of(&token).is_none() && !is_not_keyword(&token) =>
+                    {
                         parts.push(text);
                         self.pos += 1;
                     }
@@ -516,6 +537,7 @@ enum PreparedExpr {
     AllColumn(Prepared),
     And(Box<PreparedExpr>, Box<PreparedExpr>),
     Or(Box<PreparedExpr>, Box<PreparedExpr>),
+    Not(Box<PreparedExpr>),
 }
 
 impl PreparedExpr {
@@ -530,6 +552,7 @@ impl PreparedExpr {
             FilterExpr::Or(a, b) => {
                 PreparedExpr::Or(Box::new(Self::new(a)), Box::new(Self::new(b)))
             }
+            FilterExpr::Not(inner) => PreparedExpr::Not(Box::new(Self::new(inner))),
         }
     }
 
@@ -547,6 +570,7 @@ impl PreparedExpr {
             }
             PreparedExpr::And(a, b) => a.matches(doc, row) && b.matches(doc, row),
             PreparedExpr::Or(a, b) => a.matches(doc, row) || b.matches(doc, row),
+            PreparedExpr::Not(inner) => !inner.matches(doc, row),
         }
     }
 }
@@ -971,6 +995,61 @@ mod tests {
                 value: "1".into(),
             })
         );
+    }
+
+    #[test]
+    fn expr_not_inverts_a_predicate() {
+        let doc = parse_csv("country,amount\nUS,10\nUK,20\nUS,30\n");
+        assert_eq!(apply_expr(&doc, &expr("NOT country == US", &doc)), vec![1]);
+        // The keyword is case-insensitive.
+        assert_eq!(apply_expr(&doc, &expr("not country == US", &doc)), vec![1]);
+    }
+
+    #[test]
+    fn expr_not_binds_tighter_than_and() {
+        // NOT a == 1 AND b == 3  ==  (NOT a == 1) AND b == 3
+        let doc = parse_csv("a,b\n1,3\n2,9\n2,3\n");
+        assert_eq!(
+            expr("NOT a == 1 AND b == 3", &doc),
+            FilterExpr::And(
+                Box::new(FilterExpr::Not(Box::new(FilterExpr::Predicate(Filter {
+                    column: 0,
+                    op: FilterOp::Eq,
+                    value: "1".into(),
+                })))),
+                Box::new(FilterExpr::Predicate(Filter {
+                    column: 1,
+                    op: FilterOp::Eq,
+                    value: "3".into(),
+                })),
+            )
+        );
+        assert_eq!(
+            apply_expr(&doc, &expr("NOT a == 1 AND b == 3", &doc)),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn expr_not_applies_to_a_parenthesized_group() {
+        let doc = parse_csv("a,b\n1,9\n1,3\n2,3\n2,9\n");
+        // NOT (a == 1 OR b == 3)
+        assert_eq!(
+            apply_expr(&doc, &expr("NOT (a == 1 OR b == 3)", &doc)),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn expr_not_requires_a_factor() {
+        let doc = parse_csv("a,b\n1,2\n");
+        let headers = &doc.meta.headers;
+        let count = doc.column_count();
+        assert!(parse_expr("NOT", headers, count).is_err());
+        assert!(parse_expr("a == 1 AND NOT", headers, count).is_err());
+        // `not` is a value keyword boundary, so an unquoted value `not`
+        // is rejected (quote it instead).
+        assert!(parse_expr("a == not", headers, count).is_err());
     }
 
     #[test]

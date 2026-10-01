@@ -239,11 +239,12 @@ anvil/
   (`documents: Vec<DocumentSnapshot>` + `active: Option<usize>`);
   see "Multi-document / tabs" below.
 
-- `query::filter` — `FilterExpr` is an AND/OR tree with parentheses
-  and standard precedence; `parse_expr` is a recursive-descent parser
-  over a small tokenizer, and `apply_expr` precomputes each predicate
-  once and short-circuits per row. Row-scope predicates (`any` / `all`
-  over `empty` / `notempty`) belong to the same grammar.
+- `query::filter` — `FilterExpr` is an AND/OR/NOT tree with
+  parentheses and standard precedence (`NOT` binds tighter than `AND`,
+  which binds tighter than `OR`); `parse_expr` is a recursive-descent
+  parser over a small tokenizer, and `apply_expr` precomputes each
+  predicate once and short-circuits per row. Row-scope predicates
+  (`any` / `all` over `empty` / `notempty`) belong to the same grammar.
 - `query::suggest` — filter autocomplete. It reads the slot the caret
   sits in (column / operator / value) and offers document-derived
   completions.
@@ -2215,10 +2216,12 @@ drift. Cmd/Ctrl+F opens the bar (the grid's
   `Cell` borrow, short-circuiting on the first match / mismatch.
   `parse` turns a one-line single predicate (`<column> <op>
   [value]`, where column is a header name, a 0-based index, or `#N`)
-  into a `Filter`. `FilterExpr` is an AND/OR tree: `parse_expr` is a
-  recursive-descent parser over a small tokenizer (`(`, `)`, unquoted
-  case-insensitive `AND`/`OR`, and words; quoted values may contain
-  keywords), with AND binding tighter than OR. `apply` evaluates a
+  into a `Filter`. `FilterExpr` is an AND/OR/NOT tree: `parse_expr` is
+  a recursive-descent parser over a small tokenizer (`(`, `)`, unquoted
+  case-insensitive `AND`/`OR`/`NOT`, and words; quoted values may
+  contain keywords), with `NOT` binding tighter than AND and AND
+  tighter than OR. `describe` renders `NOT` with a parenthesized
+  operand so every tree round-trips. `apply` evaluates a
   slice of filters (AND) over the `ParsedDocument` and returns the
   matching record indexes in order; `apply_expr` evaluates any tree by
   preparing each predicate once and short-circuiting per row; both

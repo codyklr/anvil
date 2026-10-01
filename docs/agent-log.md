@@ -6912,3 +6912,78 @@ the UI scoping.
 
 Iteration 9: `FilterExpr::Not` with `NOT` parsing, `apply_expr`
 evaluation, and `describe` round-trip.
+
+---
+
+## 2026-09-30 — Iteration 9: filter NOT
+
+### Context
+
+Ninth slice of the improvement run (branch
+`agent/iterative-improvements`). The filter grammar had `AND` / `OR` and
+row-scope predicates but no general negation; the Milestone 6
+prerequisite had been deferred.
+
+### Implemented
+
+- `FilterExpr::Not(Box<FilterExpr>)`; `is_not_keyword` recognises an
+  unquoted case-insensitive `NOT`; `parse_factor` parses it as a prefix
+  operator binding tighter than `AND` (`NOT a AND b` is
+  `(NOT a) AND b`). The predicate value loop now treats `not` as a
+  keyword boundary, so a value literally named `not` must be quoted
+  (matching `AND` / `OR`).
+- `PreparedExpr::Not` evaluates as `!inner.matches(...)`.
+- `nl::describe` renders `NOT` with a parenthesized operand, so
+  `NOT (a AND b)` round-trips instead of reparsing as `(NOT a) AND b`.
+- `query::suggest`: a typed `NOT` keeps the column slot, and `NOT` is
+  offered as a column-slot completion after the columns (preserving the
+  existing suggestion ordering).
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **468 passed, 7 ignored** (208 library, 173
+  binary, 86 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean.
+- Parser/eval tests cover inversion, case-insensitivity, precedence
+  over `AND`, parenthesized groups, and missing-factor errors.
+- `describe_round_trips_not` reparses `NOT` trees (including
+  `NOT (a OR b)` and `NOT any empty`).
+- Suggest tests cover `NOT ` staying in the column slot, `NOT country `
+  moving to the operator slot, and `NOT` being offered/prefix-matched.
+- `filter_bar_applies_not` types `NOT country == US` in the real filter
+  bar and asserts only the UK row remains.
+
+### Tests added / changed
+
+- `query/filter.rs`: `expr_not_inverts_a_predicate`,
+  `expr_not_binds_tighter_than_and`,
+  `expr_not_applies_to_a_parenthesized_group`,
+  `expr_not_requires_a_factor`.
+- `query/nl.rs`: `describe_round_trips_not`.
+- `query/suggest.rs`: `not_prefix_keeps_the_column_slot`,
+  `column_slot_offers_not`.
+- `ui/view/tests.rs`: `filter_bar_applies_not`; updated the suggestion
+  count assertion (4 -> 5) now that `NOT` is a column-slot candidate.
+
+### Roadmap changes
+
+- Milestone 6 prerequisites: `FilterExpr::Not` ticked (holds); the
+  Tier 1 "general not waits" note updated to say `NOT` is available.
+
+### Architecture changes
+
+`ARCHITECTURE.md` `query::filter` descriptions updated to AND/OR/NOT
+and the `describe` parenthesization rule.
+
+### Issues / technical debt discovered
+
+- None new. The Tier 1 NL parser still negates through negating
+  operators; wiring `NOT` into the NL rules is Milestone 6 work and was
+  explicitly out of scope.
+
+### Next recommended task
+
+Iteration 10: split `ui/view.rs` into cohesive modules with no
+behaviour change.

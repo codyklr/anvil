@@ -792,11 +792,12 @@ local model only when the rules cannot cleanly resolve the phrase. See
 ### Tasks
 
 #### Prerequisites
-- [ ] `FilterExpr::Not`, plus `parse_expr` support for `NOT` / `not` and
-  `apply_expr` evaluation; display in the filter bar. Deferred: Tier 1
-  handles negation only through negating operators (`is not`,
-  `not contains`, `not empty`). Row-scope `any` / `all` landed without
-  a general `NOT`.
+- [x] `FilterExpr::Not`, plus `parse_expr` support for `NOT` / `not` and
+  `apply_expr` evaluation; display in the filter bar. Iteration 9:
+  `NOT` is a case-insensitive prefix operator that binds tighter than
+  `AND` (`NOT a AND b` is `(NOT a) AND b`), parenthesized operands
+  round-trip via `describe`, and the autocomplete offers `NOT` in the
+  column slot and keeps the column slot after a typed `NOT`.
 - [~] Column alias map. `NlSchema::aliases` is accepted and tested, so
   the parser is alias-aware; a user-configurable alias file is still
   open.
@@ -811,7 +812,7 @@ local model only when the rules cannot cleanly resolve the phrase. See
   then a low-confidence raw fallback.
 - [x] Conjunctions: "and" -> `And`, "or" -> `Or`; a bare value after a
   conjunction reuses the previous column (`status is failed or`
-  `refunded`). General `not` waits on `FilterExpr::Not`.
+  `refunded`). General `not` is the boolean `FilterExpr::Not`.
 - [x] `NlResult` returns the `FilterExpr`, unmatched spans, and a
   `clean` flag for the escalation contract.
 - [x] 16 unit tests: a phrase table plus ambiguous and unparseable

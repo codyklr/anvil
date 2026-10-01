@@ -195,9 +195,15 @@ pub fn context(
         match tok.kind {
             TokKind::Word => match state {
                 State::Column => {
-                    state = State::Operator {
-                        column: resolve_column(&tok.text, headers, column_count).ok(),
-                    };
+                    if tok.text.eq_ignore_ascii_case("not") {
+                        // `NOT` is a prefix operator; the next word is the
+                        // column of the negated predicate.
+                        state = State::Column;
+                    } else {
+                        state = State::Operator {
+                            column: resolve_column(&tok.text, headers, column_count).ok(),
+                        };
+                    }
                 }
                 State::Operator { column } => {
                     if let Some(op) = FilterOp::parse(&tok.text) {
@@ -278,6 +284,10 @@ pub fn candidates(
                 let label = column_label(headers, i);
                 push_scored(&mut scored, &partial_lower, &label);
             }
+            // `NOT <predicate>` is a valid start (or a valid factor after
+            // `AND` / `OR` / `(`). Offered after the columns so the
+            // existing ordering is unchanged.
+            push_scored(&mut scored, &partial_lower, "NOT");
         }
         Slot::Operator { .. } => {
             for op in OPERATORS {
@@ -349,6 +359,23 @@ fn push_scored(scored: &mut Vec<(u8, usize, String)>, partial_lower: &str, text:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_prefix_keeps_the_column_slot() {
+        let c = end("NOT ");
+        assert_eq!(c.slot, Slot::Column);
+        assert!(candidates(&c, &headers(), 3, None).contains(&"country".to_string()));
+        // After the negated column, the operator slot is next.
+        let c = end("NOT country ");
+        assert_eq!(c.slot, Slot::Operator { column: Some(0) });
+    }
+
+    #[test]
+    fn column_slot_offers_not() {
+        let items = candidates(&end(""), &headers(), 3, None);
+        assert!(items.contains(&"NOT".to_string()));
+        assert_eq!(candidates(&end("no"), &headers(), 3, None), vec!["NOT"]);
+    }
 
     fn headers() -> Vec<String> {
         vec!["country".into(), "amount".into(), "status".into()]
