@@ -720,9 +720,12 @@ make what exists feel finished.
   the filter `empty` operator currently both treat it as empty, which
   conflicts with the fidelity rule now that a value holds bytes and is
   displayed as-is.
-- [ ] Add an affordance to reveal the full value of a cell that the grid
+- [x] Add an affordance to reveal the full value of a cell that the grid
   has elided, so a user never needs to copy a truncated-looking cell to
-  read it.
+  read it. Cmd/Ctrl+Enter toggles a right-hand **Cell** panel showing
+  the cursor cell's exact (escaped) value. The read runs on the
+  background executor and is capped at 32 KiB, with the panel stating
+  how many bytes were shown when it caps; the panel follows the cursor.
 
 #### Diagnostics UI
 

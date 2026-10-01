@@ -6564,3 +6564,87 @@ horizontal scroll and scrollbar, and per-tab widths.
 
 Iteration 7: reveal the full exact value of a cell (Cmd/Ctrl+Enter or
 a cell detail panel), handling multi-MB cells without freezing.
+
+---
+
+## 2026-09-30 — Iteration 7: reveal the full cell value
+
+### Context
+
+Seventh slice of the improvement run (branch
+`agent/iterative-improvements`). The grid elides long values to the
+column width; the only way to read the full value was to copy it.
+The roadmap wanted a reveal affordance that handles multi-MB cells
+without freezing the UI and says when output is capped.
+
+### Implemented
+
+- `parser::exact_string_capped(bytes, max_bytes)`: byte-faithful escaped
+  text for at most `max_bytes`, returning a truncation flag. If the
+  whole cell is valid UTF-8 the prefix backs off to a character
+  boundary; otherwise the prefix is escaped exactly like
+  `exact_string` (`\\`, `\xNN`). Exported from `anvil_core`.
+- `commands::Action::RevealCell`, bound to Cmd/Ctrl+Enter.
+- `MainView` full-cell panel: `cell_detail_open`, `cell_detail`,
+  `cell_detail_generation`, `cell_detail_task`. `kick_cell_detail`
+  reads the cursor cell on the background executor, capped at 32 KiB,
+  and is generation-guarded so rapid cursor moves discard stale reads.
+  `render_cell_detail` is a right-hand panel (like the inspector) that
+  shows the header/row/col, the byte size, a "(capped)" note when
+  truncated, and the exact value in a scroll area. It follows the
+  cursor because `kick_inspector` (called on every selection change)
+  now also refreshes it; Cmd/Ctrl+Enter toggles it, and the panel has a
+  close `×`. `grid_viewport_width` subtracts the panel width so the
+  grid reflows.
+- `theme::CELL_DETAIL_WIDTH` (360 px).
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **451 passed, 7 ignored** (196 library, 171
+  binary, 83 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean.
+- `exact_string_capped_preserves_prefix_and_flags_truncation` covers the
+  exact cap, a mid-character cut, and invalid-byte escaping.
+- `cell_detail_shows_exact_value` drives Cmd/Ctrl+Enter through the
+  real grid focus path and asserts the panel holds the exact value.
+- `cell_detail_caps_a_huge_value` loads a 100 KiB cell, opens the panel
+  and asserts `truncated` with exactly 32 KiB of text and the true
+  byte length.
+- **Not verified:** no manual GUI run; the panel is exercised by the
+  headless UI tests only.
+
+### Tests added / changed
+
+- `tests/core.rs`:
+  `exact_string_capped_preserves_prefix_and_flags_truncation`.
+- `ui/commands.rs`: `reveal_cell_chord`,
+  `plain_enter_is_not_reveal_cell`.
+- `ui/view/tests.rs`: `cell_detail_shows_exact_value`,
+  `cell_detail_caps_a_huge_value`.
+
+### Roadmap changes
+
+- Milestone 5 data fidelity: "Add an affordance to reveal the full value
+  of a cell that the grid has elided" ticked.
+
+### Architecture changes
+
+`ARCHITECTURE.md` byte-faithful invariant 12 now mentions
+`exact_string_capped` and the 32 KiB panel cap; the UI component list
+documents the panel and the `ui::commands` action list includes
+`RevealCell`.
+
+### Issues / technical debt discovered
+
+- The panel refreshes through `kick_inspector`, which means opening the
+  inspector also triggers a (guarded) cell read. Harmless but a little
+  indirect; a dedicated selection-change hook would be cleaner.
+- The 32 KiB cap is a constant; it is not user-configurable. The panel
+  labels truncation, so the limitation is visible.
+
+### Next recommended task
+
+Iteration 8a: make text sorting and `min`/`max` compare exact bytes
+with a deterministic tiebreak, starting from a failing test.

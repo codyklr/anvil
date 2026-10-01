@@ -239,6 +239,39 @@ pub fn exact_string(bytes: &[u8]) -> Cow<'_, str> {
     }
 }
 
+/// Byte-faithful escaped text for at most the first `max_bytes` of
+/// `bytes`. Returns the text and whether any bytes were dropped.
+///
+/// Used by the full-cell viewer so a multi-MB cell cannot force the UI
+/// to shape megabytes of text. The escaping rules match [`exact_string`]:
+/// if the whole slice is valid UTF-8 the prefix is backed off to a
+/// character boundary so the last shown character is intact; otherwise
+/// the prefix is escaped with the same `\xNN` form (a cut inside an
+/// invalid run is safe because those bytes are displayed as escapes).
+/// The caller is responsible for reporting the truncation.
+pub fn exact_string_capped(bytes: &[u8], max_bytes: usize) -> (Cow<'_, str>, bool) {
+    if bytes.len() <= max_bytes {
+        return (exact_string(bytes), false);
+    }
+    let prefix = &bytes[..max_bytes];
+    if let Ok(valid) = std::str::from_utf8(prefix) {
+        return (Cow::Borrowed(valid), true);
+    }
+    if std::str::from_utf8(bytes).is_ok() {
+        // The whole slice is valid UTF-8, so the cut split a multi-byte
+        // character. Back off to the boundary (at most 3 bytes).
+        let mut end = max_bytes;
+        while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
+            end -= 1;
+        }
+        return (
+            Cow::Borrowed(std::str::from_utf8(&bytes[..end]).unwrap_or_default()),
+            true,
+        );
+    }
+    (Cow::Owned(escape_invalid_utf8(prefix)), true)
+}
+
 /// Copy the valid parts of `text` into `out`, doubling literal
 /// backslashes so escaped output stays unambiguous.
 fn push_valid(out: &mut String, text: &str) {

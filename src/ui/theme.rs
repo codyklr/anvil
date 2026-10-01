@@ -75,6 +75,8 @@ pub const MIN_COLUMN_WIDTH: Pixels = px(48.);
 /// Upper bound for a manually resized column. Wider than the automatic
 /// `MAX_AUTO_WIDTH` so a user can deliberately stretch a column.
 pub const MAX_COLUMN_WIDTH: Pixels = px(1200.);
+/// Width of the right-hand full-cell detail panel.
+pub const CELL_DETAIL_WIDTH: Pixels = px(360.);
 /// Maximum number of columns whose width we actually measure. Beyond this
 /// we use the default and let virtualization hide the cost.
 pub const MAX_MEASURED_COLUMNS: usize = 4096;

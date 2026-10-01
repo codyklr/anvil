@@ -68,6 +68,9 @@ pub(super) enum Action {
     /// Open a file via the same path as the toolbar **Open…** button
     /// (Cmd/Ctrl+O).
     OpenFile,
+    /// Show the full exact value of the cursor cell in the detail panel
+    /// (Cmd/Ctrl+Enter).
+    RevealCell,
 }
 
 /// Translate a keystroke into an [`Action`], or `None` when the chord is
@@ -115,6 +118,10 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
 
     if key == "o" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
         return Some(Action::OpenFile);
+    }
+
+    if key == "enter" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::RevealCell);
     }
 
     // Cmd/Ctrl+Home / Cmd/Ctrl+End jump to the first / last row while
@@ -496,5 +503,20 @@ mod tests {
     #[test]
     fn plain_o_is_not_open_file() {
         assert_eq!(act("o"), None);
+    }
+
+    #[test]
+    fn reveal_cell_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-enter"
+        } else {
+            "ctrl-enter"
+        };
+        assert_eq!(act(chord), Some(Action::RevealCell));
+    }
+
+    #[test]
+    fn plain_enter_is_not_reveal_cell() {
+        assert_eq!(act("enter"), None);
     }
 }

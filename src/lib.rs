@@ -25,8 +25,8 @@ pub use parser::indexing::{
     IndexOptions, IndexResult, DEFAULT_MAX_RECORD_BYTES,
 };
 pub use parser::{
-    column_label, exact_string, Cell, Cells, ColumnIndex, HeaderMode, ParseMeta, ParseWarning,
-    ParsedDocument, WarningKind,
+    column_label, exact_string, exact_string_capped, Cell, Cells, ColumnIndex, HeaderMode,
+    ParseMeta, ParseWarning, ParsedDocument, WarningKind,
 };
 pub use progress::{LoadPhase, LoadProgress, ProgressSink};
 pub use query::filter::{

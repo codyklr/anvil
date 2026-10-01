@@ -218,7 +218,7 @@ anvil/
   (`MoveCursor`, `NextCell`, `Copy`, `Escape`, `OpenSearch`,
   `NextMatch`, `ToggleFilePanel`, `OpenFilter`, `OpenAsk`,
   `ToggleInspector`, `ToggleDiagnostics`, `SelectAll`, `OpenGoToRow`,
-  `OpenFile`), with
+  `OpenFile`, `RevealCell`), with
   unit tests; no window or view state dependencies.
 - `ui::view` — toolbar, tab strip, drag/drop, archive picker
   overlay, search bar overlay, status bar (with copy / error /
@@ -252,6 +252,10 @@ anvil/
   by the search, filter, Ask and go-to-row bars. `text_edit` holds the
   GPUI-free
   single-line buffer and caret logic; `input` renders and hit-tests it.
+- Full-cell **Cell** panel (Cmd/Ctrl+Enter, `render_cell_detail` in
+  `ui::view`): reads the cursor cell on the background executor with
+  `exact_string_capped` (32 KiB render cap, generation-guarded) and
+  shows the exact value.
 - `ui::view::ask` — the Ask bar: live preview of the parsed filter,
   `Ctrl/Cmd+Enter` escalation to a Tier 2 backend, and `Enter` to hand
   the expression to the filter bar, where it stays editable.
@@ -2070,7 +2074,10 @@ never use them for display or clipboard. This covers the grid, the
 inspector, the clipboard, `--probe` sample rows and the header row
 (`ParseMeta.headers` is built with `exact_string`). Grid ellipsis
 (`truncate()`) is a layout concern and never changes the underlying
-value. See ADR 0003; this invariant has regression tests in
+value. The full-cell panel uses `exact_string_capped`, which returns
+the same escaped form for at most the first 32 KiB so a multi-MB cell
+cannot force the UI to shape megabytes of text; the panel reports the
+cap. See ADR 0003; this invariant has regression tests in
 `tests/core.rs` and `schema::stats`.
 
 ## Planned Architectural Evolution

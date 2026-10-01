@@ -1644,3 +1644,35 @@ fn load_without_progress_still_succeeds() {
         LoadResult::NeedArchiveChoice(_) => panic!("direct file should be ready"),
     }
 }
+
+/// `exact_string_capped` keeps byte-faithful escaping for the prefix it
+/// returns, backs off a UTF-8 cut to a character boundary, and reports
+/// truncation.
+#[test]
+fn exact_string_capped_preserves_prefix_and_flags_truncation() {
+    let (text, truncated) = anvil_core::exact_string_capped(b"hello", 10);
+    assert_eq!(text.as_ref(), "hello");
+    assert!(!truncated);
+
+    // Exactly the cap is not truncated.
+    let (text, truncated) = anvil_core::exact_string_capped(b"abc", 3);
+    assert_eq!(text.as_ref(), "abc");
+    assert!(!truncated);
+
+    // A cut inside a multi-byte character backs off to its start.
+    let emoji = "a\u{1F600}b";
+    let (text, truncated) = anvil_core::exact_string_capped(emoji.as_bytes(), 2);
+    assert!(truncated);
+    assert_eq!(text.as_ref(), "a");
+
+    // Invalid bytes keep the escaped form for the prefix.
+    let bytes = [b'a', 0xff, b'b'];
+    let (text, truncated) = anvil_core::exact_string_capped(&bytes, 2);
+    assert!(truncated);
+    assert_eq!(
+        text.as_ref(),
+        anvil_core::exact_string(&bytes[..2]).as_ref()
+    );
+    // The escaped prefix is valid UTF-8 text.
+    assert!(std::str::from_utf8(text.as_ref().as_bytes()).is_ok());
+}

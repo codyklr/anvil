@@ -103,6 +103,23 @@ impl ProgressTracker {
     }
 }
 
+/// How many bytes of a cell the full-value panel will escape and shape.
+/// A multi-MB cell is still bounded work; the panel reports the cap.
+const CELL_DETAIL_CAP: usize = 32 * 1024;
+
+/// The full exact value of one cell, as shown in the cell detail panel.
+struct CellDetail {
+    record: u64,
+    column: usize,
+    /// Header name (or `colN` for a headerless document).
+    label: String,
+    /// At most `CELL_DETAIL_CAP` bytes of escaped text.
+    text: String,
+    /// The cell's true byte length before capping.
+    total_bytes: u64,
+    truncated: bool,
+}
+
 /// Per-document state captured when a tab is no longer active and
 /// restored when the user switches back to it. The fields mirror
 /// the corresponding live fields on `MainView` so render and test
@@ -625,6 +642,16 @@ pub struct MainView {
     progress_generation: u64,
     /// Outstanding progress poller.
     progress_task: Option<Task<()>>,
+
+    /// Whether the full-cell detail panel is open (Cmd/Ctrl+Enter).
+    cell_detail_open: bool,
+    /// The cursor cell's full value, or `None` while the read is in
+    /// flight or before the panel first opens.
+    cell_detail: Option<Arc<CellDetail>>,
+    /// Discards stale cell reads when the cursor moves quickly.
+    cell_detail_generation: u64,
+    /// Outstanding background cell-read task.
+    cell_detail_task: Option<Task<()>>,
 }
 
 /// A Tier 2 interpreter: phrase + schema + value source to an expression.
@@ -767,6 +794,10 @@ impl MainView {
             progress_snapshot: None,
             progress_generation: 0,
             progress_task: None,
+            cell_detail_open: false,
+            cell_detail: None,
+            cell_detail_generation: 0,
+            cell_detail_task: None,
         }
     }
 
@@ -1896,6 +1927,9 @@ impl MainView {
         if self.diagnostics_open && self.model.is_some() {
             width -= f32::from(theme::DIAGNOSTICS_WIDTH);
         }
+        if self.cell_detail_open && self.model.is_some() {
+            width -= f32::from(theme::CELL_DETAIL_WIDTH);
+        }
         width.max(0.0)
     }
 
@@ -2441,6 +2475,7 @@ impl MainView {
             Action::SelectAll => self.select_all(cx),
             Action::OpenGoToRow => self.open_goto(cx),
             Action::OpenFile => self.pick_file(cx),
+            Action::RevealCell => self.toggle_cell_detail(cx),
         }
     }
 
@@ -2671,11 +2706,163 @@ impl MainView {
         cx.notify();
     }
 
+    // ---- full-cell detail panel ------------------------------------------
+
+    /// Toggle the full-cell panel (Cmd/Ctrl+Enter).
+    fn toggle_cell_detail(&mut self, cx: &mut Context<Self>) {
+        if self.cell_detail_open {
+            self.close_cell_detail(cx);
+        } else {
+            self.open_cell_detail(cx);
+        }
+    }
+
+    fn open_cell_detail(&mut self, cx: &mut Context<Self>) {
+        if self.model.is_none() {
+            return;
+        }
+        self.cell_detail_open = true;
+        self.kick_cell_detail(cx);
+    }
+
+    fn close_cell_detail(&mut self, cx: &mut Context<Self>) {
+        self.cell_detail_open = false;
+        self.cell_detail = None;
+        self.cell_detail_generation = self.cell_detail_generation.wrapping_add(1);
+        self.cell_detail_task = None;
+        cx.notify();
+    }
+
+    /// Read the cursor cell's exact value on the background executor.
+    /// The read is bounded to `CELL_DETAIL_CAP` bytes so a multi-MB cell
+    /// cannot block the UI thread; a newer cursor move bumps the
+    /// generation and discards an in-flight read.
+    fn kick_cell_detail(&mut self, cx: &mut Context<Self>) {
+        if !self.cell_detail_open {
+            return;
+        }
+        let Some(model) = self.model.clone() else {
+            return;
+        };
+        // Fall back to the first cell when nothing is selected yet.
+        let pos = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
+        self.cell_detail_generation = self.cell_detail_generation.wrapping_add(1);
+        let generation = self.cell_detail_generation;
+        let doc = model.doc.clone();
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let detail = executor
+                .spawn(async move {
+                    let cell = doc.cell(pos.record_index, ColumnIndex(pos.column_index));
+                    let bytes: &[u8] = match &cell {
+                        Some(cell) => cell.as_bytes(),
+                        None => &[],
+                    };
+                    let (text, truncated) = anvil_core::exact_string_capped(bytes, CELL_DETAIL_CAP);
+                    CellDetail {
+                        record: pos.record_index,
+                        column: pos.column_index,
+                        label: doc.meta.column_label(pos.column_index),
+                        text: text.into_owned(),
+                        total_bytes: bytes.len() as u64,
+                        truncated,
+                    }
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.cell_detail_generation != generation || !view.cell_detail_open {
+                    return;
+                }
+                view.cell_detail = Some(Arc::new(detail));
+                view.cell_detail_task = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.cell_detail_task = Some(task);
+        cx.notify();
+    }
+
+    /// The full-cell panel: the cursor cell's exact value, capped and
+    /// labelled when the cap is hit.
+    fn render_cell_detail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(div().text_color(theme::TEXT_STRONG).child("Cell"))
+            .child(
+                div()
+                    .id("cell-detail-close")
+                    .cursor_pointer()
+                    .px_1()
+                    .text_color(theme::TEXT_DIM)
+                    .hover(|s| s.text_color(theme::WARN))
+                    .on_click(cx.listener(|this, _, _, cx| this.close_cell_detail(cx)))
+                    .child("×"),
+            );
+        let body: Vec<AnyElement> = match &self.cell_detail {
+            Some(detail) => vec![
+                div()
+                    .text_color(theme::TEXT_STRONG)
+                    .child(format!(
+                        "{} (row {}, col {})",
+                        detail.label,
+                        detail.record + 1,
+                        detail.column + 1
+                    ))
+                    .into_any_element(),
+                div()
+                    .text_xs()
+                    .text_color(theme::TEXT_DIM)
+                    .child(if detail.truncated {
+                        format!(
+                            "showing first {} of {} (capped)",
+                            archive_picker::format_size(CELL_DETAIL_CAP as u64),
+                            archive_picker::format_size(detail.total_bytes)
+                        )
+                    } else {
+                        archive_picker::format_size(detail.total_bytes)
+                    })
+                    .into_any_element(),
+                div()
+                    .id("cell-detail-body")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(div().text_color(theme::TEXT).child(detail.text.clone()))
+                    .into_any_element(),
+            ],
+            None => vec![div()
+                .text_color(theme::TEXT_DIM)
+                .child("Reading cell…")
+                .into_any_element()],
+        };
+        div()
+            .flex_shrink_0()
+            .w(theme::CELL_DETAIL_WIDTH)
+            .h_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .bg(theme::BG_PANEL)
+            .border_l_1()
+            .border_color(theme::BORDER)
+            .child(header)
+            .children(body)
+            .into_any_element()
+    }
+
     /// Recompute the selected column's stats when the inspector is open.
     /// No-op when the column has not changed since the last scan, so
     /// vertical navigation does not rescan. Runs on the background
     /// executor with a generation guard, like the filter/sort tasks.
     fn kick_inspector(&mut self, cx: &mut Context<Self>) {
+        // The full-cell panel follows the same cursor; refresh it first so
+        // both panels update together. `kick_cell_detail` is a no-op when
+        // the panel is closed.
+        self.kick_cell_detail(cx);
         if !self.inspector_open {
             return;
         }
@@ -3408,6 +3595,11 @@ impl Render for MainView {
         } else {
             None
         };
+        let cell_detail = if self.cell_detail_open && self.model.is_some() {
+            Some(self.render_cell_detail(cx))
+        } else {
+            None
+        };
 
         div()
             .flex()
@@ -3431,7 +3623,8 @@ impl Render for MainView {
                     .when_some(panel, |this, panel| this.child(panel))
                     .child(body)
                     .when_some(diagnostics, |this, diagnostics| this.child(diagnostics))
-                    .when_some(inspector, |this, inspector| this.child(inspector)),
+                    .when_some(inspector, |this, inspector| this.child(inspector))
+                    .when_some(cell_detail, |this, panel| this.child(panel)),
             )
             .child(self.render_status())
     }

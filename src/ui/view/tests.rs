@@ -3112,3 +3112,60 @@ async fn resized_widths_restore_after_tab_switch(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// Cmd/Ctrl+Enter opens the full-cell panel on the cursor cell, which
+/// shows the exact value.
+#[gpui::test]
+async fn cell_detail_shows_exact_value(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    cx.update_window_entity(&view, |view, _, _| {
+        view.selection.set(CellPos::new(1, 1));
+    });
+
+    let chord = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+    cx.simulate_keystrokes(chord);
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(view.cell_detail_open);
+        let detail = view.cell_detail.as_ref().expect("cell detail");
+        assert_eq!(detail.text, "5");
+        assert!(!detail.truncated);
+        assert_eq!((detail.record, detail.column), (1, 1));
+    });
+}
+
+/// A multi-MB cell is read on the background executor and capped, with
+/// the panel reporting that it is truncated.
+#[gpui::test]
+async fn cell_detail_caps_a_huge_value(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("huge.csv");
+    let big = "x".repeat(100_000);
+    std::fs::write(&path, format!("a,b\nbig,{big}\n")).expect("write");
+    let opened = anvil_core::source::local::open_local(&path).expect("open");
+    let doc = anvil_core::index_opened(opened);
+
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, doc);
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.selection.set(CellPos::new(0, 1));
+        view.open_cell_detail(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("cell detail");
+        assert!(detail.truncated, "a 100 KiB cell should be capped");
+        assert_eq!(detail.total_bytes, 100_000);
+        // The panel never carries more than the cap.
+        assert_eq!(detail.text.len(), 32 * 1024);
+        assert!(view.cell_detail_generation >= 1);
+    });
+}
