@@ -7499,3 +7499,72 @@ None (process documentation only).
 - GitHub Actions still has not run; CI cannot be observed from this
   macOS host, so "CI is green" in the new workflow means the local
   verification steps until a real run is available.
+
+---
+
+## 2026-10-01 — Iteration 16: Windows GPUI manifest and the first CI run
+
+### Context
+
+Pushing the previous work triggered the first real GitHub Actions run.
+macOS was green; the Ubuntu leg built, tested and probed green (one
+intermittent, out-of-scope NL `sh`-backend failure was seen and did not
+reproduce); Windows built, tested and generated fixtures green but the
+release `anvil.exe --probe` failed deterministically to start with
+`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`.
+
+### Root cause
+
+GPUI's default features are `["font-kit", "wayland", "x11",
+"windows-manifest"]`. `windows-manifest` makes GPUI's build script embed
+`resources/windows/gpui.manifest.xml`, which binds the process to
+common-controls v6. The project disables default features globally and
+only re-added `font-kit`, so the Windows release binary had no manifest
+and the loader could not resolve the v6 imports. This is the Windows
+analogue of the missing Linux `x11`/`wayland` backends fixed in
+Iteration 14.
+
+### Implemented
+
+- `Cargo.toml`: added a
+  `[target.'cfg(target_os = "windows")'.dependencies]` entry selecting
+  `gpui` with `features = ["font-kit", "windows-manifest"]`. The generic
+  and Linux entries are unchanged. `embed-resource` (GPUI's Windows
+  build-dependency) was already in `Cargo.lock`, so no new packages.
+- `ARCHITECTURE.md`, `ROADMAP.md` and this log now record the first CI
+  results and the Windows fix.
+
+### Verified
+
+- macOS resolution unchanged: `cargo tree --target aarch64-apple-darwin
+  -e normal,features -i gpui` still shows only `font-kit`;
+  `Cargo.lock` is unchanged; `cargo fmt --check`, `cargo build
+  --release`, `cargo test --release` and `cargo clippy --release
+  --all-targets` pass.
+- The Windows fix is verified by this PR's Windows CI leg, which runs
+  `target\release\anvil.exe --probe fixtures/large.csv` after build and
+  test.
+
+### Tests added / changed
+
+None (a build/feature change).
+
+### Roadmap changes
+
+- Milestone 5 cross-platform: the CI matrix item is ticked now that a
+  real run exists; a new completed task records the Windows manifest
+  fix. The Linux GUI-window item stays `[~]` until a Linux display
+  actually opens the window.
+
+### Architecture changes
+
+`ARCHITECTURE.md` gpui dependency row and cross-platform section now
+document all three target-specific feature entries and the real CI
+results.
+
+### Issues / technical debt discovered
+
+- The NL `ModelBackend` test that shells out to `sh` has a broken-pipe
+  race on Linux (`src/query/nl.rs:1816`). It is out of scope
+  (Milestone 6) and was left untouched, but it makes CI intermittently
+  red.

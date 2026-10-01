@@ -1859,7 +1859,7 @@ no-op / anchor-from-empty).
 
 | Dependency          | Version | Responsibility                                  | Why it is here                         | Architectural constraint                             |
 |---------------------|---------|-------------------------------------------------|----------------------------------------|------------------------------------------------------|
-| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core`. Release builds enable only `font-kit`, except on Linux where a target entry adds the `x11` + `wayland` backends |
+| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core`. The generic entry keeps only `font-kit`; target entries add `x11` + `wayland` on Linux and `windows-manifest` on Windows |
 | `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; sync API. On Linux a target-specific entry selects the pure-Rust `xdg-portal` backend so the build script does not panic |
 | `memchr`            | 2       | SIMD-accelerated `memchr` for byte scanning      | Indexer needs `\n` searches            | Used in `delimit.rs` and `indexing.rs`; tiny API     |
 | `memmap2`           | 0.9     | Memory-mapped file handle                        | Bounded memory + random access         | Wrapped in `MmapSource`; `unsafe` mmap is centralised |
@@ -1877,10 +1877,12 @@ no-op / anchor-from-empty).
 
 Notes:
 
-- `gpui` is built with `default-features = false` and only the
-  `font-kit` feature. This avoids pulling in GPUI's HTTP / media /
-  refineable features we do not use. If we add any of those features
-  the `Cargo.toml` change must be reviewed.
+- `gpui` is built with `default-features = false`. The generic
+  entry keeps only `font-kit`; target-specific entries re-add the
+  platform features the release binary needs (`x11` + `wayland` on
+  Linux, `windows-manifest` on Windows). This avoids pulling in GPUI's
+  HTTP / media / refineable features we do not use. If further
+  features are added the `Cargo.toml` change must be reviewed.
 - The dev-dependency enables `test-support` so `TestAppContext` is
   available in `#[gpui::test]` tests. Feature unification is per
   build; `cargo build --release` does not enable it (verified: the
@@ -1909,13 +1911,12 @@ backends on Linux through a Linux-only target entry in `Cargo.toml`, so
 `gpui::current_platform` can select a real backend instead of the
 headless client; the CI package list already covers the native
 libraries (`zed-font-kit` / `freetype-sys`, `xkbcommon`,
-`wayland-client`; fontconfig and Vulkan are dlopen'd). The binary
-builds and `--probe` works, but the window has **not** been launched on
-a Linux display from this macOS verification host, so Linux GUI
-behaviour is still unverified. This is tracked in `ROADMAP.md`
-(Milestone 5 cross-platform support); the CI workflow was validated
-for syntax and for its individual commands on macOS only, and a real
-GitHub Actions run on all three runners has not yet happened.
+`wayland-client`; fontconfig and Vulkan are dlopen'd). GitHub Actions
+now runs on all three platforms: the Ubuntu leg builds and tests green
+(an intermittent broken-pipe failure in the out-of-scope NL `sh`
+backend test has been observed but does not reproduce on re-run). The
+window itself has **not** been launched on a Linux display, so Linux
+GUI behaviour is still unverified and the roadmap item stays open.
 
 Separately, the Linux release build failed at dependency build time.
 `rfd` was declared with `default-features = false` and no backend
@@ -1927,10 +1928,18 @@ selects `xdg-portal` (a pure-Rust backend that adds only `pollster`)
 through a `[target.'cfg(target_os = "linux")'.dependencies]` entry,
 leaving the generic entry for macOS/Windows unchanged. The failure and
 the fix were reproduced and confirmed for the `x86_64-unknown-linux-gnu`
-target with a focused cross-check: the `rfd` build script panics
-without the feature and compiles with it. The full Linux
-build/test/probe could not be run on the macOS verification host and
-still needs a real Linux or GitHub Actions run.
+target with a focused cross-check, and the Ubuntu CI leg now builds,
+tests and probes green.
+
+On Windows, the release binary failed to start with
+`STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139). GPUI's default feature set
+includes `windows-manifest`, which embeds
+`resources/windows/gpui.manifest.xml` (the common-controls v6 binding);
+the project's global `default-features = false` dropped it. A
+`[target.'cfg(target_os = "windows")'.dependencies]` entry now enables
+`font-kit` + `windows-manifest` for the Windows release binary. The
+Windows CI leg is the verification: it runs the release `anvil --probe`
+after building and testing.
 
 ### Native Ask model
 

@@ -64,6 +64,16 @@ gliner-tokenizers = { package = "tokenizers", version = "0.22", optional = true,
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "x11", "wayland"] }
 
+# GPUI's Windows application manifest is feature-gated too. Without
+# `windows-manifest`, gpui's build script does not embed
+# `resources/windows/gpui.manifest.xml`, so the release binary is not
+# bound to common-controls v6 and fails to start with
+# `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139). `windows-manifest` is part
+# of gpui's default feature set; select it explicitly for Windows, leaving
+# macOS and Linux resolution untouched.
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "windows-manifest"] }
+
 [dev-dependencies]
 crc32fast = "1"
 # Enable GPUI's headless test harness only for tests. `test-support`
