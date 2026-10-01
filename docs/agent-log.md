@@ -6908,6 +6908,8 @@ the UI scoping.
 - `infer_column` still samples the whole document, so a scoped view's
   inferred type can reflect values that are filtered out. That only
   selects numeric-vs-text comparison and is a separate follow-up.
+  **(Resolved in Iteration 13, 2026-10-01: `stats_rows` now infers
+  through `schema::infer_column_rows` over the same row set.)**
 
 ### Next recommended task
 
@@ -7230,3 +7232,72 @@ clipboard section now document display positions, `clamp_to_rows`,
 
 Iteration 13: make the column inspector's type inference sample the
 same filtered/sorted row set as its stats.
+
+---
+
+## 2026-10-01 — Iteration 13: scoped type inference for the column inspector
+
+### Context
+
+Iteration 8d scoped the inspector's statistics to the filtered/sorted
+view but left `stats_scan` calling `infer_column`, which samples records
+`0..2048` of the whole document. A view whose rows were all numeric could
+therefore be labelled `Text` (or vice versa) while the stats beside it
+described the visible rows. This iteration removes that disagreement.
+
+### Implemented
+
+- `schema.rs`: inference is now driven by an iterator of row indexes.
+  Added `infer_column_rows(doc, column, rows)`, which samples at most
+  `INFER_SAMPLE_ROWS` (2048) of the supplied rows in display order;
+  `infer` / `infer_column` keep the whole-document behaviour. The
+  numeric/boolean/empty decision logic is unchanged.
+- `schema/stats.rs`: `stats_scan` picks `infer_column_rows` when a row
+  set is supplied and `infer_column` otherwise, so `stats_rows` (the
+  UI's scoped path) infers over exactly the rows it measures. Inference
+  still runs on the background executor inside the existing inspector
+  task; the 2048-row bound is preserved.
+
+### Verified
+
+- The new unit test was written first and confirmed to fail against the
+  old one-line `infer_column` call (`left: Text, right: Integer`); it
+  passes with the scoped inference.
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **477 passed, 7 ignored** (212 library, 178
+  binary with 1 ignored, 86 `tests/core.rs` with 6 ignored, 1 style
+  guard), up from 475.
+- `cargo clippy --release --all-targets` — clean.
+- A full Linux build was still not run (macOS/arm64 host).
+
+### Tests added / changed
+
+- `src/schema/stats.rs`: `stats_rows_infers_type_from_the_scoped_view`
+  (numeric view of a mixed column, and a text view of a numeric column).
+- `src/ui/view/tests.rs`: `inspector_infers_type_from_the_filtered_view`
+  drives the real filter bar, scopes the inspector and asserts the
+  reported `ColumnType` is `Integer`.
+
+### Roadmap changes
+
+- Milestone 3 column inspector: added a completed "Scoped type
+  inference" sub-task and updated the stats-scoping entry.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the `schema::stats` description and the Milestone 3
+type-inference note now document `infer_column_rows` and scoped
+inference; the stale "scoping inspector stats ... outstanding" gap was
+removed.
+
+### Issues / technical debt discovered
+
+- The historical Iteration 8d debt note is annotated as resolved. The
+  broader "cache inferred profiles at open" follow-up still stands:
+  inference is recomputed by the sorter and the inspector.
+
+### Next recommended task
+
+Iteration 4: determine whether the Linux release build can open a GPUI
+window or document the open question without guessing.

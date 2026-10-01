@@ -424,6 +424,10 @@ column-level metadata.
   or sort is active (rescanning on a view change via
   `inspector_view_key`). The panel labels the scope
   ("scoped to current view (N of M rows)" / "whole document").
+- [x] Scoped type inference: `stats_rows` infers the column type with
+  `schema::infer_column_rows` over the same visible rows (bounded to
+  `INFER_SAMPLE_ROWS`), so the displayed type cannot disagree with the
+  scoped stats.
 
 #### Tests
 

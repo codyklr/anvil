@@ -66,23 +66,40 @@ pub fn infer(doc: &ParsedDocument) -> Vec<ColumnProfile> {
     let column_count = doc.column_count();
     let sampled_rows = doc.record_count().min(INFER_SAMPLE_ROWS);
     (0..column_count)
-        .map(|column| profile_column(doc, column, sampled_rows))
+        .map(|column| profile_from_rows(doc, column, sampled_rows, 0..sampled_rows))
         .collect()
 }
 
 /// Infer the type of a single column. Same sampling as [`infer`].
 pub fn infer_column(doc: &ParsedDocument, column: usize) -> ColumnProfile {
     let sampled_rows = doc.record_count().min(INFER_SAMPLE_ROWS);
-    profile_column(doc, column, sampled_rows)
+    profile_from_rows(doc, column, sampled_rows, 0..sampled_rows)
 }
 
-fn profile_column(doc: &ParsedDocument, column: usize, sampled_rows: u64) -> ColumnProfile {
+/// Infer the type of a single column from `rows` only. `rows` are record
+/// indexes in display order (a filtered/sorted view); at most
+/// [`INFER_SAMPLE_ROWS`] of them are sampled, so the inferred type
+/// matches the row set [`crate::schema::stats::stats_rows`] measures.
+pub fn infer_column_rows(doc: &ParsedDocument, column: usize, rows: &[u64]) -> ColumnProfile {
+    let sampled = rows.len().min(INFER_SAMPLE_ROWS as usize);
+    profile_from_rows(doc, column, sampled as u64, rows[..sampled].iter().copied())
+}
+
+fn profile_from_rows<I>(
+    doc: &ParsedDocument,
+    column: usize,
+    sampled_rows: u64,
+    rows: I,
+) -> ColumnProfile
+where
+    I: Iterator<Item = u64>,
+{
     let mut non_empty = 0u64;
     let mut integers = 0u64;
     let mut numbers = 0u64;
     let mut booleans = 0u64;
 
-    for row in 0..sampled_rows {
+    for row in rows {
         let Some(cell) = doc.cell(row, ColumnIndex(column)) else {
             continue;
         };

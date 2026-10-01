@@ -3337,6 +3337,46 @@ async fn inspector_scopes_to_the_filtered_view(cx: &mut TestAppContext) {
     });
 }
 
+/// The inspector's inferred type must also come from the scoped view,
+/// not the whole document: the `US` rows are numeric while the `UK` row
+/// is text, so the whole column is mixed but the filtered view is not.
+#[gpui::test]
+async fn inspector_infers_type_from_the_filtered_view(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let doc = {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scoped_type.csv");
+        std::fs::write(&path, b"country,amount\nUS,10\nUK,abc\nUS,20\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open local");
+        anvil_core::index_opened(opened)
+    };
+    inject_doc(cx, &view, doc);
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "country == US".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.close_filter(cx);
+        view.selection.set(CellPos::new(0, 1));
+        view.toggle_inspector(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        let stats = view.inspector_stats.as_ref().expect("inspector stats");
+        assert_eq!(stats.total_rows, 2);
+        assert_eq!(
+            stats.column_type,
+            anvil_core::ColumnType::Integer,
+            "the scoped view is numeric even though the whole column is text"
+        );
+    });
+}
+
 /// The filter bar accepts a `NOT` expression and applies it through the
 /// normal background filter path.
 #[gpui::test]

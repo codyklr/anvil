@@ -196,7 +196,11 @@ anvil/
   samples, and the top-N frequent values. `stats` scans the whole
   document; `stats_rows` scans only the supplied record indexes, which
   the UI uses to scope the inspector to the active filtered/sorted
-  view (and it reruns the scan when that view changes). Every
+  view (and it reruns the scan when that view changes). Type inference
+  is scoped the same way: `stats_rows` calls
+  `schema::infer_column_rows`, which samples the view's rows
+  (still bounded to `INFER_SAMPLE_ROWS`), so the displayed type agrees
+  with the stats beside it. Every
   displayed value is the
   exact cell value, padding included, and values that differ only in
   padding are counted as distinct (ADR 0003); `min`/`max` order text
@@ -2000,8 +2004,8 @@ takes precedence over the existing generative backend.
   and does not remember recently-closed tabs.
 - Sort, basic type inference, and the column inspector (statistics +
   right-side panel) have landed. Richer type classes (date / datetime /
-  UUID / email / URL), caching inferred profiles at open, and scoping
-  inspector stats to the filtered/sorted view are outstanding.
+  UUID / email / URL) and caching inferred profiles at open are
+  outstanding.
 - The filter expression language supports `AND` / `OR` and parentheses
   with standard precedence (`FilterExpr` / `parse_expr`), plus the
   row-scope pseudo-columns `any` / `all` (`any empty`, `all notempty`).
@@ -2323,7 +2327,9 @@ drift. Cmd/Ctrl+F opens the bar (the grid's
 - **Type inference and statistics (Milestone 3).**
   `anvil_core::schema::infer` samples each column (bounded to 2048
   rows) and returns `ColumnProfile { name, column_type, non_empty,
-  numeric_fraction, .. }`. `schema::stats` builds a full `ColumnStats`
+  numeric_fraction, .. }`; `schema::infer_column_rows` does the same
+  over an explicit filtered/sorted row set so the inspector's type is
+  scoped like its stats. `schema::stats` builds a full `ColumnStats`
   per column. Both currently run inside the tasks that need them (sort
   and inspector); caching the profiles on the document at open, and
   adding date/UUID/email/URL classification, remain optional

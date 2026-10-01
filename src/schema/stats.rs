@@ -24,7 +24,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::parser::{ColumnIndex, ParsedDocument};
 
-use super::{infer_column, ColumnType};
+use super::{infer_column, infer_column_rows, ColumnType};
 
 /// Distinct-value count, with its accuracy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +116,10 @@ fn stats_scan(
     rows: Option<&[u64]>,
     options: &StatsOptions,
 ) -> ColumnStats {
-    let profile = infer_column(doc, column);
+    let profile = match rows {
+        Some(rows) => infer_column_rows(doc, column, rows),
+        None => infer_column(doc, column),
+    };
     let numeric = profile.column_type.is_numeric();
     let total_rows = match rows {
         Some(rows) => rows.len() as u64,
@@ -615,5 +618,29 @@ mod scoped_tests {
         assert_eq!(scoped.total_rows, 0);
         assert_eq!(scoped.non_empty, 0);
         assert_eq!(scoped.min, None);
+    }
+
+    /// Type inference must sample the scoped view, not the whole
+    /// document: rows 0/1 are numeric while rows 2/3 are text.
+    #[test]
+    fn stats_rows_infers_type_from_the_scoped_view() {
+        let doc = doc_from(b"v,pad\n1,a\n2,a\nx,a\ny,a\n");
+        assert_eq!(
+            stats(&doc, 0, &StatsOptions::default()).column_type,
+            ColumnType::Text,
+            "the whole document is mixed, so its inference is Text"
+        );
+
+        let scoped = stats_rows(&doc, 0, &[0u64, 1], &StatsOptions::default());
+        assert_eq!(
+            scoped.column_type,
+            ColumnType::Integer,
+            "the scoped view is all integers"
+        );
+
+        // And the reverse: a text row from an otherwise-numeric column.
+        let doc = doc_from(b"v,pad\n1,a\n2,a\nx,a\n");
+        let scoped = stats_rows(&doc, 0, &[2u64], &StatsOptions::default());
+        assert_eq!(scoped.column_type, ColumnType::Text);
     }
 }
