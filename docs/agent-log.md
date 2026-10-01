@@ -7451,3 +7451,51 @@ the tab strip / file panel / grid rendering are extracted.
 None outstanding from this run. The next agent could pick up the
 Milestone 5 cross-platform items (real Linux/Windows CI run and GUI
 exercise) or the richer type classes recorded in `ROADMAP.md`.
+
+---
+
+## 2026-10-01 — Agent workflow: conventional branches and pull requests
+
+### Context
+
+The operator changed the repository workflow: retire the long-lived
+`agent/iterative-improvements` branch and, from now on, land each change
+set on a Conventional Commits-style branch that is merged to `master`
+through a pull request.
+
+### Implemented
+
+- Removed the `agent/iterative-improvements` branch ref (it pointed at
+  the already-merged master tip) and retrofitted the previous five
+  commits into PR #1, which is merged.
+- Added a "Version Control Workflow" section to `AGENTS.md`: branch
+  naming (`fix/...`, `feat/...`, `refactor/...`, `docs/...`, ...),
+  Conventional Commit messages, PR requirements (what changed, what was
+  verified, what was not), and the merge/branch-deletion steps.
+- `AGENTS.md` Handoff, Definition of Done, and Open-source hygiene now
+  reference the PR workflow; the quick-reference test count was
+  refreshed to 477 passed, 7 ignored.
+
+### Verified
+
+- Documentation-only change; no build or test impact.
+- The workflow is exercised by landing this change itself on
+  `docs/agent-pr-workflow` through a pull request.
+
+### Tests added / changed
+
+None.
+
+### Roadmap changes
+
+None.
+
+### Architecture changes
+
+None (process documentation only).
+
+### Issues / technical debt discovered
+
+- GitHub Actions still has not run; CI cannot be observed from this
+  macOS host, so "CI is green" in the new workflow means the local
+  verification steps until a real run is available.
