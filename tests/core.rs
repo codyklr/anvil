@@ -1676,3 +1676,48 @@ fn exact_string_capped_preserves_prefix_and_flags_truncation() {
     // The escaped prefix is valid UTF-8 text.
     assert!(std::str::from_utf8(text.as_ref().as_bytes()).is_ok());
 }
+
+// ---- UTF-8 BOM ----------------------------------------------------------
+
+/// A UTF-8 BOM must never appear inside the first header's name, but it
+/// must still be reported by the encoding diagnostics. No other cell
+/// bytes change.
+#[test]
+fn utf8_bom_is_stripped_from_the_first_header_but_reported() {
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(b"name,age\nalice,30\nbob,40\n");
+    let (doc, _dir) = parse_bytes(&bytes);
+
+    assert_eq!(doc.meta.headers, vec!["name", "age"]);
+    assert_eq!(cell(&doc, 0, 0), "alice");
+    assert_eq!(cell(&doc, 1, 1), "40");
+    // The BOM bytes stay in the source and diagnostics still flag them.
+    assert!(anvil_core::scan_encoding(&doc).bom);
+    // Header offset starts after the BOM.
+    assert_eq!(doc.meta.header_range, Some((3, 11)));
+}
+
+/// A headerless file whose first byte is a BOM does not leak the BOM
+/// into its first cell.
+#[test]
+fn utf8_bom_headerless_first_cell_is_clean() {
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(b"alice,30\ncarol,40\n");
+    let (doc, _dir) = parse_bytes(&bytes);
+
+    assert!(!doc.meta.has_headers);
+    assert_eq!(cell(&doc, 0, 0), "alice");
+    assert_eq!(cell(&doc, 0, 1), "30");
+    assert!(anvil_core::scan_encoding(&doc).bom);
+}
+
+/// `bom_len` / `strip_utf8_bom` only react to a real BOM prefix.
+#[test]
+fn strip_utf8_bom_only_strips_the_bom() {
+    assert_eq!(anvil_core::bom_len(b"abc"), 0);
+    assert_eq!(anvil_core::strip_utf8_bom(b"abc"), b"abc");
+    assert_eq!(anvil_core::bom_len(&[0xEF, 0xBB, 0xBF, b'a']), 3);
+    assert_eq!(anvil_core::strip_utf8_bom(&[0xEF, 0xBB, 0xBF, b'a']), b"a");
+    // A lone 0xEF is not a BOM.
+    assert_eq!(anvil_core::strip_utf8_bom(&[0xEF, b'a']), &[0xEF, b'a']);
+}

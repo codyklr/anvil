@@ -148,9 +148,12 @@ anvil/
 **Current (Milestones 1-4 plus the natural-language Ask work, in `src/`):**
 
 - `parser::indexing` — build record byte-offset index, collect
-  `ParseWarning`s, report `record_count` and `column_count`.
+  `ParseWarning`s, report `record_count` and `column_count`. A leading
+  UTF-8 BOM is skipped (`bom_len`) so `header_range` and the first
+  record start after it; the BOM bytes stay in the mmap.
 - `parser::delimit` — delimiter / quote / header detection on a
-  64 KiB sample.
+  64 KiB sample; the sample is taken after `strip_utf8_bom`, so the
+  first header never carries the BOM.
 - `source::archive` — ZIP discovery, safety validation, extract-to-temp.
 - `source::local` and `source::mod` — direct file mmap and dispatch.
 - `loader` — open orchestration, including archive auto-open vs.

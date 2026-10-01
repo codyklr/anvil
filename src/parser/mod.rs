@@ -320,6 +320,25 @@ fn escape_invalid_utf8(bytes: &[u8]) -> String {
     out
 }
 
+/// The UTF-8 byte-order mark, `EF BB BF`.
+pub const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+/// Length of a leading UTF-8 BOM in `bytes`, or `0`.
+pub fn bom_len(bytes: &[u8]) -> usize {
+    if bytes.starts_with(&UTF8_BOM) {
+        UTF8_BOM.len()
+    } else {
+        0
+    }
+}
+
+/// `bytes` without a leading UTF-8 BOM. The BOM bytes stay in the
+/// underlying source (the encoding scan still reports them); only the
+/// parsed view skips them.
+pub fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
+    &bytes[bom_len(bytes)..]
+}
+
 /// Iterator over the cells of a single record.
 pub struct Cells<'a> {
     record: &'a [u8],

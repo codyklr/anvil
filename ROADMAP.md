@@ -499,7 +499,10 @@ column-level metadata.
   non-UTF-8 cells.
 - [x] (Optional) Detect BOM and report encoding. `encoding::scan`
   reports `bom`, `--probe` prints it, and the diagnostics panel shows
-  a `UTF-8 BOM present` notice. (The parser still does not strip it.)
+  a `UTF-8 BOM present` notice. Iteration 8c: the parser now strips a
+  leading BOM (via `strip_utf8_bom` / `bom_len`) so it never appears in
+  the first header or cell, while the bytes remain in the source and
+  the encoding scan still reports the BOM.
 
 #### Header detection
 

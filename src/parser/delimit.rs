@@ -10,7 +10,9 @@
 
 use std::borrow::Cow;
 
-use crate::parser::{exact_string, Cells, HeaderMode, ParseMeta, ParseWarning, WarningKind};
+use crate::parser::{
+    exact_string, strip_utf8_bom, Cells, HeaderMode, ParseMeta, ParseWarning, WarningKind,
+};
 
 /// Candidate delimiters we try. Order is the final tie-break (comma first,
 /// because it is by far the most common data format).
@@ -57,6 +59,10 @@ pub fn detect(bytes: &[u8]) -> DetectOutcome {
 /// the header interpretation (`Header` / `Headerless`) or runs the
 /// content heuristic (`Auto`).
 pub fn detect_with(bytes: &[u8], mode: HeaderMode) -> DetectOutcome {
+    // A leading BOM is structural, not part of the first header/cell.
+    // The bytes stay in the source; the encoding scan still reports the
+    // BOM. See ADR 0003.
+    let bytes = strip_utf8_bom(bytes);
     let sample = &bytes[..bytes.len().min(SAMPLE_BYTES)];
     let lines = split_logical_lines(sample, b'"');
 

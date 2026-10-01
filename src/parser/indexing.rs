@@ -6,7 +6,7 @@
 //! entry is the length of the source.
 
 use crate::parser::delimit::detect_with;
-use crate::parser::{HeaderMode, ParseMeta, ParseWarning, WarningKind};
+use crate::parser::{bom_len, HeaderMode, ParseMeta, ParseWarning, WarningKind};
 use crate::progress::{LoadPhase, LoadProgress, ProgressSink};
 use crate::source::OpenedSource;
 
@@ -89,6 +89,10 @@ fn build_impl<const REPORT: bool>(
 ) -> IndexResult {
     let total = opened.len() as usize;
     let bytes = opened.bytes();
+    // A leading UTF-8 BOM is structural, not data: skip it so the first
+    // header/cell does not contain `EF BB BF`. The bytes stay in the
+    // source and the encoding scan still reports the BOM.
+    let bom = bom_len(bytes);
 
     let mut meta = meta;
     let mut warnings = std::mem::take(&mut meta.warnings);
@@ -100,13 +104,13 @@ fn build_impl<const REPORT: bool>(
     let n_cap = (total / 16).max(16);
     let mut offsets: Vec<u64> = Vec::with_capacity(n_cap.min(8 * 1024 * 1024));
 
-    let mut pos: usize = 0;
+    let mut pos: usize = bom;
     if has_headers {
-        let newline_pos = match memchr::memchr(b'\n', bytes) {
-            Some(p) => p,
+        let newline_pos = match memchr::memchr(b'\n', &bytes[bom..]) {
+            Some(p) => bom + p,
             None => total,
         };
-        meta.header_range = Some((0, newline_pos as u64));
+        meta.header_range = Some((bom as u64, newline_pos as u64));
         pos = newline_pos + 1;
     }
 

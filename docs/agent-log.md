@@ -6781,3 +6781,68 @@ value.
 
 Iteration 8c: strip or handle a UTF-8 BOM so it never appears inside the
 first header's name, while still reporting the BOM in diagnostics.
+
+---
+
+## 2026-09-30 — Iteration 8c: handle a UTF-8 BOM
+
+### Context
+
+Third part of Iteration 8. `encoding::scan` detected a UTF-8 BOM and
+diagnostics reported it, but the parser did not skip it, so a
+BOM-prefixed file showed the BOM inside its first header name (and, for
+a headerless file, inside its first cell).
+
+### Implemented
+
+- `parser::UTF8_BOM`, `parser::bom_len(bytes)`, and
+  `parser::strip_utf8_bom(bytes)`; exported from `anvil_core`.
+- `parser::delimit::detect_with` now runs on `strip_utf8_bom(bytes)`,
+  so the sampled first line never carries the BOM.
+- `parser::indexing::build_impl` starts at `bom_len(bytes)`:
+  `header_range` and the first record offset begin after the BOM. The
+  BOM bytes remain in the memory-mapped source, so `encoding::scan`
+  still reports `bom = true`. No other cell bytes are altered.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **457 passed, 7 ignored** (199 library, 171
+  binary, 86 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean.
+- `utf8_bom_is_stripped_from_the_first_header_but_reported` asserts the
+  header is `["name", "age"]`, the first cell is `alice`,
+  `header_range == Some((3, 11))`, and `encoding::scan` still reports
+  the BOM.
+- `utf8_bom_headerless_first_cell_is_clean` covers the headerless case.
+- `strip_utf8_bom_only_strips_the_bom` checks only a real `EF BB BF`
+  prefix is stripped.
+
+### Tests added / changed
+
+- `tests/core.rs`: `utf8_bom_is_stripped_from_the_first_header_but_reported`,
+  `utf8_bom_headerless_first_cell_is_clean`,
+  `strip_utf8_bom_only_strips_the_bom`.
+
+### Roadmap changes
+
+- Milestone 4 encoding diagnostics: the "(Optional) Detect BOM and
+  report encoding" item now records that the parser strips the BOM
+  while diagnostics keep reporting it.
+
+### Architecture changes
+
+`ARCHITECTURE.md` `parser::indexing` and `parser::delimit` descriptions
+note BOM handling.
+
+### Issues / technical debt discovered
+
+- A BOM in a ZIP entry is handled the same way because extraction and
+  indexing share the path. A BOM not at offset 0 (mid-file) is data and
+  is left alone.
+
+### Next recommended task
+
+Iteration 8d: scope the column inspector to the filtered/sorted view
+when one is active, and label it clearly.

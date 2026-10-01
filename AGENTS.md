@@ -392,7 +392,7 @@ cargo fmt
 # Lint
 cargo clippy --release
 
-# Tests (454 passing, 7 ignored)
+# Tests (457 passing, 7 ignored)
 cargo test --release
 
 # Throughput test (needs fixtures/large.csv)
