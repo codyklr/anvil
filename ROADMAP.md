@@ -662,29 +662,31 @@ make what exists feel finished.
 
 #### Cross-platform support
 
-- [~] Add a CI build/test matrix for macOS, Windows, and Linux:
+- [x] Add a CI build/test matrix for macOS, Windows, and Linux:
   `cargo fmt --check`, `cargo build --release`, `cargo test --release`,
   and `anvil --probe fixtures/large.csv`. `.github/workflows/ci.yml`
-  now defines the three-OS matrix and the Linux dependency install
-  step, and every one of its commands was run locally on macOS. A
-  missed Linux-only dependency failure was found and fixed: `rfd` had
-  no backend feature selected, so its build script panicked on Linux;
-  `Cargo.toml` now selects `xdg-portal` through a Linux target entry,
-  verified for `x86_64-unknown-linux-gnu` with a focused cross-check.
-  The workflow has only been validated for syntax; no real GitHub
-  Actions run has executed yet, and the full Linux and Windows legs
-  are unverified.
+  defines the three-OS matrix and the Linux dependency install step.
+  GitHub Actions has now run: macOS is green; Ubuntu builds, tests and
+  probes green (one intermittent, out-of-scope NL `sh`-backend test
+  failure has been seen and does not reproduce); Windows builds, tests
+  and generates fixtures green, and the release probe verifies after
+  the `windows-manifest` fix below.
+- [x] Enable the Windows GPUI application manifest. The release binary
+  failed to start with `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139)
+  because `windows-manifest` is part of GPUI's default features and the
+  project disables default features globally. A Windows target entry
+  now enables `font-kit` + `windows-manifest`, and the Windows CI leg
+  runs the release `--probe` as verification.
 - [~] Enable a real GPUI window backend on Linux. The release build
   used `gpui` with `default-features = false, features = ["font-kit"]`,
   so neither `x11` nor `wayland` was compiled and
   `gpui::current_platform` always returned the headless client on
   Linux: the binary built and `--probe` worked, but the GUI could not
   open on any display. `Cargo.toml` now has a Linux-only target entry
-  that enables `font-kit` + `x11` + `wayland` for the release binary
-  (cross-target feature resolution verified for
-  `x86_64-unknown-linux-gnu`), and the CI package list already covers
-  the native stack. The window has **not** been launched on a real
-  Linux display yet, so this stays open until a Linux runner opens it.
+  that enables `font-kit` + `x11` + `wayland` for the release binary,
+  and the Ubuntu CI leg confirms the build/test/probe. The window has
+  **not** been launched on a real Linux display yet, so this stays open
+  until a Linux runner opens it.
 - [ ] Exercise the native GUI on all three target OSes: open dialog,
   drag/drop, archive picker, grid scrolling, keyboard shortcuts,
   clipboard copy, and save/open paths where applicable.
