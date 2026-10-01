@@ -5,8 +5,9 @@
 //! width and offset, so a row only builds elements for the columns that are
 //! actually visible. That keeps a 2,000-column file cheap to display.
 
+use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui::{
     div, prelude::*, px, rgb, HighlightStyle, Hsla, IntoElement, MouseDownEvent, MouseMoveEvent,
@@ -123,6 +124,12 @@ const AVG_CHAR_WIDTH: f32 = 7.0;
 const MAX_AUTO_WIDTH: f32 = 360.0;
 const SAMPLE_ROWS: u64 = 200;
 
+/// Upper bound on the visible-range cell-text cache. A tall viewport is
+/// ~40 rows; 4096 entries covers ~100 columns of that. When a very wide
+/// file pushes past the cap the cache is cleared rather than evicted:
+/// scrolling then re-populates it, and the cap keeps memory bounded.
+const CELL_TEXT_CACHE_CAP: usize = 4096;
+
 /// Is `(record, column)` inside the inclusive `(top-left, bottom-right)`
 /// rectangle? `None` is never inside.
 fn rect_contains(rect: Option<(CellPos, CellPos)>, record: u64, column: usize) -> bool {
@@ -137,6 +144,21 @@ fn rect_contains(rect: Option<(CellPos, CellPos)>, record: u64, column: usize) -
     }
 }
 
+/// The immutable text a grid cell displays, as a `SharedString`.
+///
+/// `exact_string` borrows from the mmap for valid UTF-8 and allocates an
+/// escaped `String` only when the bytes are not valid UTF-8.
+/// `SharedString::new(text.as_ref())` then allocates a single `Arc<str>`
+/// and copies the bytes once. Building it from `text.to_string()` (the
+/// previous form) allocated the intermediate `String` *and* the
+/// `Arc<str>`, copying every visible cell twice per frame. The visible
+/// bytes are identical either way, including the escaped form used for
+/// invalid UTF-8.
+fn cell_shared_string(bytes: &[u8]) -> SharedString {
+    let text = exact_string(bytes);
+    SharedString::new(text.as_ref())
+}
+
 /// A read-only view over one document that the grid renders.
 #[derive(Clone)]
 pub struct GridModel {
@@ -147,6 +169,14 @@ pub struct GridModel {
     /// at open because `ParseMeta.warnings` never changes for a
     /// document; the grid binary-searches it per visible row.
     pub warnings: Arc<[(u64, WarningKind)]>,
+    /// Bounded cache of the immutable text for `(record, column)` cells
+    /// shown in the visible range. `uniform_list` re-invokes the row
+    /// renderer for every visible row each frame, and a scroll step only
+    /// changes one or two of them, so the cache removes the per-cell
+    /// `Arc<str>` allocation on the ~95% of cells that repeat. The text
+    /// depends only on the document, so the cache is invalidated simply
+    /// by building a new `GridModel` (which open / reindex already do).
+    text_cache: Arc<Mutex<HashMap<(u64, usize), SharedString>>>,
 }
 
 impl GridModel {
@@ -157,11 +187,31 @@ impl GridModel {
             doc,
             layout: Arc::new(layout),
             warnings,
+            text_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn row_count(&self) -> u64 {
         self.doc.record_count()
+    }
+
+    /// The `SharedString` for one visible cell, consulting the bounded
+    /// cache first. `bytes` must be the cell's bytes for `(record,
+    /// column)`; the cache assumes they do not change for a document.
+    fn cell_text(&self, record: u64, column: usize, bytes: &[u8]) -> SharedString {
+        let mut cache = self
+            .text_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = cache.get(&(record, column)) {
+            return existing.clone();
+        }
+        let text = cell_shared_string(bytes);
+        if cache.len() >= CELL_TEXT_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert((record, column), text.clone());
+        text
     }
 }
 
@@ -424,9 +474,6 @@ where
             Some(cell) => cell.as_ref(),
             None => &[],
         };
-        // Byte-exact text: a cell that is not valid UTF-8 is escaped
-        // rather than rendered as if it were empty.
-        let text = exact_string(bytes);
         let is_selected = selection.contains(index, col);
         let is_flashed = rect_contains(copy_flash, index, col);
         let down_handler = mouse_down.clone();
@@ -443,30 +490,36 @@ where
         }
         if bytes.is_empty() {
             cell_div = cell_div.text_color(theme::TEXT_EMPTY).child("∅");
-        } else if should_highlight(search_options, col) {
-            if let Some(needle) = needle_bytes {
-                // Match row: highlight every occurrence of the needle
-                // inside the cell. `find_ranges` returns byte ranges;
-                // the cost is one case-folded copy per visible cell in
-                // a match row (~30 rows x ~6 columns).
-                let ranges = find_ranges(bytes, needle, search_options.case_sensitive);
-                if ranges.is_empty() {
-                    // Row matched but this cell did not: render plain.
-                    cell_div = cell_div.child(SharedString::from(text.to_string()));
+        } else {
+            // Byte-exact text, served from the visible-range cache so a
+            // scroll step only allocates for the cells that just came
+            // into view. Non-UTF-8 bytes keep their escaped form.
+            let text = model.cell_text(index, col, bytes);
+            if should_highlight(search_options, col) {
+                if let Some(needle) = needle_bytes {
+                    // Match row: highlight every occurrence of the needle
+                    // inside the cell. `find_ranges` returns byte ranges;
+                    // the cost is one case-folded copy per visible cell in
+                    // a match row (~30 rows x ~6 columns).
+                    let ranges = find_ranges(bytes, needle, search_options.case_sensitive);
+                    if ranges.is_empty() {
+                        // Row matched but this cell did not: render plain.
+                        cell_div = cell_div.child(text);
+                    } else {
+                        let highlight = HighlightStyle {
+                            background_color: Some(Hsla::from(theme::BG_MATCH_TEXT)),
+                            ..Default::default()
+                        };
+                        let styled = StyledText::new(text)
+                            .with_highlights(ranges.into_iter().map(|r| (r, highlight)));
+                        cell_div = cell_div.child(styled);
+                    }
                 } else {
-                    let highlight = HighlightStyle {
-                        background_color: Some(Hsla::from(theme::BG_MATCH_TEXT)),
-                        ..Default::default()
-                    };
-                    let styled = StyledText::new(SharedString::from(text.to_string()))
-                        .with_highlights(ranges.into_iter().map(|r| (r, highlight)));
-                    cell_div = cell_div.child(styled);
+                    cell_div = cell_div.child(text);
                 }
             } else {
-                cell_div = cell_div.child(SharedString::from(text.to_string()));
+                cell_div = cell_div.child(text);
             }
-        } else {
-            cell_div = cell_div.child(SharedString::from(text.to_string()));
         }
         // Wire the click on the cell. The captured closure receives
         // the live `MouseDownEvent` (with the shift modifier) plus a
@@ -580,6 +633,40 @@ mod tests {
         assert!(!rect_contains(None, 0, 0));
     }
 
+    /// The `SharedString` handed to the cell element must carry exactly
+    /// the bytes `exact_string` produces: plain ASCII and multi-byte
+    /// UTF-8 verbatim, padding and leading zeroes preserved, and the
+    /// escaped `\xNN` form for invalid UTF-8. This guards the
+    /// one-allocation change against any accidental re-encoding.
+    #[test]
+    fn cell_shared_string_is_byte_faithful() {
+        assert_eq!(cell_shared_string(b"hello").as_ref(), "hello");
+        assert_eq!(cell_shared_string(b"").as_ref(), "");
+        // Padding and leading zeroes are preserved, not trimmed.
+        assert_eq!(cell_shared_string(b" 007 ").as_ref(), " 007 ");
+        // Multi-byte UTF-8 survives in one piece.
+        let multibyte = "h\u{e9}llo \u{2192} \u{65e5}\u{672c}\u{8a9e}";
+        assert_eq!(cell_shared_string(multibyte.as_bytes()).as_ref(), multibyte);
+        // A valid cell containing a literal backslash keeps it as-is.
+        assert_eq!(cell_shared_string(br"back\slash").as_ref(), "back\\slash");
+        // Invalid UTF-8 is escaped exactly like `exact_string`.
+        for bytes in [
+            &[0xffu8, 0xfe][..],
+            &[0x41, 0xff, 0x42],
+            &[b'\\', 0xff],
+            &[0xe6, 0x97, 0xa5, 0xff],
+        ] {
+            let expected = exact_string(bytes).into_owned();
+            assert_eq!(
+                cell_shared_string(bytes).as_ref(),
+                expected,
+                "escaped form must match exact_string for {bytes:?}"
+            );
+            // The escaped output must be valid UTF-8 (reversible text).
+            assert!(expected.is_ascii() || std::str::from_utf8(expected.as_bytes()).is_ok());
+        }
+    }
+
     #[test]
     fn warning_kind_for_uses_sorted_membership_and_severity() {
         let rows = [
@@ -636,6 +723,39 @@ mod tests {
         assert!(!should_highlight(&scoped, 0));
         assert!(should_highlight(&scoped, 2));
         assert!(!should_highlight(&scoped, 3));
+    }
+
+    /// The bounded visible-range cache returns identical text on a hit,
+    /// keeps the escaped form for invalid bytes, and never grows past
+    /// its cap.
+    #[test]
+    fn cell_text_cache_is_consistent_and_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cache.csv");
+        std::fs::write(&path, b"a,b\nalpha,x\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let model = GridModel::new(std::sync::Arc::new(doc));
+
+        let first = model.cell_text(0, 0, b"alpha");
+        let second = model.cell_text(0, 0, b"alpha");
+        assert_eq!(first.as_ref(), "alpha");
+        assert_eq!(first.as_ref(), second.as_ref());
+
+        // Non-UTF-8 stays in the escaped form the grid shows.
+        let expected = exact_string(&[0xff, 0x41]).into_owned();
+        assert_eq!(model.cell_text(0, 1, &[0xff, 0x41]).as_ref(), expected);
+
+        // Push well past the cap and confirm it is cleared, not grown.
+        for i in 0..(CELL_TEXT_CACHE_CAP as u64 + 128) {
+            let value = format!("value-{i}");
+            let _ = model.cell_text(i, 0, value.as_bytes());
+        }
+        let len = model.text_cache.lock().expect("cache lock").len();
+        assert!(
+            len <= CELL_TEXT_CACHE_CAP,
+            "cache grew to {len}, cap is {CELL_TEXT_CACHE_CAP}"
+        );
     }
 
     /// Smoke test: render_row with a populated search query and a

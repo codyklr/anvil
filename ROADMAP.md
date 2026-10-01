@@ -623,11 +623,22 @@ make what exists feel finished.
   the grid's per-cell text work (1,000 frames of 40x20 cells at
   44.4 ns/cell) is recorded in `docs/benchmarks.md`; a real frame timer
   on a desktop is still open.
-- [ ] Add an LRU cache for cell text in the visible range (measure
-  before / after).
-- [ ] Reduce per-cell allocation in `render_row` by preferring the
+- [x] Add an LRU cache for cell text in the visible range (measure
+  before / after). Iteration 4 added a bounded (4096-entry)
+  `(record, column) -> SharedString` cache on `GridModel`. The
+  `measure_viewport_cell_text` proxy went from 81.9 ns/cell
+  (two-copy form) to 22.6 ns/cell, i.e. 0.066 -> 0.018 ms/frame; the
+  cache is a clear-evict FIFO rather than a strict LRU, which is
+  enough because a scroll step only invalidates the entering rows.
+- [x] Reduce per-cell allocation in `render_row` by preferring the
   borrowed `Cell<'a>` path; only convert to `String` when
-  unavoidable.
+  unavoidable. `render_row` now builds `SharedString` via
+  `SharedString::new(exact_string(bytes).as_ref())` (one `Arc<str>`
+  copy) and serves it from the bounded cache, instead of
+  `SharedString::from(text.to_string())` (intermediate `String` plus
+  the `Arc` copy). Byte-faithful display is unchanged, including the
+  escaped form for invalid UTF-8, and is covered by
+  `cell_shared_string_is_byte_faithful`.
 - [x] Memory usage measured and reported per fixture.
   `docs/benchmarks.md` reports peak RSS for every fixture, and notes
   that the file-backed mmap pages dominate it while the durable index

@@ -901,18 +901,30 @@ fn measure_large_fixture() {
 }
 
 /// Proxy for the grid's per-frame visible-cell text work: extract and
-/// allocate the exact string for a viewport-sized window of cells
-/// (single `Cells` pass per row, matching `ui::grid::render_row`),
-/// repeatedly. This is not a GPU frame time because no window is
-/// created; it isolates the `exact_string` + `to_string` allocation the
-/// renderer performs for every visible cell, so the Milestone 5
-/// per-cell allocation change can be compared before/after.
+/// allocate the text for a viewport-sized window of cells (single
+/// `Cells` pass per row, matching `ui::grid::render_row`), repeatedly.
+/// This is not a GPU frame time because no window is created; it
+/// isolates the allocation the renderer performs for every visible
+/// cell.
+///
+/// It measures three forms over a one-row-per-frame scroll over the
+/// 1M-row fixture so the Milestone 5 change can be judged directly:
+///   1. `exact_string(bytes).to_string()` - the old render form
+///      (intermediate `String` plus the `SharedString`/`Arc` copy).
+///   2. `Arc::<str>::from(exact_string(bytes).as_ref())` - the new
+///      production form, one copy.
+///   3. a bounded `HashMap<(row, col), Arc<str>>` cache that persists
+///      across frames (the render path keeps ~29 of 30 rows per scroll
+///      step, so most lookups hit).
 ///
 /// Run with:
 ///   cargo test --release --test core -- --ignored measure_viewport --nocapture
 #[test]
 #[ignore]
 fn measure_viewport_cell_text() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     let path = std::path::Path::new("fixtures/large.csv");
     if !path.exists() {
         eprintln!("fixtures/large.csv not present; run gen_fixture first");
@@ -928,11 +940,15 @@ fn measure_viewport_cell_text() {
     const VISIBLE_ROWS: u64 = 40;
     const VISIBLE_COLS: usize = 20;
     const FRAMES: u64 = 1000;
+    const CACHE_CAP: usize = 4096;
+    let max_start = doc.record_count() - VISIBLE_ROWS;
+    let cells_per_frame = VISIBLE_ROWS * VISIBLE_COLS as u64;
 
+    // Form 1: old `to_string()` path.
     let mut written = 0usize;
     let started = std::time::Instant::now();
     for frame in 0..FRAMES {
-        let first = (frame * VISIBLE_ROWS) % (doc.record_count() - VISIBLE_ROWS);
+        let first = frame % max_start;
         for row in first..first + VISIBLE_ROWS {
             let Some(record) = doc.record_bytes(row) else {
                 continue;
@@ -944,20 +960,79 @@ fn measure_viewport_cell_text() {
                     Some(cell) => cell.as_ref(),
                     None => &[],
                 };
-                written += exact_string(bytes).to_string().len();
+                written += Arc::<str>::from(exact_string(bytes).to_string()).len();
             }
         }
     }
-    let elapsed = started.elapsed();
-    let cells = FRAMES * VISIBLE_ROWS * VISIBLE_COLS as u64;
-    eprintln!(
-        "viewport cell text: {} cells in {:.0?} ({:.1} ns/cell, {:.3} ms/frame), {} bytes",
-        cells,
-        elapsed,
-        elapsed.as_nanos() as f64 / cells as f64,
-        elapsed.as_secs_f64() * 1000.0 / FRAMES as f64,
-        written,
-    );
+    let old = started.elapsed();
+
+    // Form 2: new one-copy `Arc<str>` path (no intermediate String).
+    let started = std::time::Instant::now();
+    for frame in 0..FRAMES {
+        let first = frame % max_start;
+        for row in first..first + VISIBLE_ROWS {
+            let Some(record) = doc.record_bytes(row) else {
+                continue;
+            };
+            let mut cells = Cells::new(record, doc.meta.delimiter, doc.meta.quote);
+            for _ in 0..VISIBLE_COLS {
+                let cell = cells.next();
+                let bytes: &[u8] = match &cell {
+                    Some(cell) => cell.as_ref(),
+                    None => &[],
+                };
+                written += Arc::<str>::from(exact_string(bytes).as_ref()).len();
+            }
+        }
+    }
+    let new = started.elapsed();
+
+    // Form 3: bounded cache that persists across frames. The iterator is
+    // always advanced so the cell lookup stays aligned on hits.
+    let mut cache: HashMap<u64, Arc<str>> = HashMap::new();
+    let started = std::time::Instant::now();
+    for frame in 0..FRAMES {
+        let first = frame % max_start;
+        for row in first..first + VISIBLE_ROWS {
+            let Some(record) = doc.record_bytes(row) else {
+                continue;
+            };
+            let mut cells = Cells::new(record, doc.meta.delimiter, doc.meta.quote);
+            for col in 0..VISIBLE_COLS {
+                let cell = cells.next();
+                let bytes: &[u8] = match &cell {
+                    Some(cell) => cell.as_ref(),
+                    None => &[],
+                };
+                let key = row * VISIBLE_COLS as u64 + col as u64;
+                if let Some(cached) = cache.get(&key) {
+                    written += cached.len();
+                    continue;
+                }
+                let value: Arc<str> = Arc::from(exact_string(bytes).as_ref());
+                written += value.len();
+                if cache.len() >= CACHE_CAP {
+                    cache.clear();
+                }
+                cache.insert(key, value);
+            }
+        }
+    }
+    let cached = started.elapsed();
+
+    let report = |name: &str, elapsed: std::time::Duration| {
+        eprintln!(
+            "{name}: {} cells in {:.0?} ({:.1} ns/cell, {:.3} ms/frame)",
+            FRAMES * cells_per_frame,
+            elapsed,
+            elapsed.as_nanos() as f64 / (FRAMES * cells_per_frame) as f64,
+            elapsed.as_secs_f64() * 1000.0 / FRAMES as f64,
+        );
+    };
+    report("to_string (old)", old);
+    report("Arc<str> (new)", new);
+    report("bounded cache ", cached);
+    let _ = written;
 }
 
 /// Throughput of a text filter over the generated 1M-row fixture.

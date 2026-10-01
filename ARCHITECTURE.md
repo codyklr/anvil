@@ -205,7 +205,8 @@ anvil/
   BOM notice plus one row per column with non-UTF-8 cells.
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
   for horizontal virtualization. Per-cell `on_mouse_down` for
-  selection. Matched search rows are tinted `BG_MATCH`; the active
+  selection. Cell text is decoded byte-faithfully and cached per
+  visible `(record, column)` in a bounded `GridModel` cache. Matched search rows are tinted `BG_MATCH`; the active
   row uses `BG_MATCH_ACTIVE`; the literal matched substring inside
   each cell is drawn with a brighter `BG_MATCH_TEXT` background so
   the user can see *where* in the row the match is. Rows carrying a
@@ -1486,10 +1487,14 @@ Not formally frame-timed; the grid rebuilds per frame but only
 constructs elements for the visible row range × visible column range
 (roughly 30 rows × 6–20 cells). On the 1M-row fixture, scrolling is
 visually smooth. `render_row` decodes each record's visible cells in a
-single `Cells` pass and copies each cell into exactly one `SharedString`
-for the element; it no longer calls `doc.cell` per column (which
-re-walked the record from its start, O(columns^2) per row) or allocates
-a throwaway `String` plus clone per cell.
+single `Cells` pass; it no longer calls `doc.cell` per column (which
+re-walked the record from its start, O(columns^2) per row). Cell text
+is served from a bounded `(record, column) -> SharedString` cache on
+`GridModel` (4096 entries), so a scroll step allocates only for the
+cells that just entered the view instead of re-allocating every visible
+cell twice per frame. `docs/benchmarks.md` records the before/after
+(0.066 ms/frame to 0.018 ms/frame of allocation work for a 40×20
+viewport).
 
 ### Open-time measurements
 

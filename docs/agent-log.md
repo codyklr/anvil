@@ -6284,3 +6284,101 @@ points at it.
 Iteration 4: reduce the per-cell `SharedString::from(text.to_string())`
 allocation in `ui/grid.rs`, evaluate a bounded visible-range cache, and
 record before/after numbers against `docs/benchmarks.md`.
+
+---
+
+## 2026-09-30 — Iteration 4: per-cell allocation in the grid
+
+### Context
+
+Fourth slice of the improvement run (branch
+`agent/iterative-improvements`). `ui/grid.rs::render_row` built
+`SharedString::from(text.to_string())` for every visible cell on every
+frame: an intermediate `String` copy plus the `Arc<str>` copy. Iteration
+3 left a measurable proxy so this could be judged before/after.
+
+### Implemented
+
+- `ui/grid.rs`: new `cell_shared_string(bytes)` builds the cell text as
+  one `SharedString::new(exact_string(bytes).as_ref())` copy instead of
+  `SharedString::from(text.to_string())`. Byte-faithful display is
+  unchanged: valid UTF-8 (including multi-byte) is copied verbatim and
+  invalid bytes keep the escaped `\xNN` form.
+- `GridModel` gained a bounded `(record, column) -> SharedString` cache
+  (`CELL_TEXT_CACHE_CAP = 4096`, clear-on-full). `render_row` looks the
+  text up through `GridModel::cell_text`, so a scroll step allocates
+  only for the rows that just entered the view. `uniform_list` re-runs
+  the row renderer for every visible row each frame and a scroll step
+  keeps ~39 of 40 rows, so the cache hit rate during scrolling is
+  ~95%. The text depends only on the document, so building a new
+  `GridModel` (open / reindex) fully invalidates it; there is no
+  staleness window. A poisoned mutex is recovered via `into_inner`.
+- Empty cells skip the cache entirely (they render the `∅` marker).
+- `tests/core.rs`: `measure_viewport_cell_text` now compares three forms
+  over a one-row-per-frame scroll - the old two-copy form, the new
+  one-copy form, and the bounded cache - so the decision is
+  reproducible.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **436 passed, 7 ignored** (194 library, 162
+  binary, 79 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean apart from the
+  pre-existing `block` / `proc-macro-error2` future-incompat notice.
+- Before/after on the 1M fixture (1,000 frames of a 40 x 20 viewport,
+  scrolling one row per frame):
+  - old `to_string` + `SharedString` (two copies): 81.9 ns/cell,
+    0.066 ms/frame.
+  - new `Arc<str>` only (one copy): 53.4 ns/cell, 0.043 ms/frame.
+  - bounded cache (shipped): 22.6 ns/cell, 0.018 ms/frame.
+  - **3.6x** faster than the old form for the isolated allocation
+    work. The cache was kept because the proxy shows a real win;
+    iteration 3's 44.4 ns/cell figure was the single-`to_string`
+    proxy, not the two-copy production form, so the true before is
+    81.9 ns/cell.
+- No GPU frame time was captured; the GUI cannot be driven headlessly.
+  The proxy excludes element construction and GPU submission, which
+  the change does not touch.
+
+### Tests added / changed
+
+- `ui/grid.rs`: `cell_shared_string_is_byte_faithful` (ASCII,
+  multi-byte, padding, empty, literal backslash, four invalid-byte
+  cases checked against `exact_string`) and
+  `cell_text_cache_is_consistent_and_bounded` (cache hit equality,
+  escaped invalid bytes, cap enforcement).
+- `tests/core.rs`: `measure_viewport_cell_text` extended to the
+  three-form comparison (still `#[ignore]`, measurement only).
+
+### Roadmap changes
+
+- Milestone 5 Performance: "Add an LRU cache for cell text in the
+  visible range" ticked; "Reduce per-cell allocation in `render_row`"
+  ticked, with the note that the eviction is clear-on-full rather than
+  strict LRU.
+
+### Architecture changes
+
+`ARCHITECTURE.md` Scrolling observations and the `ui::grid` module
+description now document the bounded cell-text cache and its
+invalidation-by-new-`GridModel` contract. `docs/benchmarks.md` carries
+the three-form before/after table.
+
+### Issues / technical debt discovered
+
+- The cache is cleared rather than evicted when full. For files wide
+  enough that the visible set exceeds 4096 distinct cells the cache
+  thrashes (insert with no reuse) rather than degrading gracefully.
+  Common files have far fewer visible columns, so this is acceptable
+  for now; an LRU or a viewport-sized cap would be the follow-up if a
+  wide-file regression appears.
+- No real frame-time instrumentation exists. The allocation proxy is
+  the only scroll-related number.
+
+### Next recommended task
+
+Iteration 5: loading progress during ZIP extraction and indexing,
+staying on the background executor with the generation counter
+discarding obsolete updates.

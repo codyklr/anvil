@@ -67,18 +67,33 @@ temp file and then memory-mapped and indexed through the identical path.
 The grid cannot be driven interactively from a headless environment, so
 no GPU frame time is recorded here. Instead,
 `measure_viewport_cell_text` isolates the CPU work `ui::grid::render_row`
-does for every visible cell: a single `Cells` pass per row, then
-`exact_string` plus an owned `String` allocation. It measures 1,000
-frames of a 40-row × 20-column viewport on the 1M fixture:
+does for every visible cell: a single `Cells` pass per row, then the
+text allocation. It measures 1,000 frames of a 40-row x 20-column
+viewport scrolling one row per frame on the 1M fixture, and reports
+three forms.
 
-```
-viewport cell text: 800000 cells in 35ms (44.4 ns/cell, 0.035 ms/frame), 5689466 bytes
-```
+| Form | ns/cell | ms/frame | Notes |
+|---|---|---|---|
+| `exact_string(..).to_string()` + `SharedString` (old) | 81.9 | 0.066 | two copies: intermediate `String`, then `Arc<str>` |
+| `Arc::<str>::from(exact_string(..).as_ref())` (new) | 53.4 | 0.043 | one copy |
+| bounded visible-range cache (shipped) | 22.6 | 0.018 | allocation only for cells that just entered the view |
 
-This is the number the per-cell allocation change will be compared
-against. It is deliberately a *proxy*: it excludes GPUI element
-construction, shaping, and GPU submission, which are unchanged by that
-work.
+Iteration 4 reduced `ui/grid.rs::render_row` from the two-copy form to
+the cached form: `GridModel` now holds a bounded
+(`CELL_TEXT_CACHE_CAP = 4096`) `(record, column) -> SharedString` cache.
+A scroll step keeps ~39 of 40 visible rows, so the cache removes
+~95% of the per-cell `Arc<str>` allocations during scrolling and all of
+them on a pure re-render (selection change, search highlight, hover).
+The proxy shows **0.066 ms/frame -> 0.018 ms/frame (3.6x)** for the
+allocation work alone. This is deliberately a *proxy*: it excludes GPUI
+element construction, shaping, and GPU submission, which the change
+does not affect.
+
+Memory is bounded: 4096 entries of a typical short cell is a few
+hundred KiB. A file wide enough to fill the cap clears it rather than
+growing; for the common case (fewer than ~100 visible columns) it never
+fills. The text depends only on the document, so a new `GridModel`
+(open / reindex) is a complete invalidation - no staleness window.
 
 ## What is not measured
 
