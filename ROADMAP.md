@@ -811,6 +811,12 @@ local model only when the rules cannot cleanly resolve the phrase. See
 ### Tasks
 
 #### Prerequisites
+- [x] Self-contained on-disk layout. All persistent state (the
+  downloaded Ask model and any future cache) lives under
+  `<exe>/anvil-data/models`, resolved by `anvil_core::paths`;
+  `ANVIL_DATA_DIR` overrides it and a model downloaded before this layout
+  is read in place without copying. ZIP extraction stays in the OS temp
+  directory as transient input staging.
 - [x] `FilterExpr::Not`, plus `parse_expr` support for `NOT` / `not` and
   `apply_expr` evaluation; display in the filter bar. Iteration 9:
   `NOT` is a case-insensitive prefix operator that binds tighter than

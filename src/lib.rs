@@ -7,6 +7,7 @@ pub mod encoding;
 pub mod error;
 pub mod loader;
 pub mod parser;
+pub mod paths;
 pub mod progress;
 pub mod query;
 pub mod schema;
@@ -28,6 +29,7 @@ pub use parser::{
     bom_len, column_label, exact_string, exact_string_capped, strip_utf8_bom, Cell, Cells,
     ColumnIndex, HeaderMode, ParseMeta, ParseWarning, ParsedDocument, WarningKind,
 };
+pub use paths::{anvil_data_dir, legacy_data_dir, model_root, PathsError};
 pub use progress::{LoadPhase, LoadProgress, ProgressSink};
 pub use query::filter::{
     apply as apply_filter, apply_expr as apply_filter_expr, parse as parse_filter,

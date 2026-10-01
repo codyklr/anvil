@@ -21,6 +21,11 @@ Anvil is not intended to be a spreadsheet replacement.
 - Surface malformed or suspicious data instead of hiding it
 - Show data exactly as it exists: never transform, trim, normalise or
   truncate a value
+- Be self-contained: everything Anvil downloads or persists (model
+  files, caches, future configuration) lives in a folder beside the
+  executable, so deleting the program's folder removes the program and
+  everything it created. The only exception is transient ZIP
+  extraction, which uses the OS temp directory and is cleaned up
 - Optimize for investigation and troubleshooting
 
 ## Data Fidelity

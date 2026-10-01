@@ -487,28 +487,25 @@ pub fn model_dir() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("ANVIL_GLINER_MODEL_DIR") {
         return Ok(path.into());
     }
+    let revisioned = format!("gliner2.5-small-v1-{MODEL_REVISION}");
     let base = if let Some(path) = std::env::var_os("ANVIL_NL_CACHE") {
         PathBuf::from(path)
-    } else if cfg!(target_os = "windows") {
-        PathBuf::from(
-            std::env::var_os("LOCALAPPDATA")
-                .ok_or("Set ANVIL_NL_CACHE to a writable cache directory.")?,
-        )
-        .join("anvil/models")
     } else {
-        let home = PathBuf::from(
-            std::env::var_os("HOME").ok_or("Set ANVIL_NL_CACHE to a writable cache directory.")?,
-        );
-        if cfg!(target_os = "macos") {
-            home.join("Library/Caches/anvil/models")
-        } else {
-            std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".cache"))
-                .join("anvil/models")
-        }
+        crate::paths::model_root().map_err(|error| error.to_string())?
     };
-    Ok(base.join(format!("gliner2.5-small-v1-{MODEL_REVISION}")))
+    let portable = base.join(&revisioned);
+    if portable.is_dir() {
+        return Ok(portable);
+    }
+    // Read a model downloaded before the portable layout in place instead
+    // of re-downloading it. New downloads always go to the portable path.
+    if let Some(legacy) = crate::paths::legacy_data_dir() {
+        let previous = legacy.join("models").join(&revisioned);
+        if previous.is_dir() {
+            return Ok(previous);
+        }
+    }
+    Ok(portable)
 }
 
 /// Explicit setup command only. Each file is published atomically after a

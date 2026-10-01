@@ -185,6 +185,10 @@ Agents must **not**:
   `VISION.md` and `docs/adr/0003-byte-faithful-display.md`.
 - Perform large scans on the UI thread.
 - Sacrifice large-file behaviour for implementation convenience.
+- Scatter persistent program state (downloaded models, caches, future
+  configuration) into the platform cache/config directories. Keep it
+  beside the executable so the install stays self-contained; see the
+  self-contained principle in `VISION.md` and `src/paths.rs`.
 - Add dependencies without weighing the maintenance cost.
 - Use `unsafe` outside the existing `MmapSource::open` site without
   an explicit justification comment (and, for durable changes, an
