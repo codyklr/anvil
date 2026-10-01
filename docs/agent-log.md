@@ -6648,3 +6648,69 @@ documents the panel and the `ui::commands` action list includes
 
 Iteration 8a: make text sorting and `min`/`max` compare exact bytes
 with a deterministic tiebreak, starting from a failing test.
+
+---
+
+## 2026-09-30 — Iteration 8a: exact-byte text ordering
+
+### Context
+
+First part of Iteration 8 (data fidelity). Text sorting and the
+inspector's `min`/`max` compared a trimmed, case-insensitive form, so
+`Apple`/`apple` and ` 42 `/`42` compared equal even though the fidelity
+rule treats them as distinct values.
+
+### Implemented
+
+- `query::sort`: the `Text` key now stores the cell's exact decoded
+  bytes (no `trim`, no `to_ascii_lowercase`). Equal keys tie-break on
+  the record index, making the order a deterministic total order.
+  Numeric keys are unchanged (trimmed `f64` parse), and empty /
+  whitespace-only values still sort last via the existing
+  `trimmed.is_empty()` check.
+- `schema::stats::compare_values`: text columns now compare exact bytes
+  (`a.cmp(b)`); numeric columns keep trimming internally for the `f64`
+  parse. The case-insensitive `cmp_text_ci` helper is removed. The
+  inspector still displays exact values and classifies emptiness by
+  `trim().is_empty()` (unchanged here; decided in 8b).
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **453 passed, 7 ignored** (198 library, 171
+  binary, 83 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean.
+- New tests prove `Apple` vs `apple` and ` a` vs `a` are distinct and
+  deterministic, and that `min`/`max` follow the same rule. The
+  numeric, empty-last, filter-composition, and stability tests still
+  pass unchanged.
+
+### Tests added / changed
+
+- `query/sort.rs`: `sorts_text_case_insensitively` replaced by
+  `sorts_text_by_exact_bytes`; added
+  `text_sort_distinguishes_case_and_padding`.
+- `schema/stats.rs`: `text_min_max_is_case_insensitive` replaced by
+  `text_min_max_compares_exact_bytes`; added
+  `text_min_max_is_case_sensitive_and_padding_aware`.
+
+### Roadmap changes
+
+- Milestone 5 data fidelity: "Make `min` / `max` ordering and text
+  sorting compare the exact value" ticked.
+
+### Architecture changes
+
+`ARCHITECTURE.md` `query::sort` description updated (exact bytes,
+record-index tiebreak).
+
+### Issues / technical debt discovered
+
+- A whitespace-only cell is still classified as empty and sorts last;
+  Iteration 8b decides whether that stays the byte-faithful answer.
+
+### Next recommended task
+
+Iteration 8b: decide whether a whitespace-only cell is empty, per
+ADR 0003.

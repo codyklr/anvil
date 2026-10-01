@@ -171,11 +171,12 @@ anvil/
   returns the byte ranges of every match. Used by the grid renderer
   to highlight the literal matched substring inside each cell.
 - `query::sort` — `apply(doc, rows, &SortSpec) -> Vec<u64>` returns a
-  stable permutation of the supplied row indexes. Numeric columns
-  compare with `f64::total_cmp`; text compares case-insensitively on
-  trimmed bytes; empty / non-numeric values sort last in both
-  directions. Sorting composes with filtering because the caller
-  passes the filtered set (or every record) as `rows`.
+  deterministic permutation of the supplied row indexes. Numeric
+  columns compare with `f64::total_cmp`; text compares exact bytes
+  (case-sensitive, padding-preserving); empty / non-numeric values sort
+  last in both directions; equal keys tie-break on the record index.
+  Sorting composes with filtering because the caller passes the
+  filtered set (or every record) as `rows`.
 - `schema::infer` — samples up to 2048 rows per column and returns a
   `ColumnProfile` with an `Integer` / `Float` / `Boolean` / `Text` /
   `Empty` type and a `numeric_fraction` confidence. The sorter uses

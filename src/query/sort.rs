@@ -7,9 +7,10 @@
 //!
 //! Empty values always sort to the end, for both ascending and
 //! descending order, so blank cells do not scatter through the result.
-//! Numeric columns compare numerically; everything else compares
-//! case-insensitively on trimmed bytes (locale-free). The sort is
-//! stable, so equal keys keep their previous order.
+//! Numeric columns compare numerically; everything else compares exact
+//! bytes (case-sensitive, padding preserved) so `Apple` and `apple`, or
+//! ` 42 ` and `42`, never compare equal. Ties fall back to the record
+//! index for a deterministic order.
 
 use std::cmp::Ordering;
 
@@ -28,7 +29,7 @@ pub enum SortOrder {
 pub enum SortKind {
     /// Parse values as `f64`; non-numeric and empty values sort last.
     Numeric,
-    /// Case-insensitive byte comparison of the trimmed value.
+    /// Exact byte comparison (case-sensitive, padding preserved).
     Text,
 }
 
@@ -61,7 +62,11 @@ pub fn apply(doc: &ParsedDocument, rows: &[u64], spec: &SortSpec) -> Vec<u64> {
     // to both directions without reversing the empty ordering.
     let keys: Vec<Key> = rows.iter().map(|&row| Key::new(doc, row, spec)).collect();
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&a, &b| compare(&keys[a], &keys[b], spec.order));
+    // Tie-break equal keys on the record index so the result is a total,
+    // deterministic order even if the input `rows` order ever changes.
+    order.sort_by(|&a, &b| {
+        compare(&keys[a], &keys[b], spec.order).then_with(|| rows[a].cmp(&rows[b]))
+    });
     order.into_iter().map(|index| rows[index]).collect()
 }
 
@@ -87,7 +92,9 @@ impl Key {
                 .map(Key::Number)
                 .unwrap_or(Key::Missing),
             SortKind::Text => {
-                let mut bytes: Vec<u8> = trimmed.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                // Exact bytes: no case folding and no trimming, so values
+                // that differ only in padding or case are distinct keys.
+                let mut bytes: Vec<u8> = cell.as_bytes().to_vec();
                 bytes.shrink_to_fit();
                 Key::Text(bytes)
             }
@@ -168,11 +175,36 @@ mod tests {
     }
 
     #[test]
-    fn sorts_text_case_insensitively() {
+    fn sorts_text_by_exact_bytes() {
         let doc = doc_from(b"country,pad\nbanana,a\nApple,a\ncherry,a\n");
         let rows = all_rows(&doc);
         let sorted = apply(&doc, &rows, &spec(&doc, 0, SortOrder::Ascending));
+        // Exact bytes: Apple (0x41) < banana (0x62) < cherry (0x63).
         assert_eq!(sorted, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn text_sort_distinguishes_case_and_padding() {
+        let doc = doc_from(b"v,pad\napple,a\nApple,a\n");
+        let rows = all_rows(&doc);
+        // Uppercase sorts before lowercase by exact bytes; the old
+        // case-insensitive key would have treated these as equal.
+        assert_eq!(
+            apply(&doc, &rows, &spec(&doc, 0, SortOrder::Ascending)),
+            vec![1, 0]
+        );
+        assert_eq!(
+            apply(&doc, &rows, &spec(&doc, 0, SortOrder::Descending)),
+            vec![0, 1]
+        );
+
+        let padded = doc_from(b"v,pad\n a,a\na,a\n");
+        let rows = all_rows(&padded);
+        // Leading whitespace is part of the key: " a" (0x20) < "a".
+        assert_eq!(
+            apply(&padded, &rows, &spec(&padded, 0, SortOrder::Ascending)),
+            vec![0, 1]
+        );
     }
 
     #[test]

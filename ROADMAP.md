@@ -712,10 +712,14 @@ make what exists feel finished.
   implementation and `ParseMeta.headers` is built with it rather than
   `from_utf8_lossy`; regression tests live in `tests/core.rs` and
   `schema::stats`.
-- [ ] Make `min` / `max` ordering and text sorting compare the exact
+- [x] Make `min` / `max` ordering and text sorting compare the exact
   value rather than the trimmed, case-insensitive form, with the exact
   bytes as a deterministic tiebreak, so two values that differ only in
-  padding or case never compare as equal.
+  padding or case never compare as equal. Iteration 8a: text sort keys
+  store the cell's exact bytes (no trim, no case folding) with a record
+  index tiebreak; `schema::stats::compare_values` uses exact bytes for
+  a text column. Numeric sorting and numeric min/max are unchanged, and
+  empty / whitespace-only values still sort last.
 - [ ] Decide whether a whitespace-only cell is empty. The inspector and
   the filter `empty` operator currently both treat it as empty, which
   conflicts with the fidelity rule now that a value holds bytes and is

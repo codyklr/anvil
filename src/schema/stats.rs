@@ -4,8 +4,11 @@
 //! counts, distinct cardinality, min/max, longest/shortest, samples,
 //! and the most frequent values. Every displayed value is the exact cell
 //! value: padding is preserved and `" 42 "` is a different value from
-//! `"42"`. Ordering (min/max) still ignores surrounding whitespace, which
-//! is why `trimmed` exists alongside `exact`.
+//! `"42"`. Ordering (min/max) compares exact bytes for a text column
+//! (case-sensitive, padding-preserving), so values differing only in
+//! padding or case are never equal; numeric columns keep their numeric
+//! comparison. `trimmed` is only used to classify emptiness (and
+//! internally by the numeric parse).
 //!
 //! Distinct counting is exact while the
 //! value set stays under a threshold; past that it switches to a
@@ -126,7 +129,7 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
         match &min {
             None => min = Some(exact.to_string()),
             Some(current) => {
-                if compare_values(trimmed, current.trim(), numeric) == Ordering::Less {
+                if compare_values(&exact, current, numeric) == Ordering::Less {
                     min = Some(exact.to_string());
                 }
             }
@@ -134,7 +137,7 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
         match &max {
             None => max = Some(exact.to_string()),
             Some(current) => {
-                if compare_values(trimmed, current.trim(), numeric) == Ordering::Greater {
+                if compare_values(&exact, current, numeric) == Ordering::Greater {
                     max = Some(exact.to_string());
                 }
             }
@@ -219,34 +222,19 @@ pub fn stats(doc: &ParsedDocument, column: usize, options: &StatsOptions) -> Col
     }
 }
 
-/// Compare two non-empty values: numerically for a numeric column,
-/// case-insensitively otherwise. Non-numeric values in a numeric column
-/// compare equal so they neither set nor dislodge min/max.
+/// Compare two non-empty values. Numeric columns compare numerically
+/// (the parse tolerates surrounding whitespace, matching the old
+/// behaviour); every other column compares exact bytes, case-sensitive
+/// and padding-preserving. Non-numeric values in a numeric column compare
+/// equal so they neither set nor dislodge min/max.
 fn compare_values(a: &str, b: &str, numeric: bool) -> Ordering {
     if numeric {
-        match (a.parse::<f64>(), b.parse::<f64>()) {
+        match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
             (Ok(x), Ok(y)) => x.total_cmp(&y),
             _ => Ordering::Equal,
         }
     } else {
-        cmp_text_ci(a, b)
-    }
-}
-
-/// Case-insensitive byte comparison without allocating.
-fn cmp_text_ci(a: &str, b: &str) -> Ordering {
-    let mut left = a.bytes().map(|b| b.to_ascii_lowercase());
-    let mut right = b.bytes().map(|b| b.to_ascii_lowercase());
-    loop {
-        match (left.next(), right.next()) {
-            (Some(x), Some(y)) => match x.cmp(&y) {
-                Ordering::Equal => continue,
-                other => return other,
-            },
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-        }
+        a.cmp(b)
     }
 }
 
@@ -408,11 +396,20 @@ mod tests {
     }
 
     #[test]
-    fn text_min_max_is_case_insensitive() {
+    fn text_min_max_compares_exact_bytes() {
         let doc = doc_from(b"k,pad\nbanana,a\nApple,a\ncherry,a\n");
         let stats = stats(&doc, 0, &StatsOptions::default());
         assert_eq!(stats.min.as_deref(), Some("Apple"));
         assert_eq!(stats.max.as_deref(), Some("cherry"));
+    }
+
+    #[test]
+    fn text_min_max_is_case_sensitive_and_padding_aware() {
+        // Exact bytes: " apple" (0x20) < "Apple" (0x41) < "apple" (0x61).
+        let doc = doc_from(b"k,pad\napple,a\nApple,a\n\" apple\",a\n");
+        let stats = stats(&doc, 0, &StatsOptions::default());
+        assert_eq!(stats.min.as_deref(), Some(" apple"));
+        assert_eq!(stats.max.as_deref(), Some("apple"));
     }
 
     #[test]
