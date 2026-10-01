@@ -138,8 +138,33 @@ After verification:
 
 ### 7. Handoff
 
-Append a concise entry to `/docs/agent-log.md`. Then identify the
-logical next task.
+Commit the iteration on its conventional branch, open and merge the
+pull request (see Version Control Workflow), then append a concise
+entry to `/docs/agent-log.md` and identify the logical next task.
+
+---
+
+## Version Control Workflow
+
+Every coherent change set lands on its own branch and is merged to
+`master` through a pull request. Do not push directly to `master`.
+
+- **Branch name:** a Conventional Commits type prefix plus a short
+  kebab-case summary, e.g. `fix/linux-build`,
+  `feat/non-contiguous-select`, `refactor/view-split`,
+  `docs/agent-workflow`. Common types: `feat`, `fix`, `refactor`,
+  `perf`, `docs`, `test`, `chore`.
+- **Commits:** Conventional Commits — `<type>(<scope>): <imperative
+  subject>` — with a body explaining *why*. One roadmap iteration is
+  one commit; do not combine unrelated work.
+- **Pull request:** open a PR into the default branch (`master`) and
+  state what changed, how it was verified, and what was **not**
+  verified. Reference the roadmap item or issue when there is one.
+- **Merge:** once CI is green and the Definition of Done is met, merge
+  the PR (a merge commit preserves the per-iteration commits), delete
+  the branch, and fast-forward local `master`.
+- If no remote or credentials are available, say so in the handoff
+  rather than bypassing the PR and pushing to `master`.
 
 ---
 
@@ -296,6 +321,8 @@ A task is **done** only when **all** of the following hold:
 - Documentation reflects the result (`ROADMAP.md` ticked,
   `ARCHITECTURE.md` updated if applicable).
 - An agent-log handoff entry has been written.
+- The change is on a conventional branch and has been merged to
+  `master` through a pull request.
 
 If any of the above cannot be verified, **state that explicitly**
 rather than pretending completion. "Tests pass; manual UI exercise
@@ -375,8 +402,10 @@ verbose chain-of-thought.
   generated fixtures (`large.csv`, `archive.zip`, `multi.zip`,
   `malformed.csv`) are recreated with `gen_fixture` when they are
   needed and are never checked in.
-- Keep commit messages in the imperative mood with a short subject
-  and a body that explains *why*.
+- Use Conventional Commits: `<type>(<scope>): <imperative subject>`
+  with a body that explains *why*, and land the work through a pull
+  request (see Version Control Workflow). Never push directly to
+  `master`.
 
 ---
 
@@ -392,7 +421,7 @@ cargo fmt
 # Lint
 cargo clippy --release
 
-# Tests (468 passing, 7 ignored)
+# Tests (477 passing, 7 ignored)
 cargo test --release
 
 # Throughput test (needs fixtures/large.csv)
