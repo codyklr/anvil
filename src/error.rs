@@ -3,7 +3,6 @@
 //! Errors are split between ones a user can recover from (e.g. malformed rows)
 //! and ones that fail an entire open (e.g. archive corruption).
 
-use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,17 +13,14 @@ pub enum AnvilError {
     #[error("ZIP error: {0}")]
     Zip(#[from] zip::result::ZipError),
 
-    #[error("file is not a zip archive")]
-    NotAZip(PathBuf),
-
     #[error("unsupported compression method {0:?} for entry {1:?}")]
     UnsupportedCompression(String, String),
 
+    #[error("archive entry {0:?} is encrypted; Anvil cannot open password-protected entries")]
+    EncryptedEntry(String),
+
     #[error("archive contains no supported data files")]
     NoUsableEntries,
-
-    #[error("archive contains multiple entries; please select one ({0} candidates)")]
-    AmbiguousArchive(usize),
 
     #[error("archive entries needed but {0} was requested")]
     EntryNotFound(String),
@@ -41,9 +37,6 @@ pub enum AnvilError {
 
     #[error("empty file")]
     EmptyFile,
-
-    #[error("binary file: no newline bytes in first {sampled} bytes")]
-    LooksBinary { sampled: usize },
 
     #[error("{0}")]
     Other(String),

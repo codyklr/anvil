@@ -77,7 +77,11 @@ impl std::fmt::Debug for MmapSource {
 }
 
 /// Result of resolving a `DataSource` to something parsable.
-#[derive(Debug)]
+///
+/// Cloning is cheap: the memory map and the extraction temp directory are
+/// shared behind `Arc`s, so re-indexing (e.g. a forced header mode) does
+/// not re-open the file or re-extract an archive entry.
+#[derive(Debug, Clone)]
 pub struct OpenedSource {
     pub source: DataSource,
     pub physical: Arc<MmapSource>,

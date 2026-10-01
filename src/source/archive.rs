@@ -27,6 +27,11 @@ use crate::source::{ArchiveCandidate, DataSource, MmapSource, OpenedSource, Sour
 pub const MAX_DECOMPRESSED_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
 pub const MAX_COMPRESSION_RATIO: u64 = 200;
 
+/// Reason recorded for an entry that is password-protected. Compared by
+/// value so callers can recognise it without parsing prose; the text is
+/// also what the archive diagnostics panel shows the user.
+pub const REJECTED_ENCRYPTED: &str = "encrypted (password-protected)";
+
 #[derive(Debug)]
 pub struct ArchiveSource {
     /// The original archive file.
@@ -98,6 +103,15 @@ impl ArchiveSource {
         self.candidates.iter().filter(|c| c.usable).count()
     }
 
+    /// The first entry that was skipped because it is encrypted, if any.
+    /// Used by the loader to give a targeted message when an archive has
+    /// data files but none of them can be read without a password.
+    pub fn first_encrypted_entry(&self) -> Option<&ArchiveCandidate> {
+        self.candidates
+            .iter()
+            .find(|c| !c.usable && c.rejected_reason == REJECTED_ENCRYPTED)
+    }
+
     /// Resolves a single entry to an `OpenedSource` rooted at a temp file
     /// on disk. The caller does not own the temp file; it is cleaned up
     /// when the `OpenedSource` is dropped via the `MmapSource`'s reference
@@ -109,18 +123,13 @@ impl ArchiveSource {
             .map_err(|_| AnvilError::EntryNotFound(entry_name.to_string()))?;
 
         if entry.encrypted() {
-            return Err(AnvilError::Other(format!(
-                "encrypted entries are not supported: {entry_name}"
-            )));
+            return Err(AnvilError::EncryptedEntry(entry_name.to_string()));
         }
-        match entry.compression() {
-            CompressionMethod::Stored | CompressionMethod::Deflated | CompressionMethod::Bzip2 => {}
-            other => {
-                return Err(AnvilError::UnsupportedCompression(
-                    format!("{other:?}"),
-                    entry_name.to_string(),
-                ));
-            }
+        if !is_supported_method(entry.compression()) {
+            return Err(AnvilError::UnsupportedCompression(
+                format!("{:?}", entry.compression()),
+                entry_name.to_string(),
+            ));
         }
 
         let uncompressed_size = entry.size();
@@ -221,16 +230,58 @@ fn evaluate_entry(entry: &ZipFile<'_>, name: &str) -> (bool, u8, String) {
             format!("exceeds {} byte limit", MAX_DECOMPRESSED_BYTES),
         );
     }
-    match extension_rank(name) {
-        Some(rank) => (true, rank, String::new()),
-        None => {
-            let ext = Path::new(name)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            (false, u8::MAX, format!("unsupported extension: .{ext}"))
-        }
+    let Some(rank) = extension_rank(name) else {
+        let ext = Path::new(name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        return (false, u8::MAX, format!("unsupported extension: .{ext}"));
+    };
+    // A plausible data file, but can we actually read it? Report the
+    // reason up front so it shows in the archive diagnostics list rather
+    // than only when the lazy extraction fails.
+    if entry.encrypted() {
+        return (false, u8::MAX, REJECTED_ENCRYPTED.into());
     }
+    if !is_supported_method(entry.compression()) {
+        return (
+            false,
+            u8::MAX,
+            format!("unsupported compression ({:?})", entry.compression()),
+        );
+    }
+    if ratio_exceeded(entry.compressed_size(), entry.size()) {
+        return (
+            false,
+            u8::MAX,
+            format!(
+                "suspicious compression ratio ({}x > {}x limit)",
+                compression_ratio(entry.compressed_size(), entry.size()),
+                MAX_COMPRESSION_RATIO
+            ),
+        );
+    }
+    (true, rank, String::new())
+}
+
+/// Can the `zip` crate decompress this method for us?
+fn is_supported_method(method: CompressionMethod) -> bool {
+    matches!(
+        method,
+        CompressionMethod::Stored | CompressionMethod::Deflated | CompressionMethod::Bzip2
+    )
+}
+
+/// Would reading this entry expand beyond the compression-ratio cap?
+/// `compressed == 0` is treated as "no known limit" rather than an
+/// infinite ratio, matching the streaming check in `extract_into_temp`.
+fn ratio_exceeded(compressed: u64, uncompressed: u64) -> bool {
+    compressed > 0 && uncompressed > compressed.saturating_mul(MAX_COMPRESSION_RATIO)
+}
+
+/// Uncompressed / compressed ratio, rounded down, for the reason text.
+fn compression_ratio(compressed: u64, uncompressed: u64) -> u64 {
+    uncompressed.checked_div(compressed).unwrap_or(0)
 }
 
 /// Rank a file by how likely it is to be the dataset the user wants.
@@ -276,4 +327,45 @@ pub fn sample_first_bytes(zip: &mut ZipArchive<File>, name: &str) -> Result<Vec<
     let n = f.read(&mut buf)?;
     buf.truncate(n);
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ratio_check_matches_the_streaming_extraction_limit() {
+        // Exactly at the cap is allowed; one byte over is not.
+        assert!(!ratio_exceeded(100, 100 * MAX_COMPRESSION_RATIO));
+        assert!(ratio_exceeded(100, 100 * MAX_COMPRESSION_RATIO + 1));
+        // Unknown compressed size never triggers the cap.
+        assert!(!ratio_exceeded(0, u64::MAX));
+        // A normal (near 1:1) entry is fine.
+        assert!(!ratio_exceeded(1_000, 1_000));
+    }
+
+    #[test]
+    fn compression_ratio_rounds_down_and_handles_zero() {
+        assert_eq!(compression_ratio(100, 250), 2);
+        assert_eq!(compression_ratio(0, 999), 0);
+        assert_eq!(compression_ratio(7, 7), 1);
+    }
+
+    #[test]
+    fn supported_methods_are_the_ones_we_can_decode() {
+        assert!(is_supported_method(CompressionMethod::Stored));
+        assert!(is_supported_method(CompressionMethod::Deflated));
+        assert!(is_supported_method(CompressionMethod::Bzip2));
+        assert!(!is_supported_method(CompressionMethod::SHRINK));
+    }
+
+    #[test]
+    fn extension_rank_prefers_tabular_extensions() {
+        assert_eq!(extension_rank("data.csv"), Some(0));
+        assert_eq!(extension_rank("dir/DATA.TSV"), Some(0));
+        assert_eq!(extension_rank("export.out"), Some(1));
+        assert_eq!(extension_rank("notes.txt"), Some(2));
+        assert_eq!(extension_rank("image.png"), None);
+        assert_eq!(extension_rank("noext"), None);
+    }
 }

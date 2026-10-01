@@ -4,7 +4,13 @@
 //! executor. Each open bumps a generation counter; results from a stale
 //! generation are dropped, which makes "drop a new file while the old one
 //! is still loading" safe.
+//!
+//! Submodules hold the search bar (`search`), the filter bar (`filter`),
+//! and the `#[cfg(test)]` UI suite (`tests`). The shared editable-text
+//! rendering lives in `super::input`; the edit buffer itself is
+//! `super::text_edit`.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,14 +24,25 @@ use gpui::{
 };
 
 use anvil_core::{
-    apply_filter, parse_filter, search_records, ArchiveSource, CellPos, Filter, LoadResult,
-    LoadedDocument, ParsedDocument, SearchOptions, Selection,
+    apply_filter_expr, column_stats, describe_nl, find_ranges, infer_schema, parse_filter_expr,
+    parse_nl, reindex, sample_distinct, scan_encoding, search_records, sort_rows,
+    suggest_candidates, suggest_context, ArchiveSource, CellPos, ColumnIndex, ColumnStats,
+    DistinctCount, EncodingReport, FilterExpr, HeaderMode, IndexOptions, LoadResult,
+    LoadedDocument, NlColumn, NlResult, NlSchema, ParsedDocument, SearchOptions, Selection, Slot,
+    SortKind, SortOrder, SortSpec, StatsOptions,
 };
 
 use super::archive_picker;
 use super::commands::{self, Action};
 use super::grid::{self, GridModel};
+use super::input;
+use super::text_edit::TextEdit;
 use super::theme;
+
+mod ask;
+mod diagnostics;
+mod filter;
+mod search;
 
 /// How long the green "copied" flash stays over the selection before it
 /// fades back to the normal selection colour.
@@ -76,7 +93,7 @@ struct DocumentSnapshot {
     /// Whether the search bar is visible for this tab.
     search_open: bool,
     /// The needle typed into the search bar.
-    search_query: String,
+    search_query: TextEdit,
     /// Sorted record indexes that match the latest query. Reset on
     /// every keystroke while a new search is in flight.
     search_matches: Vec<u64>,
@@ -85,15 +102,26 @@ struct DocumentSnapshot {
     /// Bumped on every keystroke; obsolete search tasks compare
     /// their captured generation against this and discard themselves.
     search_generation: u64,
+    /// Whether this tab's search is byte-exact (`Aa` toggle in the
+    /// search bar). Per tab so a case-sensitive hunt in one file does
+    /// not surprise the user in another.
+    search_case_sensitive: bool,
+    /// Restrict this tab's search (and match highlighting) to a single
+    /// column, set by clicking a column header. `None` searches every
+    /// column. Persisted across closing the bar so the
+    /// "click a header, then Cmd/Ctrl+F" flow works; the scoped
+    /// header stays highlighted so the state is visible.
+    search_column: Option<usize>,
     /// Rectangle of the most recent successful copy, painted green
     /// until the flash timer clears it.
     copy_flash_rect: Option<(CellPos, CellPos)>,
     copy_flash_generation: u64,
     /// Text in the filter input (kept per tab so switching away and
     /// back restores what the user was typing).
-    filter_input: String,
-    /// The applied predicate, or `None` when the tab is unfiltered.
-    filter_applied: Option<Filter>,
+    filter_input: TextEdit,
+    /// The applied predicate expression, or `None` when the tab is
+    /// unfiltered.
+    filter_applied: Option<FilterExpr>,
     /// Record indexes that pass the filter, in record order. `None`
     /// means the tab is unfiltered and the grid renders the whole
     /// document.
@@ -101,6 +129,21 @@ struct DocumentSnapshot {
     /// Bumped on every filter apply; a background filter task whose
     /// generation has moved on discards its result.
     filter_generation: u64,
+    /// Active sort for this tab, or `None`. `kind` is filled in from
+    /// inferred column types when the sort task runs; the stored value
+    /// only needs the column and direction for cycling.
+    sort_spec: Option<SortSpec>,
+    /// Record indexes in sorted display order, a permutation of the
+    /// current base (filtered set, or every record). `None` while no
+    /// sort is active or while the task is in flight.
+    sort_rows: Option<Arc<Vec<u64>>>,
+    /// Bumped on every sort request; stale background results are
+    /// discarded.
+    sort_generation: u64,
+    /// How this tab interprets its first row. `Auto` is the detected
+    /// heuristic; `Header` / `Headerless` are explicit user overrides
+    /// applied by re-indexing the same opened source.
+    header_mode: HeaderMode,
 }
 
 impl DocumentSnapshot {
@@ -122,16 +165,22 @@ impl DocumentSnapshot {
             scroll_x: 0.0,
             v_scroll: UniformListScrollHandle::new(),
             search_open: false,
-            search_query: String::new(),
+            search_query: TextEdit::new(),
             search_matches: Vec::new(),
             search_active: -1,
             search_generation: 0,
             copy_flash_rect: None,
             copy_flash_generation: 0,
-            filter_input: String::new(),
+            filter_input: TextEdit::new(),
             filter_applied: None,
             filter_rows: None,
             filter_generation: 0,
+            sort_spec: None,
+            sort_rows: None,
+            sort_generation: 0,
+            search_case_sensitive: false,
+            search_column: None,
+            header_mode: HeaderMode::Auto,
         }
     }
 
@@ -150,16 +199,22 @@ impl DocumentSnapshot {
             scroll_x: 0.0,
             v_scroll: UniformListScrollHandle::new(),
             search_open: false,
-            search_query: String::new(),
+            search_query: TextEdit::new(),
             search_matches: Vec::new(),
             search_active: -1,
             search_generation: 0,
             copy_flash_rect: None,
             copy_flash_generation: 0,
-            filter_input: String::new(),
+            filter_input: TextEdit::new(),
             filter_applied: None,
             filter_rows: None,
             filter_generation: 0,
+            sort_spec: None,
+            sort_rows: None,
+            sort_generation: 0,
+            search_case_sensitive: false,
+            search_column: None,
+            header_mode: HeaderMode::Auto,
         }
     }
 
@@ -284,6 +339,9 @@ pub struct MainView {
     h_drag: Option<(f32, f32)>,
 
     selection: Selection,
+    /// How the active document's first row is interpreted. Mirrors
+    /// `documents[active].header_mode`. (Mirror.)
+    header_mode: HeaderMode,
     /// True between a mouse-down on a grid cell and the matching
     /// mouse-up. Drag-select only extends the selection while this is
     /// set, so a drag that began outside the grid does not suddenly
@@ -320,9 +378,11 @@ pub struct MainView {
     copy_flash_generation: u64,
 
     /// Window-space bounds of the scrollable grid area, recorded by the
-    /// overlay canvas each frame. Used to decide when a drag has left
-    /// the list vertically and should auto-scroll.
-    list_bounds: Option<Bounds<Pixels>>,
+    /// overlay canvas each frame. Two consumers: it decides when a drag
+    /// has left the list vertically and should auto-scroll, and its
+    /// width (minus the row-number gutter) is the measured
+    /// `viewport_w` used by the horizontal scroll math.
+    grid_bounds: Option<Bounds<Pixels>>,
     /// Last observed pointer position in window coordinates, updated by
     /// the overlay canvas's global mouse-move listener. Reported even
     /// when the pointer is outside the grid, which per-cell handlers
@@ -333,6 +393,34 @@ pub struct MainView {
     /// mouse-up (or cleared by the loop itself when the drag ends).
     auto_scroll_task: Option<Task<()>>,
 
+    /// Whether the right-side column-inspector panel is visible. Toggled
+    /// by Cmd/Ctrl+I and the toolbar button. Global; it follows the
+    /// active tab's selected cell.
+    inspector_open: bool,
+    /// The column whose stats are currently shown, or `None`.
+    inspector_column: Option<usize>,
+    /// Stats for `inspector_column`, or `None` while a scan is in flight.
+    inspector_stats: Option<Arc<ColumnStats>>,
+    /// Bumped on every inspector request; stale results are discarded.
+    inspector_generation: u64,
+    /// Outstanding background column-stats task.
+    inspector_task: Option<Task<()>>,
+
+    /// Whether the right-side diagnostics panel is visible. Global,
+    /// like the inspector and file panels. The warnings themselves are
+    /// immutable per document and read live from the active model, so
+    /// no background task or generation counter is needed.
+    diagnostics_open: bool,
+    /// UTF-8 scan of the active document, computed on the background
+    /// executor when the diagnostics panel opens. `None` while the scan
+    /// is in flight (or before the panel is opened). Unlike warnings,
+    /// this is O(file) so it cannot run during render.
+    encoding_report: Option<Arc<EncodingReport>>,
+    /// Discards obsolete encoding scans after a document change.
+    encoding_generation: u64,
+    /// Outstanding background encoding-scan task.
+    encoding_task: Option<Task<()>>,
+
     /// Search state (Cmd/Ctrl+F). `search_open` controls whether the
     /// search bar is visible. While open, `search_query` holds the
     /// user's typed needle; each keystroke spawns a background
@@ -341,7 +429,7 @@ pub struct MainView {
     /// be briefly stale relative to `search_query` while a search is
     /// in flight.
     search_open: bool,
-    search_query: String,
+    search_query: TextEdit,
     search_matches: Vec<u64>,
     /// Index into `search_matches` of the currently highlighted row.
     /// `-1` when there are no matches yet. Cycled by Enter / Shift+Enter
@@ -350,6 +438,11 @@ pub struct MainView {
     /// Bumped on every keystroke / open / close. A background task
     /// only applies its result if the view's generation still matches.
     search_generation: u64,
+    /// Whether search is byte-exact for the active tab. (Mirror.)
+    search_case_sensitive: bool,
+    /// Restrict search to one column index, or `None` for all
+    /// columns. (Mirror.)
+    search_column: Option<usize>,
     /// Outstanding search task. Dropped when the view closes the bar
     /// or starts a new search; the running task continues but its
     /// `update` callback becomes a no-op.
@@ -363,15 +456,21 @@ pub struct MainView {
     /// deferred `window.focus` onto `search_focus_handle`. Mirrors the
     /// pattern used for the grid handle.
     focus_search_on_next_frame: bool,
+    /// Window-space bounds of the search input's text area, recorded
+    /// each frame by a `canvas` overlay; maps pointer x to a byte index.
+    search_text_bounds: Option<Bounds<Pixels>>,
+    /// True between a mouse-down in the search input and the matching
+    /// mouse-up; drag-select only extends while set.
+    search_dragging: bool,
 
     /// Whether the filter bar (Cmd/Ctrl+L) is visible. The bar's
     /// visibility is global; the predicate itself is per tab.
     filter_open: bool,
     /// Text in the filter input. (Mirror of `documents[active]`.)
-    filter_input: String,
+    filter_input: TextEdit,
     /// The applied predicate for the active tab, or `None`.
     /// (Mirror.)
-    filter_applied: Option<Filter>,
+    filter_applied: Option<FilterExpr>,
     /// Record indexes that pass the active tab's filter, or `None` when
     /// the tab is unfiltered. (Mirror.)
     filter_rows: Option<Arc<Vec<u64>>>,
@@ -382,12 +481,109 @@ pub struct MainView {
     filter_error: Option<String>,
     /// Outstanding background filter task.
     filter_task: Option<Task<()>>,
+    /// Active sort for the active tab, or `None`. (Mirror.)
+    sort_spec: Option<SortSpec>,
+    /// Sorted record indexes for the active tab, or `None`. (Mirror.)
+    sort_rows: Option<Arc<Vec<u64>>>,
+    /// Bumped on every sort request; obsolete sort tasks discard their
+    /// results. (Mirror.)
+    sort_generation: u64,
+    /// Outstanding background sort task.
+    sort_task: Option<Task<()>>,
     /// Focus handle for the filter bar. Kept separate from the search
     /// and grid handles so each bar's keys route correctly.
     filter_focus_handle: FocusHandle,
     /// Set when `open_filter` is called; the next render schedules a
     /// deferred focus onto `filter_focus_handle`.
     focus_filter_on_next_frame: bool,
+    /// Window-space bounds of the filter input's text area, recorded
+    /// each frame by a `canvas` overlay. Pointer x is mapped through
+    /// this to a byte index for click/drag caret placement.
+    filter_text_bounds: Option<Bounds<Pixels>>,
+    /// True between a mouse-down in the filter input and the matching
+    /// mouse-up; drag-select only extends while set.
+    filter_dragging: bool,
+    /// Autocomplete rows for the filter input, recomputed after every
+    /// edit/caret move. Empty when there is nothing to suggest.
+    filter_suggestions: Vec<FilterSuggestion>,
+    /// Highlighted row in `filter_suggestions`.
+    filter_suggestion_selected: usize,
+    /// Whether the autocomplete popup is currently shown. Closed by Esc,
+    /// accepting a suggestion, or clearing the input.
+    filter_popup_open: bool,
+    /// Bounded distinct-value samples per column, used for the value
+    /// slot. Cleared when the active document changes.
+    filter_value_cache: HashMap<usize, Vec<String>>,
+    /// Scroll handle for the autocomplete popup, so the highlighted row
+    /// is kept in view as the selection moves.
+    filter_suggestion_scroll: ScrollHandle,
+    /// Whether the natural-language Ask bar (Cmd/Ctrl+Shift+L) is open.
+    ask_open: bool,
+    /// Text in the Ask input.
+    ask_input: TextEdit,
+    /// Latest parse of `ask_input`, shown as a preview before accepting.
+    ask_result: Option<NlResult>,
+    /// Schema context for the active document, built when the bar opens.
+    ask_schema: Option<NlSchema>,
+    ask_focus_handle: FocusHandle,
+    /// Set when `open_ask` is called; the next render focuses the input.
+    focus_ask_on_next_frame: bool,
+    ask_text_bounds: Option<Bounds<Pixels>>,
+    ask_dragging: bool,
+    /// True while a Tier 2 interpretation is running on the background
+    /// executor.
+    ask_loading: bool,
+    /// Error from the last Tier 2 attempt, shown in the bar.
+    ask_model_error: Option<String>,
+    /// Discards stale Tier 2 results when the input changes.
+    ask_generation: u64,
+    ask_task: Option<Task<()>>,
+    /// Optional Tier 2 interpreter (embedded model when the `nl-model`
+    /// feature is on; injectable in tests).
+    ask_interpreter: Option<AskInterpreter>,
+}
+
+/// A Tier 2 interpreter: phrase + schema + value source to an expression.
+/// The result is always validated by `anvil_core::validate_nl_candidate`
+/// inside the interpreter, so it cannot become an arbitrary query.
+pub(crate) type AskInterpreter = Arc<
+    dyn Fn(&str, &NlSchema, &dyn Fn(usize) -> Vec<String>) -> Result<FilterExpr, String>
+        + Send
+        + Sync,
+>;
+
+/// The production Tier 2 interpreter. With the `nl-model` feature this is
+/// the embedded model backend; without it, Tier 2 is unavailable and the
+/// Ask bar only uses the deterministic parser.
+#[cfg(feature = "nl-gliner")]
+fn ask_interpreter_default() -> Option<AskInterpreter> {
+    let interpreter = anvil_core::gliner::Interpreter::default();
+    Some(Arc::new(move |phrase, schema, values| {
+        interpreter.interpret(phrase, schema, values)
+    }))
+}
+
+#[cfg(all(feature = "nl-model", not(feature = "nl-gliner")))]
+fn ask_interpreter_default() -> Option<AskInterpreter> {
+    Some(Arc::new(|phrase, schema, values| {
+        crate::nlmodel::interpret(phrase, schema, values)
+    }))
+}
+
+#[cfg(not(any(feature = "nl-model", feature = "nl-gliner")))]
+fn ask_interpreter_default() -> Option<AskInterpreter> {
+    None
+}
+
+/// One row in the filter autocomplete popup: the text to insert and the
+/// byte range of the input it replaces. `quote` wraps the inserted text
+/// in double quotes, needed for column names that contain whitespace so
+/// they stay a single token.
+#[derive(Debug, Clone)]
+struct FilterSuggestion {
+    text: String,
+    replace: Range<usize>,
+    quote: bool,
 }
 
 impl MainView {
@@ -409,6 +605,7 @@ impl MainView {
             v_scroll: UniformListScrollHandle::new(),
             h_drag: None,
             selection: Selection::empty(),
+            header_mode: HeaderMode::Auto,
             drag_selecting: false,
             task: None,
             status_message: None,
@@ -417,26 +614,63 @@ impl MainView {
             clipboard: Arc::new(system_clipboard_write),
             copy_flash_rect: None,
             copy_flash_generation: 0,
-            list_bounds: None,
+            grid_bounds: None,
             pointer_pos: None,
             auto_scroll_task: None,
+            inspector_open: false,
+            inspector_column: None,
+            inspector_stats: None,
+            inspector_generation: 0,
+            inspector_task: None,
+            diagnostics_open: false,
+            encoding_report: None,
+            encoding_generation: 0,
+            encoding_task: None,
             search_open: false,
-            search_query: String::new(),
+            search_query: TextEdit::new(),
             search_matches: Vec::new(),
             search_active: -1,
             search_generation: 0,
+            search_case_sensitive: false,
+            search_column: None,
             search_task: None,
             search_focus_handle: cx.focus_handle(),
             focus_search_on_next_frame: false,
+            search_text_bounds: None,
+            search_dragging: false,
             filter_open: false,
-            filter_input: String::new(),
+            filter_input: TextEdit::new(),
             filter_applied: None,
             filter_rows: None,
             filter_generation: 0,
             filter_error: None,
             filter_task: None,
+            sort_spec: None,
+            sort_rows: None,
+            sort_generation: 0,
+            sort_task: None,
             filter_focus_handle: cx.focus_handle(),
             focus_filter_on_next_frame: false,
+            filter_text_bounds: None,
+            filter_dragging: false,
+            filter_suggestions: Vec::new(),
+            filter_suggestion_selected: 0,
+            filter_popup_open: false,
+            filter_value_cache: HashMap::new(),
+            filter_suggestion_scroll: ScrollHandle::new(),
+            ask_open: false,
+            ask_input: TextEdit::new(),
+            ask_result: None,
+            ask_schema: None,
+            ask_focus_handle: cx.focus_handle(),
+            focus_ask_on_next_frame: false,
+            ask_text_bounds: None,
+            ask_dragging: false,
+            ask_loading: false,
+            ask_model_error: None,
+            ask_generation: 0,
+            ask_task: None,
+            ask_interpreter: ask_interpreter_default(),
         }
     }
 
@@ -459,12 +693,18 @@ impl MainView {
         snap.search_matches = self.search_matches.clone();
         snap.search_active = self.search_active;
         snap.search_generation = self.search_generation;
+        snap.search_case_sensitive = self.search_case_sensitive;
+        snap.search_column = self.search_column;
         snap.copy_flash_rect = self.copy_flash_rect;
         snap.copy_flash_generation = self.copy_flash_generation;
         snap.filter_input = self.filter_input.clone();
         snap.filter_applied = self.filter_applied.clone();
         snap.filter_rows = self.filter_rows.clone();
         snap.filter_generation = self.filter_generation;
+        snap.sort_spec = self.sort_spec;
+        snap.sort_rows = self.sort_rows.clone();
+        snap.sort_generation = self.sort_generation;
+        snap.header_mode = self.header_mode;
         snap.archive = self.archive.clone();
         snap.entry_name = self.selected_entry.clone();
     }
@@ -484,18 +724,31 @@ impl MainView {
         self.search_matches.clear();
         self.search_active = -1;
         self.search_generation = 0;
+        self.search_case_sensitive = false;
+        self.search_column = None;
         self.copy_flash_rect = None;
         self.copy_flash_generation = 0;
         self.filter_input.clear();
         self.filter_applied = None;
         self.filter_rows = None;
         self.filter_generation = 0;
+        self.sort_spec = None;
+        self.sort_rows = None;
+        self.sort_generation = 0;
+        self.header_mode = HeaderMode::Auto;
     }
 
     /// Copy `documents[new_active]` into the live per-document fields.
     /// Called after switching tabs so the next render reflects the
     /// new tab.
     fn load_active(&mut self) {
+        // The document may differ now; drop any inspector stats.
+        self.invalidate_inspector();
+        self.invalidate_encoding();
+        // Column value samples belong to the previous document.
+        self.filter_value_cache.clear();
+        // The Ask schema/preview belong to the previous document.
+        self.invalidate_ask();
         let Some(active) = self.active else {
             self.clear_live_per_document();
             return;
@@ -518,12 +771,18 @@ impl MainView {
         self.search_matches = snap.search_matches;
         self.search_active = snap.search_active;
         self.search_generation = snap.search_generation;
+        self.search_case_sensitive = snap.search_case_sensitive;
+        self.search_column = snap.search_column;
         self.copy_flash_rect = snap.copy_flash_rect;
         self.copy_flash_generation = snap.copy_flash_generation;
         self.filter_input = snap.filter_input;
         self.filter_applied = snap.filter_applied;
         self.filter_rows = snap.filter_rows;
         self.filter_generation = snap.filter_generation;
+        self.sort_spec = snap.sort_spec;
+        self.sort_rows = snap.sort_rows;
+        self.sort_generation = snap.sort_generation;
+        self.header_mode = snap.header_mode;
     }
 
     /// Allocate the next unique `DocumentSnapshot` id.
@@ -546,6 +805,8 @@ impl MainView {
         self.active = Some(index);
         self.load_active();
         self.ensure_active_loaded(cx);
+        self.kick_inspector(cx);
+        self.kick_encoding(cx);
         // Focus the grid so the keyboard surface is ready. The same
         // deferred-focus path is used as after a fresh open.
         self.focus_grid_on_next_frame = true;
@@ -576,7 +837,7 @@ impl MainView {
         self.active = new_active;
         self.load_active();
         if self.documents.is_empty() {
-            // No tabs left — the centre panel falls back to the
+            // No tabs left - the centre panel falls back to the
             // empty state so the welcome screen reappears.
             self.state = ViewState::Empty;
         } else {
@@ -665,6 +926,8 @@ impl MainView {
                 }
             }
         }
+        self.kick_inspector(cx);
+        self.kick_encoding(cx);
         cx.notify();
     }
 
@@ -795,6 +1058,7 @@ impl MainView {
                 if self.active == Some(index) {
                     self.load_active();
                     self.focus_grid_on_next_frame = true;
+                    self.kick_encoding(cx);
                 }
                 cx.notify();
             }
@@ -899,6 +1163,66 @@ impl MainView {
                     }))
                     .child("Files"),
             )
+            // Toggle the column-inspector panel.
+            .child(
+                div()
+                    .id("toggle-inspector")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme::BORDER_STRONG)
+                    .cursor_pointer()
+                    .text_color(if self.inspector_open {
+                        theme::TEXT_STRONG
+                    } else {
+                        theme::TEXT_DIM
+                    })
+                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
+                    .child("Inspector"),
+            )
+            // Toggle the diagnostics panel.
+            .child(
+                div()
+                    .id("toggle-diagnostics")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme::BORDER_STRONG)
+                    .cursor_pointer()
+                    .text_color(if self.diagnostics_open {
+                        theme::TEXT_STRONG
+                    } else {
+                        theme::TEXT_DIM
+                    })
+                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diagnostics(cx)))
+                    .child("Diagnostics"),
+            )
+            // Cycle the first-row interpretation (Auto / Header / No header).
+            .child(
+                div()
+                    .id("toggle-header")
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme::BORDER_STRONG)
+                    .cursor_pointer()
+                    .text_color(if self.header_mode == HeaderMode::Auto {
+                        theme::TEXT_DIM
+                    } else {
+                        theme::TEXT_STRONG
+                    })
+                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    .on_click(cx.listener(|this, _, _, cx| this.cycle_header_mode(cx)))
+                    .child(header_mode_label(self.header_mode)),
+            )
             .child(
                 div()
                     .flex()
@@ -962,7 +1286,7 @@ impl MainView {
             let bg = if is_active { active_bg } else { inactive_bg };
             let fg = if is_active { active_fg } else { inactive_fg };
 
-            // Tab body — clickable to switch active. `flex_shrink_0`
+            // Tab body - clickable to switch active. `flex_shrink_0`
             // keeps tabs at their natural width; the strip scrolls
             // horizontally rather than crushing them.
             tabs.push(
@@ -1170,6 +1494,65 @@ impl MainView {
             )
     }
 
+    /// Right-side column-inspector panel. Shows the selected column's
+    /// inferred type and metrics, or a hint when nothing is selected.
+    fn render_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .h(theme::HEADER_HEIGHT)
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .text_color(theme::TEXT_STRONG)
+            .child("Column")
+            .child(
+                div()
+                    .id("inspector-close")
+                    .cursor_pointer()
+                    .text_color(theme::TEXT_DIM)
+                    .hover(|s| s.text_color(theme::WARN))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
+                    .child("×"),
+            );
+
+        let body: AnyElement = match &self.inspector_stats {
+            Some(stats) => render_column_stats(stats),
+            None => div()
+                .p_3()
+                .text_color(theme::TEXT_DIM)
+                .child(if self.inspector_column.is_some() {
+                    "computing…"
+                } else {
+                    "select a cell"
+                })
+                .into_any_element(),
+        };
+
+        div()
+            .flex_shrink_0()
+            .w(theme::INSPECTOR_WIDTH)
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(theme::BG_PANEL)
+            .border_l_1()
+            .border_color(theme::BORDER)
+            .child(header)
+            .child(
+                div()
+                    .id("inspector-body")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
     fn render_status(&self) -> impl IntoElement {
         let (rows, cols, size) = match &self.model {
             Some(model) => (
@@ -1189,17 +1572,18 @@ impl MainView {
             ),
             None => format!("{} rows", format_count(rows)),
         };
+        let sort_label = self.sort_label();
         let state = match &self.state {
             ViewState::Empty => "idle".to_string(),
-            ViewState::Loading(note) => format!("loading — {note}"),
+            ViewState::Loading(note) => format!("loading: {note}"),
             ViewState::Ready => "ready".to_string(),
-            ViewState::Error(message) => format!("error — {message}"),
+            ViewState::Error(message) => format!("error: {message}"),
         };
         let delimiter = self
             .model
             .as_ref()
             .map(|m| super::describe_delimiter(m.doc.meta.delimiter))
-            .unwrap_or("—");
+            .unwrap_or("-");
         let warnings = self
             .model
             .as_ref()
@@ -1223,6 +1607,9 @@ impl MainView {
             .child(format!("{cols} cols"))
             .child(format!("delim {}", delimiter))
             .child(archive_picker::format_size(size))
+            .when_some(sort_label, |this, label| {
+                this.child(div().text_color(theme::ACCENT).child(label))
+            })
             .when(warnings > 0, |this| {
                 this.child(
                     div()
@@ -1248,6 +1635,30 @@ impl MainView {
             .child(state)
     }
 
+    /// Width of the columns area, computed synchronously from the window
+    /// width minus every panel that shares the grid's flex row. All
+    /// panels are `flex_shrink_0` with a fixed `theme` width, so this
+    /// matches the measured layout exactly - but unlike the previous
+    /// frame's `grid_bounds` it is correct on the same frame a panel is
+    /// toggled, so closing the inspector / diagnostics / file panel no
+    /// longer leaves a one- to two-frame blank gap before the table
+    /// reflows into the freed space. `grid_bounds` is still recorded for
+    /// drag auto-scroll, which needs the real on-screen rectangle.
+    fn grid_viewport_width(&self, window: &Window) -> f32 {
+        let mut width =
+            f32::from(window.viewport_size().width) - f32::from(theme::ROW_NUMBER_WIDTH);
+        if self.file_panel_open && !self.documents.is_empty() {
+            width -= f32::from(theme::FILE_PANEL_WIDTH);
+        }
+        if self.inspector_open && self.model.is_some() {
+            width -= f32::from(theme::INSPECTOR_WIDTH);
+        }
+        if self.diagnostics_open && self.model.is_some() {
+            width -= f32::from(theme::DIAGNOSTICS_WIDTH);
+        }
+        width.max(0.0)
+    }
+
     fn render_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(model) = self.model.clone() else {
             return div().into_any_element();
@@ -1264,28 +1675,55 @@ impl MainView {
             });
         }
 
-        let viewport_w: f32 =
-            f32::from(window.viewport_size().width) - f32::from(theme::ROW_NUMBER_WIDTH);
-        self.viewport_w = viewport_w.max(0.0);
+        // The viewport is computed synchronously (see
+        // `grid_viewport_width`) rather than from the previous frame's
+        // measured bounds, so a panel toggle reflows the grid in the
+        // same frame it is toggled.
+        let viewport_w = self.grid_viewport_width(window);
+        self.viewport_w = viewport_w;
 
-        // When a filter is active the list renders only the matching
-        // records; `i` is a display position that maps through
-        // `filter_rows` to a record index. Without a filter the two are
-        // the same.
-        let view_rows = self.filter_rows.clone();
+        // When a filter or sort is active the list renders that set; `i`
+        // is a display position that maps through `view_rows` to a
+        // record index. Without either the two are the same.
+        let view_rows = self.view_rows();
         let row_count = view_rows
             .as_ref()
             .map_or(model.row_count() as usize, |rows| rows.len());
         let scroll_x = self.scroll_x;
-        let header = grid::render_header(&model, scroll_x, viewport_w);
 
         // The entity handle is needed inside the per-cell click handler
-        // closures. We capture it here (where `cx` is `&mut Context`)
-        // and move it into each row render. Inside the cell click,
-        // `cx` is `&mut App`, and `entity.update(cx, ...)` walks back
-        // up to the `MainView` so we can mutate `selection` and call
-        // `cx.notify()`.
+        // closures and the header click. We capture it here (where `cx`
+        // is `&mut Context`) and move it into each row / header render.
+        // Inside a click, `cx` is `&mut App`, and `entity.update(cx, ...)`
+        // walks back up to the `MainView` so we can mutate view state
+        // and call `cx.notify()`.
         let entity = cx.entity();
+
+        let sort_indicator = self
+            .sort_spec
+            .map(|spec| (spec.column, spec.order == SortOrder::Descending));
+        let header = grid::render_header(
+            &model,
+            scroll_x,
+            viewport_w,
+            self.search_column,
+            sort_indicator,
+            {
+                let entity = entity.clone();
+                move |col, ev, app_cx| {
+                    // Alt/Option-click sets the search scope; a plain
+                    // click cycles the sort.
+                    let scope = ev.modifiers.alt;
+                    entity.update(app_cx, |view, cx| {
+                        if scope {
+                            view.toggle_search_column(col, cx);
+                        } else {
+                            view.cycle_sort(col, cx);
+                        }
+                    });
+                }
+            },
+        );
 
         let list = uniform_list(
             "anvil-grid",
@@ -1300,10 +1738,11 @@ impl MainView {
                 let copy_flash_rect = this.copy_flash_rect;
                 let search_matches = this.search_matches.clone();
                 let search_active = this.search_active;
-                let search_query = this.search_query.clone();
-                let search_options = anvil_core::SearchOptions::default();
-                let view_rows = this.filter_rows.clone();
+                let search_query = this.search_query.text().to_string();
+                let search_options = this.search_options();
+                let view_rows = this.view_rows();
                 let entity = entity.clone();
+                let warning_rows = model.warnings.clone();
                 let row_ctx = grid::RowContext {
                     selection: &selection,
                     scroll_x,
@@ -1313,6 +1752,7 @@ impl MainView {
                     search_active,
                     search_query: &search_query,
                     search_options,
+                    warning_rows: warning_rows.as_ref(),
                 };
                 range
                     .map(|i| {
@@ -1350,6 +1790,7 @@ impl MainView {
                                         view.drag_selecting = true;
                                         view.pointer_pos = Some(pointer);
                                         view.start_auto_scroll(cx);
+                                        view.kick_inspector(cx);
                                         cx.notify();
                                     });
                                 }
@@ -1386,7 +1827,17 @@ impl MainView {
         let auto_scroll_overlay = canvas(
             |_, _, _| (),
             move |bounds, _, window, app_cx| {
-                entity_for_canvas.update(app_cx, |view, _| view.list_bounds = Some(bounds));
+                entity_for_canvas.update(app_cx, |view, cx| {
+                    // Keep the grid's on-screen rectangle fresh for drag
+                    // auto-scroll (the viewport width is computed
+                    // synchronously, so a panel toggle no longer waits on
+                    // this). No-op when the bounds are stable, so this
+                    // cannot loop.
+                    if view.grid_bounds != Some(bounds) {
+                        view.grid_bounds = Some(bounds);
+                        cx.notify();
+                    }
+                });
                 let entity = entity_for_canvas.clone();
                 window.on_mouse_event(move |ev: &MouseMoveEvent, _, _, app_cx| {
                     entity.update(app_cx, |view, cx| {
@@ -1432,16 +1883,18 @@ impl MainView {
                     // (capture); stop the auto-scroll loop too.
                     .on_mouse_up(
                         gpui::MouseButton::Left,
-                        cx.listener(|view, _, _, _cx| {
+                        cx.listener(|view, _, _, cx| {
                             view.drag_selecting = false;
                             view.stop_auto_scroll();
+                            view.kick_inspector(cx);
                         }),
                     )
                     .on_mouse_up_out(
                         gpui::MouseButton::Left,
-                        cx.listener(|view, _, _, _cx| {
+                        cx.listener(|view, _, _, cx| {
                             view.drag_selecting = false;
                             view.stop_auto_scroll();
+                            view.kick_inspector(cx);
                         }),
                     )
                     .child(auto_scroll_overlay)
@@ -1563,6 +2016,50 @@ impl MainView {
         }
     }
 
+    /// Scroll horizontally so `column` is fully visible, using the same
+    /// layout offsets the grid renders with. Adds a small margin so the
+    /// cell is not flush against the viewport edge. No-op when the
+    /// column is already fully visible.
+    fn ensure_column_visible(&mut self, column: usize, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let Some(&start) = model.layout.offsets.get(column) else {
+            return;
+        };
+        let width = model.layout.widths.get(column).copied().unwrap_or(0.0);
+        let viewport = self.viewport_w;
+        if viewport <= 0.0 {
+            return;
+        }
+        let margin = f32::from(theme::CELL_PAD_X) * 2.0;
+        let left = self.scroll_x;
+        let right = left + viewport;
+        let mut next = left;
+        if start - margin < left {
+            next = start - margin;
+        } else if start + width + margin > right {
+            next = start + width + margin - viewport;
+        }
+        let max = (model.layout.total - viewport).max(0.0);
+        let next = next.clamp(0.0, max);
+        if (next - self.scroll_x).abs() > f32::EPSILON {
+            self.scroll_x = next;
+            cx.notify();
+        }
+    }
+
+    /// Display position (0-based row in the rendered list) of a record
+    /// index. With a filter or sort active the rendered order differs
+    /// from record order, so scrolling by position must map through
+    /// `view_rows`.
+    fn display_position(&self, record: u64) -> usize {
+        match self.view_rows() {
+            Some(rows) => rows.iter().position(|&r| r == record).unwrap_or(0),
+            None => record as usize,
+        }
+    }
+
     // ---- selection / keyboard navigation -------------------------------
 
     fn on_grid_key_down(
@@ -1590,11 +2087,20 @@ impl MainView {
                 extend,
             } => self.move_selection(row_delta, column_delta, extend, cx),
             Action::Copy => self.copy_selection_to_clipboard(cx),
+            Action::NextCell { forward } => self.move_cell_selection(forward, cx),
             Action::Escape => {
+                // Close whichever bar is open first, so Esc always
+                // dismisses the search / filter even when focus is on
+                // the grid (the bar's own handler only runs while the
+                // bar has focus).
                 if self.search_open {
                     self.close_search();
                     self.focus_grid_on_next_frame = true;
                     cx.notify();
+                } else if self.filter_open {
+                    self.close_filter(cx);
+                } else if self.ask_open {
+                    self.close_ask(cx);
                 } else if !self.selection.is_empty() {
                     self.selection.clear();
                     cx.notify();
@@ -1604,8 +2110,8 @@ impl MainView {
                 }
             }
             Action::OpenSearch => {
-                if self.model.is_some() && !self.search_open {
-                    self.open_search(cx);
+                if self.model.is_some() {
+                    self.switch_to_search(cx);
                 }
             }
             Action::NextMatch { direction } => {
@@ -1616,11 +2122,286 @@ impl MainView {
                 cx.notify();
             }
             Action::OpenFilter => {
-                if self.model.is_some() && !self.filter_open {
-                    self.open_filter(cx);
+                if self.model.is_some() {
+                    self.switch_to_filter(cx);
                 }
             }
+            Action::OpenAsk => {
+                if self.model.is_some() {
+                    self.switch_to_ask(cx);
+                }
+            }
+            Action::ToggleInspector => self.toggle_inspector(cx),
+            Action::ToggleDiagnostics => self.toggle_diagnostics(cx),
         }
+    }
+
+    /// Switch to the filter bar, closing the search bar first so the two
+    /// never fight over focus. Used by Cmd/Ctrl+L from the grid or the
+    /// search bar.
+    fn switch_to_filter(&mut self, cx: &mut Context<Self>) {
+        if self.search_open {
+            self.close_search();
+            // `close_search` does not move focus; make sure a stale grid
+            // focus request cannot steal it from the filter bar.
+            self.focus_grid_on_next_frame = false;
+        }
+        if self.ask_open {
+            self.close_ask(cx);
+            self.focus_grid_on_next_frame = false;
+        }
+        if !self.filter_open {
+            self.open_filter(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Switch to the search bar, closing the filter bar first. Used by
+    /// Cmd/Ctrl+F from the grid or the filter bar.
+    fn switch_to_search(&mut self, cx: &mut Context<Self>) {
+        if self.filter_open {
+            self.close_filter(cx);
+            // `close_filter` requests grid focus; hand focus to search.
+            self.focus_grid_on_next_frame = false;
+        }
+        if self.ask_open {
+            self.close_ask(cx);
+            self.focus_grid_on_next_frame = false;
+        }
+        if !self.search_open {
+            self.open_search(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Switch to the natural-language Ask bar, closing the other bars.
+    fn switch_to_ask(&mut self, cx: &mut Context<Self>) {
+        if self.search_open {
+            self.close_search();
+            self.focus_grid_on_next_frame = false;
+        }
+        if self.filter_open {
+            self.close_filter(cx);
+            self.focus_grid_on_next_frame = false;
+        }
+        self.open_ask(cx);
+    }
+
+    /// Show or hide the column-inspector panel. Opening it kicks a stats
+    /// scan for the currently selected column.
+    fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        self.inspector_open = !self.inspector_open;
+        if self.inspector_open {
+            self.inspector_column = None;
+            self.inspector_stats = None;
+            self.kick_inspector(cx);
+        }
+        cx.notify();
+    }
+
+    /// Show or hide the diagnostics panel (Cmd/Ctrl+D). The parse
+    /// warnings are already on the active document, but the UTF-8 scan
+    /// is O(file) and runs on the background executor when the panel is
+    /// opened; the report is cached until the document changes.
+    fn toggle_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.diagnostics_open = !self.diagnostics_open;
+        if self.diagnostics_open {
+            self.kick_encoding(cx);
+        }
+        cx.notify();
+    }
+
+    /// Cycle the active document's header interpretation:
+    /// Auto -> Header -> Headerless -> Auto.
+    fn cycle_header_mode(&mut self, cx: &mut Context<Self>) {
+        let next = match self.header_mode {
+            HeaderMode::Auto => HeaderMode::Header,
+            HeaderMode::Header => HeaderMode::Headerless,
+            HeaderMode::Headerless => HeaderMode::Auto,
+        };
+        self.apply_header_mode(next, cx);
+    }
+
+    /// Force a header interpretation and re-index the active document.
+    /// The existing mmap / extracted temp file is reused (`reindex`),
+    /// so this neither re-opens the file nor re-extracts an archive
+    /// entry. Runs on the background executor with the same generation
+    /// guard as the open tasks.
+    fn apply_header_mode(&mut self, mode: HeaderMode, cx: &mut Context<Self>) {
+        if self.header_mode == mode || self.model.is_none() {
+            return;
+        }
+        let Some(active) = self.active else {
+            return;
+        };
+        let id = self.documents[active].id;
+        let doc = self.documents[active].doc.clone();
+        let Some(doc) = doc else {
+            return;
+        };
+        self.header_mode = mode;
+        // Persist the mode now so a tab switch during the re-index keeps
+        // it; the completed task also writes it back by tab id.
+        self.snapshot_active();
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let options = IndexOptions {
+                header_mode: mode,
+                ..IndexOptions::default()
+            };
+            let new_doc = executor.spawn(async move { reindex(&doc, options) }).await;
+            this.update(cx, |view, cx| {
+                if view.generation != generation {
+                    return;
+                }
+                view.install_reindexed(id, Arc::new(new_doc), mode, cx);
+            })
+            .ok();
+        });
+        self.task = Some(task);
+        cx.notify();
+    }
+
+    /// Replace the document for tab `id` with a freshly re-indexed one
+    /// after a header-mode change. Row indexes shift when the header row
+    /// is added or removed, so filter / sort / search results and an
+    /// out-of-range selection are reset. Only the live fields are
+    /// touched when the tab is still active.
+    fn install_reindexed(
+        &mut self,
+        id: u64,
+        doc: Arc<ParsedDocument>,
+        mode: HeaderMode,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.documents.iter().position(|d| d.id == id) else {
+            return;
+        };
+        if let Some(snap) = self.documents.get_mut(index) {
+            snap.doc = Some(doc.clone());
+            snap.header_mode = mode;
+        }
+        if self.active != Some(index) {
+            cx.notify();
+            return;
+        }
+        self.model = Some(GridModel::new(doc));
+        self.invalidate_ask();
+        self.filter_value_cache.clear();
+        self.header_mode = mode;
+        // The row set changed underneath these; drop stale results.
+        self.filter_applied = None;
+        self.filter_rows = None;
+        self.filter_generation = self.filter_generation.wrapping_add(1);
+        self.sort_spec = None;
+        self.sort_rows = None;
+        self.sort_generation = self.sort_generation.wrapping_add(1);
+        self.search_matches.clear();
+        self.search_active = -1;
+        self.search_generation = self.search_generation.wrapping_add(1);
+        if let Some(cursor) = self.selection.cursor() {
+            let records = self.model.as_ref().map(|m| m.row_count()).unwrap_or(0);
+            if cursor.record_index >= records {
+                self.selection.clear();
+            }
+        }
+        self.invalidate_encoding();
+        self.kick_encoding(cx);
+        self.focus_grid_on_next_frame = true;
+        cx.notify();
+    }
+
+    /// Drop any cached inspector stats (the document changed).
+    fn invalidate_inspector(&mut self) {
+        self.inspector_column = None;
+        self.inspector_stats = None;
+        self.inspector_generation = self.inspector_generation.wrapping_add(1);
+        self.inspector_task = None;
+    }
+
+    /// Drop the cached encoding report (the document changed). Bumping
+    /// the generation also discards an in-flight scan's result.
+    fn invalidate_encoding(&mut self) {
+        self.encoding_report = None;
+        self.encoding_generation = self.encoding_generation.wrapping_add(1);
+        self.encoding_task = None;
+    }
+
+    /// Run the UTF-8 scan for the active document when the diagnostics
+    /// panel is open and no report is cached. O(file length), so it runs
+    /// on the background executor with the same generation guard as the
+    /// filter / sort / inspector tasks. No-op when a report already
+    /// exists for this document.
+    fn kick_encoding(&mut self, cx: &mut Context<Self>) {
+        if !self.diagnostics_open || self.encoding_report.is_some() {
+            return;
+        }
+        let Some(doc) = self.model.as_ref().map(|m| m.doc.clone()) else {
+            self.encoding_report = None;
+            return;
+        };
+        self.encoding_generation = self.encoding_generation.wrapping_add(1);
+        let generation = self.encoding_generation;
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let report = executor.spawn(async move { scan_encoding(&doc) }).await;
+            this.update(cx, |view, cx| {
+                if view.encoding_generation != generation {
+                    return;
+                }
+                view.encoding_report = Some(Arc::new(report));
+                view.encoding_task = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.encoding_task = Some(task);
+        cx.notify();
+    }
+
+    /// Recompute the selected column's stats when the inspector is open.
+    /// No-op when the column has not changed since the last scan, so
+    /// vertical navigation does not rescan. Runs on the background
+    /// executor with a generation guard, like the filter/sort tasks.
+    fn kick_inspector(&mut self, cx: &mut Context<Self>) {
+        if !self.inspector_open {
+            return;
+        }
+        let Some(column) = self.selection.cursor().map(|c| c.column_index) else {
+            return;
+        };
+        if self.inspector_column == Some(column) && self.inspector_stats.is_some() {
+            return;
+        }
+        let Some(doc) = self.model.as_ref().map(|m| m.doc.clone()) else {
+            return;
+        };
+        self.inspector_column = Some(column);
+        self.inspector_generation = self.inspector_generation.wrapping_add(1);
+        let generation = self.inspector_generation;
+        self.inspector_stats = None;
+
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let stats = executor
+                .spawn(async move { column_stats(&doc, column, &StatsOptions::default()) })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.inspector_generation != generation {
+                    return;
+                }
+                view.inspector_stats = Some(Arc::new(stats));
+                view.inspector_task = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.inspector_task = Some(task);
+        cx.notify();
     }
 
     /// Format the current selection as TSV and put it on the system
@@ -1680,6 +2461,104 @@ impl MainView {
         .detach();
     }
 
+    /// The record indexes in display order for the active tab: the
+    /// sorted permutation when a sort is active, otherwise the filtered
+    /// set, otherwise `None` (identity order). Sorting composes with
+    /// filtering because `sort_rows` is built from `filter_rows`.
+    fn view_rows(&self) -> Option<Arc<Vec<u64>>> {
+        self.sort_rows.clone().or_else(|| self.filter_rows.clone())
+    }
+
+    /// Cycle the active tab's sort for `column`: none -> ascending ->
+    /// descending -> none. Sorting a different column restarts at
+    /// ascending. The numeric/text comparison kind is resolved from
+    /// inferred column types when the background task runs.
+    fn cycle_sort(&mut self, column: usize, cx: &mut Context<Self>) {
+        let next = match self.sort_spec {
+            Some(spec) if spec.column == column && spec.order == SortOrder::Ascending => {
+                Some(SortSpec {
+                    column,
+                    order: SortOrder::Descending,
+                    kind: spec.kind,
+                })
+            }
+            Some(spec) if spec.column == column && spec.order == SortOrder::Descending => None,
+            _ => Some(SortSpec {
+                column,
+                order: SortOrder::Ascending,
+                kind: SortKind::Text,
+            }),
+        };
+        self.sort_spec = next;
+        self.kick_sort(cx);
+    }
+
+    /// Recompute the active tab's sort permutation on the background
+    /// executor. `None` spec clears it. A generation guard discards
+    /// stale results, mirroring the filter task.
+    fn kick_sort(&mut self, cx: &mut Context<Self>) {
+        let Some(spec) = self.sort_spec else {
+            self.sort_rows = None;
+            self.sort_generation = self.sort_generation.wrapping_add(1);
+            self.sort_task = None;
+            cx.notify();
+            return;
+        };
+        let Some(doc) = self.model.as_ref().map(|m| m.doc.clone()) else {
+            self.sort_rows = None;
+            return;
+        };
+        // The base is whatever is currently visible: the filtered set,
+        // or every record when there is no filter.
+        let base: Vec<u64> = match &self.filter_rows {
+            Some(rows) => (**rows).clone(),
+            None => (0..doc.record_count()).collect(),
+        };
+        self.sort_generation = self.sort_generation.wrapping_add(1);
+        let generation = self.sort_generation;
+        // Show the unsorted base while the sort runs.
+        self.sort_rows = None;
+
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let sorted = executor
+                .spawn(async move {
+                    let profiles = infer_schema(&doc);
+                    let kind = profiles
+                        .get(spec.column)
+                        .map(|profile| SortKind::for_column_type(profile.column_type))
+                        .unwrap_or(SortKind::Text);
+                    sort_rows(&doc, &base, &SortSpec { kind, ..spec })
+                })
+                .await;
+            this.update(cx, |view, cx| {
+                if view.sort_generation != generation {
+                    return;
+                }
+                view.sort_rows = Some(Arc::new(sorted));
+                cx.notify();
+            })
+            .ok();
+        });
+        self.sort_task = Some(task);
+        cx.notify();
+    }
+
+    /// Status-bar label for the active sort (column name + direction).
+    fn sort_label(&self) -> Option<String> {
+        let spec = self.sort_spec?;
+        let name = self
+            .model
+            .as_ref()
+            .map(|m| m.doc.meta.column_label(spec.column))
+            .unwrap_or_else(|| format!("col{}", spec.column));
+        let arrow = match spec.order {
+            SortOrder::Ascending => "▲",
+            SortOrder::Descending => "▼",
+        };
+        Some(format!("sorted by {name} {arrow}"))
+    }
+
     /// Move the selection cursor. With no filter this is a straight
     /// record-index move (delegated to `Selection::move_cursor`). With
     /// a filter active, vertical movement walks the *visible* rows so
@@ -1690,12 +2569,16 @@ impl MainView {
             return;
         };
         let cols = model.doc.column_count();
-        let rows = self.filter_rows.clone();
+        let rows = self.view_rows();
         let Some(rows) = rows else {
             let records = model.row_count();
             // If there is no selection yet, start at (0, 0) so the
             // first arrow key makes the cursor visible.
             self.selection.move_cursor(dr, dc, cols, records, extend);
+            if let Some(cursor) = self.selection.cursor() {
+                self.ensure_column_visible(cursor.column_index, cx);
+            }
+            self.kick_inspector(cx);
             cx.notify();
             return;
         };
@@ -1704,330 +2587,77 @@ impl MainView {
         }
         let cursor = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
         let col_max = cols.saturating_sub(1) as i64;
-        let col = (cursor.column_index as i64 + dc).clamp(0, col_max) as usize;
+        let col = (cursor.column_index as i64)
+            .saturating_add(dc)
+            .clamp(0, col_max) as usize;
         // Locate the cursor's display position; if it is on a hidden
         // record (e.g. the filter changed under it), fall back to the
         // closest visible position at or before it.
         let position = rows
             .binary_search(&cursor.record_index)
             .unwrap_or_else(|insert| insert.saturating_sub(1));
-        let next_position = (position as i64 + dr).clamp(0, rows.len() as i64 - 1) as usize;
+        let next_position = (position as i64)
+            .saturating_add(dr)
+            .clamp(0, rows.len() as i64 - 1) as usize;
         let next = CellPos::new(rows[next_position], col);
         if extend {
             self.selection.extend_to(next);
         } else {
             self.selection.set(next);
         }
+        self.ensure_column_visible(next.column_index, cx);
+        self.kick_inspector(cx);
+        cx.notify();
+    }
+
+    /// Move the selection cursor to the adjacent cell in row-major
+    /// order (Tab / Shift-Tab). Without a filter this delegates to
+    /// `Selection::move_cell`, which wraps across row boundaries and
+    /// around the document ends. With a filter active it walks the
+    /// *visible* cells so Tab never lands on a hidden record.
+    fn move_cell_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let cols = model.doc.column_count();
+        let Some(rows) = self.view_rows() else {
+            let records = model.row_count();
+            self.selection.move_cell(forward, cols, records, false);
+            if let Some(cursor) = self.selection.cursor() {
+                self.ensure_column_visible(cursor.column_index, cx);
+            }
+            self.kick_inspector(cx);
+            cx.notify();
+            return;
+        };
+        let total = rows.len() as u64 * cols as u64;
+        if total == 0 {
+            return;
+        }
+        let cursor = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
+        let position = rows
+            .binary_search(&cursor.record_index)
+            .unwrap_or_else(|insert| insert.saturating_sub(1));
+        let col = cursor.column_index.min(cols.saturating_sub(1));
+        let linear = position as u64 * cols as u64 + col as u64;
+        let next_linear = if forward {
+            (linear + 1) % total
+        } else {
+            (linear + total - 1) % total
+        };
+        let next = CellPos::new(
+            rows[(next_linear / cols as u64) as usize],
+            (next_linear % cols as u64) as usize,
+        );
+        self.selection.set(next);
+        self.ensure_column_visible(next.column_index, cx);
+        self.kick_inspector(cx);
         cx.notify();
     }
 
     // ---- search ----------------------------------------------------------
 
-    /// Open the search bar overlay and kick off a search for whatever
-    /// query was last typed (empty by default → 0 matches). The bar
-    /// takes keyboard focus so subsequent keystrokes go into the input
-    /// rather than the grid.
-    fn open_search(&mut self, cx: &mut Context<Self>) {
-        self.search_open = true;
-        self.search_matches.clear();
-        self.search_active = -1;
-        self.focus_search_on_next_frame = true;
-        self.kick_search(cx);
-        cx.notify();
-    }
-
-    /// Close the search bar and clear all search state. The grid keeps
-    /// its current selection; the search rectangle stops being
-    /// highlighted.
-    fn close_search(&mut self) {
-        // Snapshot first so the active tab's persisted search state
-        // is consistent — the live fields are about to be reset to
-        // "no search", which is what the snapshot now records.
-        self.snapshot_active();
-        self.search_open = false;
-        self.search_query.clear();
-        self.search_matches.clear();
-        self.search_active = -1;
-        self.search_task = None;
-        // search_generation is bumped implicitly on the next open / edit.
-    }
-
-    /// Start (or restart) the background search for `self.search_query`.
-    /// Bumps `search_generation` and drops the previous task. The task
-    /// captures the generation so a stale result is silently discarded.
-    fn kick_search(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = &self.model else {
-            self.search_matches.clear();
-            self.search_active = -1;
-            return;
-        };
-        let needle = self.search_query.clone();
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
-        let doc = model.doc.clone();
-        let options = SearchOptions::default();
-
-        // Reset visible state while the search is in flight so the user
-        // sees an empty match list rather than the previous run's.
-        self.search_matches.clear();
-        self.search_active = -1;
-
-        let executor = cx.background_executor().clone();
-        let task = cx.spawn(async move |this, cx| {
-            let matches = executor
-                .spawn(async move { search_records(&doc, &needle, &options) })
-                .await;
-            this.update(cx, |view, cx| {
-                if view.search_generation != generation {
-                    return;
-                }
-                view.apply_search_result(matches, cx);
-            })
-            .ok();
-        });
-        self.search_task = Some(task);
-    }
-
-    /// Apply the result of an in-flight search, ordered by record
-    /// index. Picks the first match as the active one (or the closest
-    /// after the cursor, if there is one).
-    fn apply_search_result(&mut self, matches: Vec<u64>, cx: &mut Context<Self>) {
-        self.search_matches = matches;
-        self.search_active = if self.search_matches.is_empty() {
-            -1
-        } else {
-            0
-        };
-        if self.search_active >= 0 {
-            self.jump_to_active_match(cx);
-        }
-        cx.notify();
-    }
-
-    /// Move the active match by `direction` (1 = next, -1 = previous)
-    /// and scroll the grid to it. A no-op when no search is active.
-    fn advance_match(&mut self, direction: i8, cx: &mut Context<Self>) {
-        if self.search_matches.is_empty() {
-            return;
-        }
-        let n = self.search_matches.len() as i64;
-        let next = if self.search_active < 0 {
-            if direction > 0 {
-                0
-            } else {
-                n - 1
-            }
-        } else {
-            // i64 wrap-safe cycle.
-            let raw = self.search_active + direction as i64;
-            ((raw % n) + n) % n
-        };
-        self.search_active = next;
-        self.jump_to_active_match(cx);
-    }
-
-    /// Move the selection cursor to the active match's row and scroll
-    /// the list so the row is visible.
-    fn jump_to_active_match(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = &self.model else {
-            return;
-        };
-        let Some(row) = self
-            .search_matches
-            .get(self.search_active as usize)
-            .copied()
-        else {
-            return;
-        };
-        let col = self.selection.cursor().map(|c| c.column_index).unwrap_or(0);
-        let col = col.min(model.doc.column_count().saturating_sub(1));
-        self.selection.set(CellPos::new(row, col));
-        // Scroll the list so the row is in view. We use the existing
-        // scroll handle; this is the same call shape drag auto-scroll
-        // uses to pin a row to the top.
-        self.v_scroll
-            .scroll_to_item_strict(row as usize, ScrollStrategy::Top);
-        cx.notify();
-    }
-
-    /// The search bar's keyboard handler. Char keys append to the
-    /// query; backspace deletes the last byte; Enter / Shift+Enter
-    /// cycle matches; Esc closes the bar. Anything else falls through
-    /// (and is therefore ignored).
-    fn on_search_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.search_open {
-            return;
-        }
-        let key = event.keystroke.key.as_str();
-        let modifiers = event.keystroke.modifiers;
-
-        // Escape closes the bar and returns focus to the grid. This
-        // re-uses `Action::Escape` so the binding table stays the
-        // single source of truth, even though we are *not* the grid.
-        if key == "escape" {
-            self.close_search();
-            self.focus_grid_on_next_frame = true;
-            cx.notify();
-            return;
-        }
-
-        // Enter / Shift+Enter cycle through matches without leaving the
-        // search bar.
-        if key == "enter" {
-            let direction: i8 = if modifiers.shift { -1 } else { 1 };
-            self.advance_match(direction, cx);
-            return;
-        }
-
-        // Backspace pops one byte. We use `key == "backspace"` rather
-        // than `event.keystroke.key_char` so we can be sure it is the
-        // navigation key, not the literal character "backspace" (which
-        // does not normally appear in cell data).
-        if key == "backspace" && !modifiers.control && !modifiers.alt {
-            self.search_query.pop();
-            self.kick_search(cx);
-            cx.notify();
-            return;
-        }
-
-        // Plain printable characters are appended. We require *no*
-        // modifiers so we don't swallow Cmd+F (already handled by the
-        // grid binding), Option+E (an accented character), etc.
-        if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
-            if let Some(ch) = &event.keystroke.key_char {
-                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
-                    self.search_query.push_str(ch);
-                    self.kick_search(cx);
-                    cx.notify();
-                }
-            }
-        }
-    }
-
-    // ---- filter ----------------------------------------------------------
-
-    /// Open the filter bar (Cmd/Ctrl+L). The input already holds the
-    /// tab's current predicate so the user can edit rather than
-    /// retype. Nothing is applied until Enter.
-    fn open_filter(&mut self, cx: &mut Context<Self>) {
-        self.filter_open = true;
-        self.filter_error = None;
-        self.focus_filter_on_next_frame = true;
-        cx.notify();
-    }
-
-    /// Close the filter bar without changing the applied predicate.
-    fn close_filter(&mut self, cx: &mut Context<Self>) {
-        self.filter_open = false;
-        self.filter_error = None;
-        self.focus_grid_on_next_frame = true;
-        cx.notify();
-    }
-
-    /// Parse the filter input and, when valid, evaluate it on the
-    /// background executor. An empty input clears the filter. A parse
-    /// error is shown inline and leaves the previous predicate in
-    /// place.
-    fn apply_filter_input(&mut self, cx: &mut Context<Self>) {
-        let Some(doc) = self.model.as_ref().map(|m| m.doc.clone()) else {
-            return;
-        };
-        let input = self.filter_input.trim().to_string();
-        if input.is_empty() {
-            self.clear_filter(cx);
-            return;
-        }
-        let filter = match parse_filter(&input, &doc.meta.headers, doc.column_count()) {
-            Ok(filter) => filter,
-            Err(message) => {
-                self.filter_error = Some(message);
-                cx.notify();
-                return;
-            }
-        };
-        self.filter_applied = Some(filter.clone());
-        self.filter_error = None;
-        self.filter_generation = self.filter_generation.wrapping_add(1);
-        let generation = self.filter_generation;
-        // Clear the previous result so the grid does not show stale
-        // rows while the new predicate runs.
-        self.filter_rows = None;
-
-        let executor = cx.background_executor().clone();
-        let task = cx.spawn(async move |this, cx| {
-            let rows = executor
-                .spawn(async move { apply_filter(&doc, &[filter]) })
-                .await;
-            this.update(cx, |view, cx| {
-                if view.filter_generation != generation {
-                    return;
-                }
-                view.filter_rows = Some(Arc::new(rows));
-                cx.notify();
-            })
-            .ok();
-        });
-        self.filter_task = Some(task);
-        cx.notify();
-    }
-
-    /// Remove the applied filter and restore the full document.
-    fn clear_filter(&mut self, cx: &mut Context<Self>) {
-        self.filter_input.clear();
-        self.filter_applied = None;
-        self.filter_rows = None;
-        self.filter_error = None;
-        self.filter_generation = self.filter_generation.wrapping_add(1);
-        self.filter_task = None;
-        cx.notify();
-    }
-
-    /// The filter bar's key handler. Enter applies, Esc closes,
-    /// Backspace edits, and printable characters append. Unlike search
-    /// the filter is not re-evaluated on every keystroke; the user
-    /// commits with Enter.
-    fn on_filter_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.filter_open {
-            return;
-        }
-        let key = event.keystroke.key.as_str();
-        let modifiers = event.keystroke.modifiers;
-
-        if key == "escape" {
-            self.close_filter(cx);
-            return;
-        }
-        if key == "enter" {
-            self.apply_filter_input(cx);
-            return;
-        }
-        if key == "backspace" && !modifiers.control && !modifiers.alt {
-            self.filter_input.pop();
-            cx.notify();
-            return;
-        }
-        if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
-            if let Some(ch) = &event.keystroke.key_char {
-                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
-                    self.filter_input.push_str(ch);
-                    cx.notify();
-                }
-            }
-        }
-    }
-
     // ---- drag auto-scroll ------------------------------------------------
-
     /// Start the auto-scroll tick loop if it is not already running. Safe
     /// to call on every cell press.
     fn start_auto_scroll(&mut self, cx: &mut Context<Self>) {
@@ -2062,7 +2692,7 @@ impl MainView {
     /// bottom edge, scroll the list by one row and extend the selection
     /// to the row at that edge. A no-op otherwise.
     fn auto_scroll_step(&mut self, cx: &mut Context<Self>) {
-        let (Some(bounds), Some(pointer)) = (self.list_bounds, self.pointer_pos) else {
+        let (Some(bounds), Some(pointer)) = (self.grid_bounds, self.pointer_pos) else {
             return;
         };
         let Some(model) = &self.model else {
@@ -2108,156 +2738,12 @@ impl MainView {
         if let Some(archive_picker) = self.render_archive_picker(cx) {
             out.push(archive_picker);
         }
+        // The filter autocomplete popup is an overlay so it paints above
+        // the grid rather than being covered by the next sibling.
+        if let Some(suggestions) = self.render_filter_suggestions(cx) {
+            out.push(suggestions);
+        }
         out
-    }
-
-    /// Search bar overlay (Cmd/Ctrl+F). Sits as a normal-flow child
-    /// of the center area (above the grid, below the toolbar) so the
-    /// grid never slides under it; this keeps the active match's
-    /// highlight fully visible even when the match is at row 0. The
-    /// bar carries its own `key_context("Search")` and `track_focus`
-    /// so characters typed while it is open route through
-    /// `on_search_key_down` rather than the grid handler.
-    fn render_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.search_open {
-            return None;
-        }
-        let query = self.search_query.clone();
-        let (status_text, status_color) = self.search_status_text();
-
-        Some(
-            div()
-                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .bg(theme::BG_PANEL)
-                .border_b_1()
-                .border_color(theme::BORDER_STRONG)
-                .key_context("Search")
-                .track_focus(&self.search_focus_handle)
-                .on_key_down(cx.listener(Self::on_search_key_down))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Find:"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(theme::TEXT_STRONG)
-                        .truncate()
-                        .child(if query.is_empty() {
-                            "type to search…".to_string()
-                        } else {
-                            query
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(status_text),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// Status-bar text + colour for the search bar: "N matches", "no
-    /// matches", or "searching…" depending on whether a task is in
-    /// flight.
-    fn search_status_text(&self) -> (String, gpui::Rgba) {
-        if !self.search_query.is_empty() && self.search_matches.is_empty() {
-            // The empty match list could be either "still searching" or
-            // "no matches". We treat an in-flight search task (or a
-            // generation mismatch) as "searching…".
-            if self.search_task.is_some() {
-                return ("searching…".to_string(), theme::TEXT_DIM);
-            }
-            return ("no matches".to_string(), theme::WARN);
-        }
-        let total = self.search_matches.len();
-        let active = if self.search_active >= 0 {
-            self.search_active + 1
-        } else {
-            0
-        };
-        (format!("{active} of {total}"), theme::TEXT_DIM)
-    }
-
-    /// Filter bar overlay (Cmd/Ctrl+L). A normal-flow child of the
-    /// grid body, above the search bar, so it never overlaps the grid.
-    /// Shows the input plus a status suffix (error / row count).
-    fn render_filter_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.filter_open {
-            return None;
-        }
-        let input = self.filter_input.clone();
-        let (status_text, status_color) = self.filter_status_text();
-
-        Some(
-            div()
-                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .bg(theme::BG_PANEL)
-                .border_b_1()
-                .border_color(theme::BORDER_STRONG)
-                .key_context("Filter")
-                .track_focus(&self.filter_focus_handle)
-                .on_key_down(cx.listener(Self::on_filter_key_down))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Filter:"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(theme::TEXT_STRONG)
-                        .truncate()
-                        .child(if input.is_empty() {
-                            "column op value — e.g. country == US".to_string()
-                        } else {
-                            input
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(status_text),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// Status suffix for the filter bar: a parse error, a "filtering…"
-    /// note, the row count, or "none".
-    fn filter_status_text(&self) -> (String, gpui::Rgba) {
-        if let Some(error) = &self.filter_error {
-            return (error.clone(), theme::WARN);
-        }
-        match (&self.filter_applied, &self.filter_rows) {
-            (Some(_), Some(rows)) if rows.is_empty() => ("no matches".to_string(), theme::WARN),
-            (Some(_), Some(rows)) => (
-                format!("{} rows", format_count(rows.len() as u64)),
-                theme::TEXT_DIM,
-            ),
-            (Some(_), None) => ("filtering…".to_string(), theme::TEXT_DIM),
-            (None, _) => ("none".to_string(), theme::TEXT_DIM),
-        }
     }
 
     fn render_archive_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2265,7 +2751,7 @@ impl MainView {
         if !self.show_picker {
             return None;
         }
-        let (usable, rejected) = archive_picker::partition(&archive.candidates);
+        let (usable, _rejected) = archive_picker::partition(&archive.candidates);
 
         let mut rows: Vec<AnyElement> = Vec::new();
         for (ix, candidate) in usable.iter().enumerate() {
@@ -2308,22 +2794,67 @@ impl MainView {
                 .text_xs()
                 .text_color(theme::TEXT_DIM)
                 .child(format!(
-                    "{} — every usable file already has a tab",
+                    "{}: every usable file already has a tab",
                     archive.archive_name()
                 ))
                 .into_any_element(),
         ];
         children.extend(rows);
 
-        if !rejected.is_empty() {
+        let skipped = archive_picker::skipped_entries(&archive.candidates);
+        if !skipped.is_empty() {
+            // The list can be long (e.g. every file carries __MACOSX
+            // metadata); show the first few and summarise the rest so the
+            // panel stays responsive and readable.
+            const MAX_SKIPPED_SHOWN: usize = 40;
             children.push(
                 div()
                     .mt_2()
                     .text_xs()
                     .text_color(theme::TEXT_DIM)
-                    .child(format!("{} skipped entries", rejected.len()))
+                    .child(format!("{} skipped entries", skipped.len()))
                     .into_any_element(),
             );
+            for (ix, entry) in skipped.iter().take(MAX_SKIPPED_SHOWN).enumerate() {
+                let name = entry.name.clone();
+                let reason = entry.reason.clone();
+                children.push(
+                    div()
+                        .id(("archive-skipped", ix))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_3()
+                        .py_1()
+                        .rounded_sm()
+                        .child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .text_color(theme::TEXT_DIM)
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(theme::WARN)
+                                .child(reason),
+                        )
+                        .into_any_element(),
+                );
+            }
+            if skipped.len() > MAX_SKIPPED_SHOWN {
+                children.push(
+                    div()
+                        .text_xs()
+                        .text_color(theme::TEXT_DIM)
+                        .child(format!("…and {} more", skipped.len() - MAX_SKIPPED_SHOWN))
+                        .into_any_element(),
+                );
+            }
         }
 
         Some(
@@ -2483,10 +3014,19 @@ impl Render for MainView {
                 window.focus(&focus_handle);
             });
         }
+        // Deferred focus for the natural-language Ask bar.
+        if self.focus_ask_on_next_frame {
+            self.focus_ask_on_next_frame = false;
+            let focus_handle = self.ask_focus_handle.clone();
+            cx.defer_in(window, move |_view, window, _cx| {
+                window.focus(&focus_handle);
+            });
+        }
 
         let center = self.render_center(window, cx);
-        let search_bar = self.render_search_bar(cx);
-        let filter_bar = self.render_filter_bar(cx);
+        let search_bar = self.render_search_bar(window, cx);
+        let filter_bar = self.render_filter_bar(window, cx);
+        let ask_bar = self.render_ask_bar(window, cx);
         let overlays = self.render_overlay(cx);
 
         // The grid body and the optional file panel share a row. The
@@ -2503,10 +3043,21 @@ impl Render for MainView {
             .overflow_hidden()
             .children(filter_bar)
             .children(search_bar)
+            .children(ask_bar)
             .child(center)
             .children(overlays);
         let panel = if self.file_panel_open && !self.documents.is_empty() {
             Some(self.render_file_panel(cx).into_any_element())
+        } else {
+            None
+        };
+        let inspector = if self.inspector_open && self.model.is_some() {
+            Some(self.render_inspector(cx))
+        } else {
+            None
+        };
+        let diagnostics = if self.diagnostics_open && self.model.is_some() {
+            Some(self.render_diagnostics(cx))
         } else {
             None
         };
@@ -2531,7 +3082,9 @@ impl Render for MainView {
                     .flex_1()
                     .overflow_hidden()
                     .when_some(panel, |this, panel| this.child(panel))
-                    .child(body),
+                    .child(body)
+                    .when_some(diagnostics, |this, diagnostics| this.child(diagnostics))
+                    .when_some(inspector, |this, inspector| this.child(inspector)),
             )
             .child(self.render_status())
     }
@@ -2552,6 +3105,106 @@ fn extract_and_index(source: &Arc<ArchiveSource>, entry: &str) -> OpenOutcome {
         Ok(document) => OpenOutcome::Ready(Box::new(document)),
         Err(err) => OpenOutcome::Error(err.to_string()),
     }
+}
+
+/// One label/value row in the column inspector.
+fn metric_row(label: &str, value: String) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .text_xs()
+        .child(
+            div()
+                .w(px(92.))
+                .flex_shrink_0()
+                .text_color(theme::TEXT_DIM)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_color(theme::TEXT_STRONG)
+                .truncate()
+                .child(value),
+        )
+        .into_any_element()
+}
+
+/// The inspector body for a computed column: metrics plus samples and a
+/// frequent-values list.
+fn render_column_stats(stats: &ColumnStats) -> AnyElement {
+    let distinct = match stats.distinct {
+        DistinctCount::Exact(n) => format!("{} (exact)", format_count(n)),
+        DistinctCount::Approximate(n) => format!("{} (approx)", format_count(n)),
+    };
+    let option = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_string());
+
+    let mut rows: Vec<AnyElement> = vec![
+        metric_row("name", stats.name.clone()),
+        metric_row("type", format!("{:?}", stats.column_type)),
+        metric_row("rows", format_count(stats.total_rows)),
+        metric_row("non-empty", format_count(stats.non_empty)),
+        metric_row("empty", format_count(stats.empty)),
+        metric_row("distinct", distinct),
+        metric_row(
+            "duplicates",
+            stats
+                .duplicate_count
+                .map(format_count)
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        metric_row("min", option(&stats.min)),
+        metric_row("max", option(&stats.max)),
+        metric_row("longest", option(&stats.longest)),
+        metric_row("shortest", option(&stats.shortest)),
+    ];
+
+    if !stats.samples.is_empty() {
+        rows.push(metric_row("samples", stats.samples.join(", ")));
+    }
+    if !stats.frequent.is_empty() {
+        rows.push(
+            div()
+                .mt_2()
+                .text_xs()
+                .text_color(theme::TEXT_DIM)
+                .child("frequent values")
+                .into_any_element(),
+        );
+        for value in &stats.frequent {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .gap_2()
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(theme::TEXT)
+                            .truncate()
+                            .child(value.value.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(theme::TEXT_DIM)
+                            .child(format_count(value.count)),
+                    )
+                    .into_any_element(),
+            );
+        }
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .children(rows)
+        .into_any_element()
 }
 
 fn display_path(path: &std::path::Path) -> String {
@@ -2582,6 +3235,15 @@ fn plural(n: u64) -> &'static str {
     }
 }
 
+/// Toolbar label for the active header interpretation.
+fn header_mode_label(mode: HeaderMode) -> &'static str {
+    match mode {
+        HeaderMode::Auto => "Headers: Auto",
+        HeaderMode::Header => "Headers: On",
+        HeaderMode::Headerless => "Headers: Off",
+    }
+}
+
 /// Which way a drag past the grid's vertical edges should auto-scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoScrollDirection {
@@ -2605,1171 +3267,4 @@ fn auto_scroll_direction(pointer_y: Pixels, bounds: Bounds<Pixels>) -> Option<Au
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    use gpui::{Entity, TestAppContext, VisualTestContext};
-
-    /// Test helper: append a loaded tab for `doc` and make it active.
-    /// Mirrors the direct-file arm of `apply` without going through
-    /// the background-task machinery.
-    fn push_loaded_tab(view: &mut MainView, doc: Arc<ParsedDocument>) {
-        let id = view.alloc_doc_id();
-        view.documents
-            .push(DocumentSnapshot::from_doc(id, doc, None, None));
-        view.active = Some(view.documents.len() - 1);
-        view.load_active();
-    }
-
-    fn sample_document() -> anvil_core::ParsedDocument {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sample.csv");
-        std::fs::write(&path, b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n").expect("write fixture");
-        let opened = anvil_core::source::local::open_local(&path).expect("open local");
-        anvil_core::index_opened(opened)
-    }
-
-    /// A wider-than-viewport document, for tests that need to scroll.
-    fn large_document(rows: usize) -> anvil_core::ParsedDocument {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("large.csv");
-        let mut csv = String::from("a,b,c\n");
-        for i in 0..rows {
-            csv.push_str(&format!("{i},{i},{i}\n"));
-        }
-        std::fs::write(&path, csv).expect("write fixture");
-        let opened = anvil_core::source::local::open_local(&path).expect("open local");
-        anvil_core::index_opened(opened)
-    }
-
-    /// Build a ZIP whose entries all contain the same small CSV, and
-    /// return its `ArchiveSource`. The `TempDir` must be kept alive
-    /// for the lifetime of the test, so callers bind it.
-    fn make_zip_archive(names: &[&str]) -> (tempfile::TempDir, Arc<ArchiveSource>) {
-        use std::io::Write;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("archive.zip");
-        {
-            let file = std::fs::File::create(&path).expect("create zip");
-            let mut zip = zip::ZipWriter::new(file);
-            let opts = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-            for name in names {
-                zip.start_file(*name, opts).expect("start file");
-                zip.write_all(b"x,y\n1,2\n3,4\n").expect("write entry");
-            }
-            zip.finish().expect("finish zip");
-        }
-        let opened = anvil_core::open_path(&path).expect("open zip");
-        let archive = match opened {
-            anvil_core::OpenResult::Archive(a) => Arc::new(a),
-            _ => panic!("expected an archive"),
-        };
-        (dir, archive)
-    }
-
-    /// Inject a ready document and focus the grid the way `render_grid`
-    /// does after an open. Returns a recorder standing in for the system
-    /// clipboard so the copy path can be asserted without side effects.
-    fn inject(cx: &mut VisualTestContext, view: &Entity<MainView>) -> Arc<Mutex<Vec<String>>> {
-        inject_doc(cx, view, sample_document())
-    }
-
-    /// As `inject`, but with a caller-supplied document.
-    fn inject_doc(
-        cx: &mut VisualTestContext,
-        view: &Entity<MainView>,
-        doc: anvil_core::ParsedDocument,
-    ) -> Arc<Mutex<Vec<String>>> {
-        let written: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = written.clone();
-        cx.update_window_entity(view, |view, window, cx| {
-            // Push the document as a fresh tab; mirrors what `apply`
-            // does when an `OpenOutcome::Ready` arrives so render code
-            // sees a consistent live state. The selection lives on the
-            // new snapshot.
-            let arc_doc = Arc::new(doc);
-            push_loaded_tab(view, arc_doc);
-            view.state = ViewState::Ready;
-            view.selection.set(CellPos::new(0, 0));
-            // The selection we just set lives on the live field; copy
-            // it into the snapshot so the tab is internally consistent.
-            if let Some(snap) = view.documents.get_mut(view.active.unwrap()) {
-                snap.selection = view.selection.clone();
-            }
-            view.status_message = None;
-            view.clipboard = Arc::new(move |text: &str| {
-                sink.lock()
-                    .expect("clipboard recorder")
-                    .push(text.to_string());
-                Ok(())
-            });
-            // Exercise the production focus path: `render_grid` sees
-            // this flag and schedules a deferred `window.focus` for the
-            // grid handle. (The `window` argument is unused on purpose
-            // so the test cannot pass by focusing manually.)
-            let _ = window;
-            view.focus_grid_on_next_frame = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        written
-    }
-
-    /// Regression: keyboard events only reach `on_grid_key_down` while
-    /// the grid's focus handle is focused. Before the focus handle was
-    /// introduced the grid was never focusable, so neither arrow
-    /// navigation nor Cmd/Ctrl+C worked. This test fails if the grid
-    /// loses `track_focus` or focus is no longer transferred to it.
-    #[gpui::test]
-    async fn arrow_keys_move_selection_when_grid_focused(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.simulate_keystrokes("down");
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
-        });
-
-        cx.simulate_keystrokes("right");
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
-        });
-    }
-
-    /// Regression for the reported "Cmd+C does nothing" bug. The
-    /// shortcut only reaches `on_grid_key_down` while the grid is
-    /// focused; this asserts the handler runs, reports a count, and
-    /// writes the expected TSV to the clipboard sink.
-    #[gpui::test]
-    async fn copy_shortcut_reaches_handler_when_grid_focused(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let written = inject(cx, &view);
-
-        let copy_keystroke = if cfg!(target_os = "macos") {
-            "cmd-c"
-        } else {
-            "ctrl-c"
-        };
-        cx.simulate_keystrokes(copy_keystroke);
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.status_message.as_deref(), Some("copied 1 cell"));
-            // The green confirmation flash covers the copied cell.
-            assert_eq!(
-                view.copy_flash_rect,
-                Some((CellPos::new(0, 0), CellPos::new(0, 0)))
-            );
-        });
-
-        // The selection is the single cell (0, 0), whose value in the
-        // sample document is "1".
-        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
-        let captured = written.lock().expect("clipboard recorder").clone();
-        assert_eq!(captured, vec![format!("1{ending}")]);
-    }
-
-    /// Centre of cell `(row, col)` in window coordinates, using the grid
-    /// list's measured bounds plus the known row height, row-number
-    /// gutter, and computed column widths. Assumes the grid is not
-    /// scrolled (the tests never scroll it).
-    fn cell_center(
-        cx: &mut VisualTestContext,
-        view: &Entity<MainView>,
-        row: u64,
-        col: usize,
-    ) -> gpui::Point<gpui::Pixels> {
-        let bounds = cx
-            .debug_bounds("anvil-grid-list")
-            .expect("grid list bounds");
-        let (col_offset, col_width) = view.read_with(cx, |view, _| {
-            let layout = &view.model.as_ref().expect("model").layout;
-            (layout.offsets[col], layout.widths[col])
-        });
-        let x = bounds.origin.x + theme::ROW_NUMBER_WIDTH + px(col_offset) + px(col_width) / 2.0;
-        let y = bounds.origin.y + px((row as f32 + 0.5) * f32::from(theme::ROW_HEIGHT));
-        gpui::point(x, y)
-    }
-
-    /// Drag-select: press on one cell, drag across to another, release.
-    /// The selection should become the rectangle between them, and the
-    /// copy should then emit the whole block as TSV.
-    #[gpui::test]
-    async fn drag_select_builds_rectangle(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let written = inject(cx, &view);
-
-        let start = cell_center(cx, &view, 0, 0);
-        let end = cell_center(cx, &view, 1, 1);
-        let modifiers = gpui::Modifiers::default();
-
-        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
-        // Two moves to the same cell: the first updates the hover hit
-        // test, the second is delivered to the now-hovered cell.
-        cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-        cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-        cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(
-                view.selection.normalize(),
-                Some((CellPos::new(0, 0), CellPos::new(1, 1)))
-            );
-            // Mouse-up disarms drag-select.
-            assert!(!view.drag_selecting);
-        });
-
-        // Copy the dragged block and check the TSV payload.
-        let copy_keystroke = if cfg!(target_os = "macos") {
-            "cmd-c"
-        } else {
-            "ctrl-c"
-        };
-        cx.simulate_keystrokes(copy_keystroke);
-        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
-        let captured = written.lock().expect("clipboard recorder").clone();
-        assert_eq!(
-            captured,
-            vec![format!("1\t2{ending}4\t5{ending}")],
-            "dragged block should copy as TSV"
-        );
-    }
-
-    #[test]
-    fn auto_scroll_direction_detects_edges() {
-        let bounds = Bounds {
-            origin: gpui::point(px(0.), px(100.)),
-            size: gpui::size(px(400.), px(200.)),
-        };
-        assert_eq!(
-            auto_scroll_direction(px(50.), bounds),
-            Some(AutoScrollDirection::Up)
-        );
-        assert_eq!(
-            auto_scroll_direction(px(350.), bounds),
-            Some(AutoScrollDirection::Down)
-        );
-        // Inside (and exactly on) the vertical bounds: no scroll.
-        assert_eq!(auto_scroll_direction(px(100.), bounds), None);
-        assert_eq!(auto_scroll_direction(px(200.), bounds), None);
-        assert_eq!(auto_scroll_direction(px(300.), bounds), None);
-    }
-
-    /// Dragging past the bottom edge should scroll the list and grow the
-    /// selection past the initially visible rows without any further
-    /// pointer movement (the tick loop keeps it going); this asserts the
-    /// immediate step driven by the mouse-move listener.
-    #[gpui::test]
-    async fn drag_past_bottom_edge_starts_auto_scroll(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject_doc(cx, &view, large_document(1000));
-
-        let start = cell_center(cx, &view, 0, 0);
-        let bounds = cx
-            .debug_bounds("anvil-grid-list")
-            .expect("grid list bounds");
-        let below = gpui::point(start.x, bounds.origin.y + bounds.size.height + px(40.0));
-        let modifiers = gpui::Modifiers::default();
-
-        cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
-        cx.simulate_mouse_move(below, gpui::MouseButton::Left, modifiers);
-        cx.simulate_mouse_move(below, gpui::MouseButton::Left, modifiers);
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.drag_selecting, "drag should still be active");
-            let cursor = view
-                .selection
-                .cursor()
-                .expect("auto-scroll should extend the selection");
-            assert!(
-                cursor.record_index > 0,
-                "selection should extend past the first visible row, got {cursor:?}"
-            );
-            // The list actually scrolled (the deferred scroll from each
-            // step is applied by the following frame, so assert on the
-            // resulting offset rather than the pending request).
-            // Scrolling down makes the offset negative.
-            let offset_y = view.v_scroll.0.borrow().base_handle.offset().y;
-            assert!(
-                offset_y < px(0.0),
-                "auto-scroll should move the list down, got offset {offset_y:?}"
-            );
-        });
-
-        cx.simulate_mouse_up(below, gpui::MouseButton::Left, modifiers);
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(!view.drag_selecting);
-            assert!(
-                view.auto_scroll_task.is_none(),
-                "mouse-up should stop the auto-scroll loop"
-            );
-        });
-    }
-
-    /// Regression: Cmd/Ctrl+F should open the search bar overlay. The
-    /// keystroke reaches `on_grid_key_down` while the grid is focused
-    /// and the binding maps to `Action::OpenSearch`. After the
-    /// keystroke the bar must be open and the query empty.
-    #[gpui::test]
-    async fn cmd_f_opens_search_bar_when_grid_focused(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(!view.search_open);
-        });
-
-        let open = if cfg!(target_os = "macos") {
-            "cmd-f"
-        } else {
-            "ctrl-f"
-        };
-        cx.simulate_keystrokes(open);
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.search_open, "search bar should be open");
-            assert_eq!(view.search_query, "");
-        });
-    }
-
-    /// Typing characters into the open search bar appends to the query
-    /// (instead of moving the grid cursor). The bar's key handler must
-    /// swallow printable keystrokes; the grid receives nothing.
-    #[gpui::test]
-    async fn search_bar_input_appends_and_skips_grid_navigation(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-
-        // Drive individual characters. GPUI's keystroke simulation
-        // dispatches one KeystrokeEvent per `simulate_keystrokes`
-        // argument.
-        cx.simulate_keystrokes("f o o");
-        cx.run_until_parked();
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_query, "foo");
-            // The grid cursor stays at the original (0, 0) because the
-            // search bar swallowed the characters.
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
-        });
-    }
-
-    /// Backspace inside the search bar pops one character at a time
-    /// without falling back to grid navigation.
-    #[gpui::test]
-    async fn search_bar_backspace_drops_last_character(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("f o o");
-        cx.run_until_parked();
-        cx.simulate_keystrokes("backspace");
-        cx.run_until_parked();
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_query, "fo");
-        });
-    }
-
-    /// Closing the search bar via the `Escape` action must leave the
-    /// grid ready to take keyboard focus again. We assert the bar is
-    /// closed and `focus_grid_on_next_frame` is set so the next render
-    /// will refocus the grid.
-    #[gpui::test]
-    async fn escape_closes_search_bar(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(!view.search_open, "search bar should be closed");
-            assert_eq!(view.search_query, "");
-            assert_eq!(view.search_matches, Vec::<u64>::new());
-            assert_eq!(view.search_active, -1);
-            // We don't assert on `focus_grid_on_next_frame` here: that
-            // flag is cleared as soon as `render_grid` runs (the
-            // deferred focus consumes it). The contract we care about
-            // is "the bar is closed"; the next user keystroke will
-            // route through the grid handler.
-        });
-    }
-
-    /// A search that has finished must populate `search_matches` and
-    /// set `search_active` to the first match. We assert on the
-    /// search state directly rather than the renderer.
-    #[gpui::test]
-    async fn search_populates_match_list(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("foo");
-        // The background search task completes asynchronously; run
-        // until the executor is idle.
-        cx.run_until_parked();
-        // The sample fixture is `a,b,c\n1,2,3\n4,5,6\n7,8,9\n`. None
-        // of those rows contain "foo", so the result list is empty and
-        // `search_active` stays at -1.
-        cx.update_window_entity(&view, |view, _, _| {
-            // 1M-row fixtures would take a moment, but the sample
-            // document is tiny so the task should already be done.
-            assert_eq!(view.search_matches, Vec::<u64>::new());
-            assert_eq!(view.search_active, -1);
-        });
-    }
-
-    /// Searching a fixture whose records contain the needle should
-    /// return the matching record indexes in order.
-    #[gpui::test]
-    async fn search_finds_real_matches_in_fixture(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        // Build a fixture where the string `needle` appears in two
-        // records. `a,b\nneedle,1\nx,needle\nother,foo\n` -> rows 0 and
-        // 1 match when searching for "needle".
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("search.csv");
-        std::fs::write(&path, b"a,b\nneedle,1\nx,needle\nother,foo\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let doc = anvil_core::index_opened(opened);
-        inject_doc(cx, &view, doc);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("needle");
-        cx.run_until_parked();
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_matches, vec![0, 1]);
-            assert_eq!(view.search_active, 0);
-            // The first match is jumped to, so the cursor lives there.
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
-        });
-    }
-
-    /// Enter inside the search bar advances to the next match;
-    /// Shift+Enter goes to the previous. The test uses a multi-match
-    /// fixture so both directions are observable.
-    #[gpui::test]
-    async fn search_enter_cycles_through_matches(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cycle.csv");
-        std::fs::write(&path, b"a,b\nhit,1\nhit,2\nhit,3\nskip,4\nhit,5\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let doc = anvil_core::index_opened(opened);
-        inject_doc(cx, &view, doc);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("hit");
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            // First match is row 0.
-            assert_eq!(view.search_active, 0);
-        });
-
-        // Enter -> next match.
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_active, 1);
-        });
-
-        // Shift+Enter -> previous.
-        cx.simulate_keystrokes("shift-enter");
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_active, 0);
-        });
-
-        // Wrapping: Shift+Enter from row 0 should wrap to the last
-        // match (row 3 = the 4th "hit", which is index 3 in the
-        // 4-element result list).
-        cx.simulate_keystrokes("shift-enter");
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_active, 3);
-        });
-    }
-
-    /// F3 / Shift-F3 cycle through matches without consuming characters
-    /// in the search bar. The bar must remain open and the query
-    /// unchanged after the keystrokes; only `search_active` advances.
-    #[gpui::test]
-    async fn f3_advances_match_without_opening_bar(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("f3.csv");
-        std::fs::write(&path, b"a,b\nhit,1\nhit,2\nhit,3\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let doc = anvil_core::index_opened(opened);
-        inject_doc(cx, &view, doc);
-
-        // Set up a search directly (the bar's focus path needs a
-        // render, which the harness does not run automatically), let
-        // the background search task complete, then dispatch F3.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.search_open = true;
-            view.search_query = "hit".into();
-            view.kick_search(cx);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_matches, vec![0, 1, 2]);
-        });
-
-        // F3 -> next match.
-        cx.simulate_keystrokes("f3");
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.search_open, "F3 should not close the bar");
-            assert_eq!(view.search_query, "hit", "F3 should not edit the query");
-            assert_eq!(view.search_active, 1);
-        });
-
-        // Shift+F3 -> previous.
-        cx.simulate_keystrokes("shift-f3");
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.search_active, 0);
-        });
-    }
-
-    /// A new document open must clear the previous search state.
-    /// Without this the next-document's grid would still show stale
-    /// match highlighting.
-    #[gpui::test]
-    async fn opening_new_document_clears_search_state(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
-        cx.run_until_parked();
-        cx.simulate_keystrokes("f o o");
-        cx.run_until_parked();
-
-        // Now apply an `OpenOutcome::Ready` through the public
-        // dispatcher. We can't construct a `LoadedDocument` here
-        // because the constructor is on the `anvil` binary side; we
-        // exercise `close_search` directly which is what `apply`
-        // calls.
-        cx.update_window_entity(&view, |view, _, _| view.close_search());
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(!view.search_open);
-            assert_eq!(view.search_query, "");
-            assert_eq!(view.search_matches, Vec::<u64>::new());
-            assert_eq!(view.search_active, -1);
-        });
-    }
-
-    // ---- multi-document / tabs --------------------------------------
-
-    /// Pushing two documents into the tab list (the way a
-    /// multi-file drop or two sequential opens would) keeps both
-    /// snapshots and switches the live fields to the most recent.
-    #[gpui::test]
-    async fn push_two_documents_switches_to_last(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        // Add a second document directly via the public helpers used
-        // by `apply`: push a snapshot and load it as the active one.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("second.csv");
-        std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let second = anvil_core::index_opened(opened);
-        cx.update_window_entity(&view, |view, _, _| {
-            let arc_doc = std::sync::Arc::new(second);
-            push_loaded_tab(view, arc_doc);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 2);
-            assert_eq!(view.active, Some(1));
-        });
-    }
-
-    /// Switching tabs snapshots the active doc's selection /
-    /// scroll_x and restores them when the user comes back.
-    #[gpui::test]
-    async fn switching_tabs_restores_per_document_state(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        // Set selection on the active tab (the sample fixture has 3
-        // rows × 3 cols, so (1, 1) is in bounds).
-        cx.update_window_entity(&view, |view, _, _| {
-            view.selection.set(CellPos::new(1, 1));
-            view.scroll_x = 42.0;
-        });
-
-        // Push a second tab; active becomes that tab. We snapshot
-        // first (the same call `apply` makes on a fresh open) so the
-        // first tab's selection lives in its snapshot for the
-        // round-trip.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("second.csv");
-        std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let second = anvil_core::index_opened(opened);
-        cx.update_window_entity(&view, |view, _, _| {
-            view.snapshot_active();
-            let arc_doc = std::sync::Arc::new(second);
-            push_loaded_tab(view, arc_doc);
-        });
-
-        // The live selection / scroll_x should be the defaults for
-        // the new tab, not the old tab's values.
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_ne!(view.selection.cursor(), Some(CellPos::new(1, 1)));
-            assert_eq!(view.scroll_x, 0.0);
-        });
-
-        // Switch back to tab 0 — the selection comes back.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.switch_to(0, cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.active, Some(0));
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
-            assert_eq!(view.scroll_x, 42.0);
-        });
-    }
-
-    /// Closing the active tab via `close_active_at` shifts
-    /// `active` to a neighbour.
-    #[gpui::test]
-    async fn closing_active_tab_picks_neighbour(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        // Add three tabs total.
-        for i in 0..2 {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().join(format!("extra{i}.csv"));
-            std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
-            let opened = anvil_core::source::local::open_local(&path).expect("open");
-            let extra = anvil_core::index_opened(opened);
-            cx.update_window_entity(&view, |view, _, _| {
-                let arc_doc = std::sync::Arc::new(extra);
-                push_loaded_tab(view, arc_doc);
-            });
-        }
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 3);
-            assert_eq!(view.active, Some(2));
-        });
-
-        // Close the active tab. The new active should be the last
-        // available tab.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.close_active_at(2, cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 2);
-            assert_eq!(view.active, Some(1));
-        });
-    }
-
-    /// Closing a non-active tab earlier than the active one shifts
-    /// the active index down by one.
-    #[gpui::test]
-    async fn closing_earlier_non_active_tab_shifts_active(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        // Add two more tabs; active ends up at index 2.
-        for i in 0..2 {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().join(format!("extra{i}.csv"));
-            std::fs::write(&path, b"x,y\n10,20\n30,40\n").expect("write");
-            let opened = anvil_core::source::local::open_local(&path).expect("open");
-            let extra = anvil_core::index_opened(opened);
-            cx.update_window_entity(&view, |view, _, _| {
-                let arc_doc = std::sync::Arc::new(extra);
-                push_loaded_tab(view, arc_doc);
-            });
-        }
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.active, Some(2));
-        });
-
-        // Close tab 0 (an earlier, inactive tab). Active should
-        // shift from 2 to 1.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.close_active_at(0, cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 2);
-            assert_eq!(view.active, Some(1));
-        });
-    }
-
-    /// Closing the last remaining tab empties the document list and
-    /// `active` becomes `None`.
-    #[gpui::test]
-    async fn closing_last_tab_leaves_empty_state(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.close_active_at(0, cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.documents.is_empty());
-            assert!(view.active.is_none());
-            assert!(view.model.is_none());
-        });
-    }
-
-    /// Multi-file drop: every dropped path becomes its own tab. This
-    /// drives the real `apply(OpenOutcome::Ready)` path twice — the
-    /// same code that runs after `begin_open`'s background task — so
-    /// the tab-push / switch logic is exercised end-to-end.
-    #[gpui::test]
-    async fn two_sequential_applies_create_two_tabs(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-
-        for name in ["one.csv", "two.csv"] {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().join(name);
-            std::fs::write(&path, b"a,b\n1,2\n3,4\n").expect("write");
-            let opened = anvil_core::source::local::open_local(&path).expect("open");
-            let doc = anvil_core::index_opened(opened);
-            let loaded = LoadedDocument {
-                document: doc,
-                archive: None,
-                entry: None,
-            };
-            cx.update_window_entity(&view, |view, _, cx| {
-                view.apply(OpenOutcome::Ready(Box::new(loaded)), cx);
-            });
-        }
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 2);
-            assert_eq!(view.active, Some(1));
-            assert!(view.model.is_some());
-        });
-    }
-
-    /// A single open arrives as one tab with the loaded document live.
-    #[gpui::test]
-    async fn apply_ready_creates_one_tab(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("only.csv");
-        std::fs::write(&path, b"a,b\n1,2\n3,4\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let doc = anvil_core::index_opened(opened);
-        let loaded = LoadedDocument {
-            document: doc,
-            archive: None,
-            entry: None,
-        };
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.apply(OpenOutcome::Ready(Box::new(loaded)), cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 1);
-            assert_eq!(view.active, Some(0));
-            assert!(view.model.is_some());
-            assert!(matches!(view.state, ViewState::Ready));
-        });
-    }
-
-    /// After an error with no tabs open, the centre panel shows the
-    /// error page. With a tab already open, an error on a background
-    /// task must NOT clobber the visible document.
-    #[gpui::test]
-    async fn error_with_open_tab_keeps_the_tab(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("ok.csv");
-        std::fs::write(&path, b"a,b\n1,2\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        let doc = anvil_core::index_opened(opened);
-        let loaded = LoadedDocument {
-            document: doc,
-            archive: None,
-            entry: None,
-        };
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.apply(OpenOutcome::Ready(Box::new(loaded)), cx);
-        });
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.apply(OpenOutcome::Error("boom".into()), cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            // Tab is still open and still rendering.
-            assert_eq!(view.documents.len(), 1);
-            assert!(view.model.is_some());
-            // Error is in the status message, not the centre panel.
-            assert!(view
-                .status_message
-                .as_deref()
-                .is_some_and(|m| m.contains("boom")));
-        });
-    }
-
-    /// Every usable archive entry becomes a tab synchronously, before
-    /// any extraction runs. Only the first tab's document is loaded
-    /// on demand.
-    #[gpui::test]
-    async fn archive_entries_become_tabs_immediately(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv", "c.csv"]);
-        assert_eq!(archive.total_candidates(), 3);
-
-        let archive_for_view = archive.clone();
-        cx.update_window_entity(&view, move |view, _, cx| {
-            view.install_archive_tabs(archive_for_view, None, None, cx);
-        });
-
-        // All three tabs exist immediately; only the active one is
-        // loading.
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 3);
-            assert_eq!(view.active, Some(0));
-            assert!(view.documents[0].loading || view.documents[0].is_loaded());
-            assert!(!view.documents[1].is_loaded());
-            assert!(!view.documents[2].is_loaded());
-        });
-
-        // The first tab's lazy load completes and the grid renders.
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.documents[0].is_loaded());
-            assert!(view.model.is_some());
-        });
-
-        // Switching to the second tab triggers its own load.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.switch_to(1, cx);
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.active, Some(1));
-            assert!(view.documents[1].is_loaded());
-            assert!(view.model.is_some());
-            // The third tab is still untouched.
-            assert!(!view.documents[2].is_loaded());
-        });
-    }
-
-    /// `apply(NeedArchiveChoice)` is the path a multi-entry ZIP drop
-    /// takes. Every usable entry becomes a tab and no modal picker is
-    /// shown any more.
-    #[gpui::test]
-    async fn apply_need_archive_choice_installs_all_tabs(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let (_dir, archive) = make_zip_archive(&["one.csv", "two.csv", "three.csv"]);
-        cx.update_window_entity(&view, move |view, _, cx| {
-            view.apply(OpenOutcome::NeedArchiveChoice(archive), cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 3);
-            assert_eq!(view.active, Some(0));
-            assert!(!view.show_picker, "no modal picker any more");
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.documents[0].is_loaded());
-            assert!(view.model.is_some());
-        });
-    }
-
-    /// When the loader already produced a document for one entry (the
-    /// auto-opened favourite), that entry's tab is ready and the
-    /// active tab points at it; the others stay pending.
-    #[gpui::test]
-    async fn install_archive_tabs_marks_loaded_entry_as_ready(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv"]);
-        let loaded = anvil_core::load_entry(&archive, "b.csv").expect("load entry");
-        let loaded_doc = Arc::new(loaded.document);
-
-        cx.update_window_entity(&view, move |view, _, cx| {
-            view.install_archive_tabs(archive, Some("b.csv".to_string()), Some(loaded_doc), cx);
-        });
-
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 2);
-            // Active points at the pre-loaded entry, not the first
-            // entry in the archive.
-            assert_eq!(view.active, Some(1));
-            assert!(view.documents[1].is_loaded());
-            assert!(!view.documents[0].is_loaded());
-            assert!(view.model.is_some());
-        });
-
-        // The pending first entry loads when the user switches to it.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.switch_to(0, cx);
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.documents[0].is_loaded());
-            assert_eq!(view.active, Some(0));
-        });
-    }
-
-    /// Cmd/Ctrl+B toggles the file-manager panel. The binding routes
-    /// through `on_grid_key_down` like every other grid shortcut, so
-    /// this also re-verifies the keyboard path.
-    #[gpui::test]
-    async fn cmd_b_toggles_file_panel(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.file_panel_open, "panel open by default");
-        });
-
-        let chord = if cfg!(target_os = "macos") {
-            "cmd-b"
-        } else {
-            "ctrl-b"
-        };
-        cx.simulate_keystrokes(chord);
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(!view.file_panel_open, "first toggle hides it");
-        });
-        cx.simulate_keystrokes(chord);
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.file_panel_open, "second toggle shows it again");
-        });
-    }
-
-    /// `group_documents` groups direct files on their own and nests
-    /// ZIP entries under their archive, keyed by `Arc` identity so two
-    /// archives with the same file name stay separate.
-    #[test]
-    fn group_documents_groups_by_archive_identity() {
-        let (_dir_a, archive_a) = make_zip_archive(&["a.csv", "b.csv"]);
-        let (_dir_b, archive_b) = make_zip_archive(&["c.csv"]);
-        let docs = vec![
-            DocumentSnapshot::from_doc(0, Arc::new(sample_document()), None, None),
-            DocumentSnapshot::pending_entry(1, archive_a.clone(), "a.csv".into()),
-            DocumentSnapshot::pending_entry(2, archive_a.clone(), "b.csv".into()),
-            DocumentSnapshot::pending_entry(3, archive_b.clone(), "c.csv".into()),
-            DocumentSnapshot::from_doc(4, Arc::new(sample_document()), None, None),
-        ];
-        let groups = group_documents(&docs);
-
-        assert_eq!(groups.len(), 4, "two direct files + two archives");
-        assert!(groups[0].0.is_none(), "first direct file is top-level");
-        assert_eq!(groups[0].1.len(), 1);
-        assert_eq!(groups[0].1[0].0, 0);
-
-        assert!(groups[1]
-            .0
-            .as_ref()
-            .is_some_and(|a| Arc::ptr_eq(a, &archive_a)));
-        assert_eq!(groups[1].1.len(), 2, "both archive_a entries grouped");
-        assert_eq!(groups[1].1[0].0, 1);
-        assert_eq!(groups[1].1[1].0, 2);
-
-        assert!(groups[2]
-            .0
-            .as_ref()
-            .is_some_and(|a| Arc::ptr_eq(a, &archive_b)));
-        assert_eq!(groups[2].1.len(), 1);
-
-        assert!(groups[3].0.is_none(), "last direct file is top-level");
-        assert_eq!(groups[3].1[0].0, 4);
-    }
-
-    /// The panel's row actions reuse the tab lifecycle: switching and
-    /// closing still move `active` correctly, so a test that drives the
-    /// underlying methods is enough to pin the behaviour the panel
-    /// depends on.
-    #[gpui::test]
-    async fn file_panel_navigation_uses_tab_lifecycle(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv"]);
-        let ar = archive.clone();
-        cx.update_window_entity(&view, move |view, _, cx| {
-            view.install_archive_tabs(ar, None, None, cx);
-        });
-        cx.run_until_parked();
-
-        // Switch via the same path the panel's row click uses.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.switch_to(1, cx);
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.active, Some(1));
-            assert!(view.documents[1].is_loaded());
-        });
-
-        // Close via the same path the panel's × uses.
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.close_active_at(1, cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.documents.len(), 1);
-            assert_eq!(view.active, Some(0));
-        });
-    }
-
-    // ---- filter ------------------------------------------------------
-
-    /// A small two-column fixture with headers, used by the filter
-    /// tests. Rows: (US,10), (UK,20), (US,30).
-    fn country_document() -> anvil_core::ParsedDocument {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("country.csv");
-        std::fs::write(&path, b"country,amount\nUS,10\nUK,20\nUS,30\n").expect("write");
-        let opened = anvil_core::source::local::open_local(&path).expect("open");
-        anvil_core::index_opened(opened)
-    }
-
-    /// Cmd/Ctrl+L opens the filter bar through the grid keyboard path.
-    #[gpui::test]
-    async fn cmd_l_opens_filter_bar(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject(cx, &view);
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(!view.filter_open);
-        });
-        let chord = if cfg!(target_os = "macos") {
-            "cmd-l"
-        } else {
-            "ctrl-l"
-        };
-        cx.simulate_keystrokes(chord);
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.filter_open, "Cmd/Ctrl+L should open the bar");
-        });
-    }
-
-    /// Enter parses the input and, on success, populates `filter_rows`
-    /// from the background evaluation. The fixture's `country == US`
-    /// rows are 0 and 2.
-    #[gpui::test]
-    async fn filter_input_applies_on_enter(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject_doc(cx, &view, country_document());
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.filter_input = "country == US".into();
-            view.apply_filter_input(cx);
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.filter_applied.is_some());
-            assert!(view.filter_error.is_none());
-            let rows = view.filter_rows.as_ref().expect("filter rows");
-            assert_eq!(&**rows, &[0, 2]);
-        });
-    }
-
-    /// A parse error is shown and leaves the previous predicate in
-    /// place; no rows are installed.
-    #[gpui::test]
-    async fn filter_parse_error_is_shown(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject_doc(cx, &view, country_document());
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.filter_input = "nonsense".into();
-            view.apply_filter_input(cx);
-        });
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.filter_error.is_some());
-            assert!(view.filter_applied.is_none());
-            assert!(view.filter_rows.is_none());
-        });
-    }
-
-    /// Clearing the filter restores the unfiltered document.
-    #[gpui::test]
-    async fn clear_filter_restores_document(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject_doc(cx, &view, country_document());
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.filter_input = "country == US".into();
-            view.apply_filter_input(cx);
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.filter_rows.is_some());
-        });
-
-        cx.update_window_entity(&view, |view, _, cx| view.clear_filter(cx));
-        cx.update_window_entity(&view, |view, _, _| {
-            assert!(view.filter_applied.is_none());
-            assert!(view.filter_rows.is_none());
-            assert!(view.filter_input.is_empty());
-        });
-    }
-
-    /// With a filter active, Down moves to the next *visible* record,
-    /// skipping hidden ones. Rows are (US,10), (UK,20), (US,30) and the
-    /// filter keeps 0 and 2, so Down from record 0 lands on record 2.
-    #[gpui::test]
-    async fn filter_vertical_navigation_skips_hidden_rows(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject_doc(cx, &view, country_document());
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.filter_input = "country == US".into();
-            view.apply_filter_input(cx);
-        });
-        cx.run_until_parked();
-        // The filter bar holds focus while open, so close it (which
-        // returns focus to the grid) before driving arrow keys.
-        cx.update_window_entity(&view, |view, _, cx| view.close_filter(cx));
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            view.selection.set(CellPos::new(0, 0));
-        });
-
-        cx.simulate_keystrokes("down");
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
-        });
-
-        // Up from the last visible row goes back to the first.
-        cx.simulate_keystrokes("up");
-        cx.update_window_entity(&view, |view, _, _| {
-            assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
-        });
-    }
-
-    /// The status label reports the filtered count and the original
-    /// total when a filter is active.
-    #[gpui::test]
-    async fn filter_status_label_reports_counts(cx: &mut TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
-        inject_doc(cx, &view, country_document());
-
-        cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
-        cx.update_window_entity(&view, |view, _, cx| {
-            view.filter_input = "country == US".into();
-            view.apply_filter_input(cx);
-        });
-        cx.run_until_parked();
-        cx.update_window_entity(&view, |view, _, _| {
-            let (text, _) = view.filter_status_text();
-            assert!(text.contains("2 rows"), "got {text:?}");
-        });
-    }
-}
+mod tests;

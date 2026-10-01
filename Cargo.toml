@@ -38,6 +38,13 @@ thiserror = "1"
 
 # Clipboard (text-only; no image support)
 arboard = { version = "3", default-features = false }
+candle-core = { version = "0.11.0", optional = true }
+candle-transformers = { version = "0.11.0", optional = true }
+tokenizers = { version = "0.23.2", optional = true }
+ureq = { version = "2", optional = true }
+gliner-rs = { version = "=0.2.3", optional = true, default-features = false }
+serde_json = { version = "1", optional = true }
+gliner-tokenizers = { package = "tokenizers", version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
 crc32fast = "1"
@@ -53,3 +60,17 @@ opt-level = 1
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[features]
+# Optional embedded natural-language model backend for the Ask bar.
+# Off by default: enabling it compiles candle + tokenizers + ureq and
+# lets the bar download one pinned model on first use. The default build
+# has none of these crates.
+nl-model = [
+    "dep:candle-core",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:ureq",
+]
+# Native extraction backend. Takes precedence if both model features are enabled.
+nl-gliner = ["dep:gliner-rs", "dep:candle-core", "dep:serde_json", "dep:ureq", "dep:gliner-tokenizers"]

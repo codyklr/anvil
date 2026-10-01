@@ -138,12 +138,19 @@ this may freeze the UI.
 - [x] Arrow keys move the selection (Up/Down/Left/Right).
 - [x] Page Up / Page Down step the selection by `PAGE_STEP` rows.
 - [x] Home / End jump the column cursor to the first / last column.
-- [ ] Cmd/Ctrl+Home/End jump to first / last row.
+- [x] Cmd/Ctrl+Home/End jump to first / last row. Plain Home / End
+  jump to the first / last column. Implemented via
+  `Action::MoveCursor` with an `i64::MIN` / `i64::MAX` row delta;
+  `Selection::move_cursor` now uses saturating arithmetic so those
+  extremes cannot overflow.
 - [x] Wire a dedicated `commands` module for keystroke-to-action
   mapping (`ui/commands.rs`); `view.rs::on_grid_key_down` delegates
   execution to `MainView::run_action`. GPUI-native `actions!` /
   `cx.bind_keys` rebinding remains a possible later enhancement.
-- [ ] Tab / Shift-Tab navigation between cells.
+- [x] Tab / Shift-Tab navigation between cells. `Selection::move_cell`
+  advances in row-major order, wrapping across rows and around the
+  document ends; with a filter active the walk covers visible rows
+  only.
 - [ ] Cmd/Ctrl+G — go-to-row input box.
 - [x] Esc — clear selection / close overlays.
 - [x] Cmd/Ctrl+C — copy selection to clipboard.
@@ -204,7 +211,10 @@ this may freeze the UI.
 #### Search
 
 - [x] Cmd/Ctrl+F opens search bar.
-- [ ] Search input + options (case-sensitive toggle, column scope).
+- [x] Search input + options. The bar has an `Aa` toggle for
+  case-sensitive (byte-exact) search and a column-scope chip showing
+  the scoped column's header name with a × to clear it. Both options
+  persist per tab and re-run an in-flight search when toggled.
 - [x] `query::search` module: streaming search over
   `ParsedDocument` returning `Vec<record_index>` (or column-qualified
   results).
@@ -213,7 +223,19 @@ this may freeze the UI.
 - [x] Match count in status bar.
 - [x] Highlight matches in the visible rows.
 - [x] F3 / Shift-F3 — next / previous match; scroll into view.
-- [ ] Column-scoped search (click a header, then Cmd/Ctrl+F).
+- [x] Column-scoped search: **Alt/Option-click** a column header to
+  scope the search to that column; click again to clear it. (A plain
+  header click sorts.) The header stays highlighted while scoped, so
+  the state is visible even when the bar is closed, and Enter / F3 land
+  the cursor in the scoped column.
+- [x] Navigating to a match keeps it on screen on both axes. The
+  vertical scroll maps the record through the filtered/sorted display
+  order (previously the raw record index was used as a display
+  position), and the grid scrolls horizontally so the whole matching
+  cell is visible — the scoped column, or the first matching column for
+  a whole-record search. Arrow / Tab navigation also scrolls the cursor
+  column into view. The grid's `viewport_w` now excludes the open
+  file panel, so the scroll target is not clipped behind it.
 
 #### Filter
 
@@ -225,6 +247,12 @@ this may freeze the UI.
   `endswith`, `empty`, `notempty`, numeric `>`, `>=`, `<`, `<=`.
   Text operators are ASCII case-insensitive; ordering operators skip
   non-numeric cells. Multiple filters combine with AND.
+- [x] Row-scope `any` / `all` pseudo-columns (`any empty`,
+  `all notempty`, `any contains X`) as `FilterExpr::AnyColumn` /
+  `AllColumn`. Evaluated by looping every column per row over one
+  prepared predicate with short-circuiting, rendered by `describe`
+  (round-trip tested), and offered by autocomplete. `all notempty`
+  treats missing cells as empty.
 - [x] Application runs on the background executor; a generation
   counter discards obsolete results when the predicate changes.
 - [x] Grid renders the filtered list rather than the full range; a
@@ -232,9 +260,25 @@ this may freeze the UI.
 - [x] Filtered row count in status bar (`rows (filtered from N)`).
 - [x] Vertical arrow navigation walks the visible rows, skipping
   hidden records.
-- [ ] A richer expression language (`AND` / `OR`, parentheses); the
+- [x] The filter input is a real editable text field: click to place
+  the caret, click-drag / Shift+click to select (highlighted), arrow /
+  Home / End / word movement, Shift-extension, Cmd/Ctrl+A, and
+  Backspace/Delete over the selection. Backed by the GPUI-free
+  `ui::text_edit::TextEdit` model; pointer x is mapped to a byte index
+  through the shaped text layout.
+- [x] The search bar uses the same editable input as the filter bar
+  (`TextEdit`): caret movement, Shift-selection, Cmd/Ctrl+A, and
+  mouse click/drag, with the live search re-running after edits.
+- [x] A richer expression language (`AND` / `OR`, parentheses); the
   data-side already composes a `Vec<Filter>` with AND, so this is a
-  parser and UI extension.
+  parser and UI extension. Landed as `FilterExpr` / `parse_expr` (see
+  the Milestone 4 richer-filters section).
+- [x] Autocomplete suggestions while typing. A context-aware popup
+  (`query::suggest` + `ui/view/filter.rs`) offers columns, operators,
+  `AND`/`OR`, and bounded sampled values for the value slot. Up/Down
+  navigate, Enter/Tab or a mouse click fill the input, and Esc closes
+  the popup before the bar. Value samples are cached per column and
+  invalidated when the document changes.
 - [ ] Saved filters / filter chips.
 
 #### Tests
@@ -248,10 +292,17 @@ this may freeze the UI.
   filter.
 - [x] Test selection copy formatting (TSV with CRLF on Windows
   builds, LF on Unix).
+- [x] Unit + UI tests for Cmd/Ctrl+Home/End row jumps and
+  Tab / Shift-Tab cell navigation, including the filtered path.
+- [x] Unit tests for the `TextEdit` model (insert / replace selection /
+  backspace / delete / movement / selection / multibyte boundaries)
+  and UI tests for filter- and search-field caret movement,
+  select-all + typing, mouse click / drag selection, and live
+  re-search after a mid-string insert.
 - [x] UI regression tests for grid focus / keyboard routing — arrow
   keys reach the grid and Cmd/Ctrl+C routes to the copy handler
-  (`src/ui/view.rs`, GPUI `TestAppContext`). These fail if the grid
-  stops tracking focus.
+  (`src/ui/view/tests.rs`, GPUI `TestAppContext`). These fail if the
+  grid stops tracking focus.
 - [x] UI regression tests for the search bar (Cmd/Ctrl+F opens the
   bar; typed characters append to the query; Backspace deletes; Enter
   / Shift+Enter cycle matches; Esc closes; F3 / Shift-F3 cycle matches
@@ -303,64 +354,94 @@ column-level metadata.
 
 #### Sorting
 
-- [ ] Click a header to sort; click again to reverse; third click
-  clears.
-- [ ] `query::sort` module: `Vec<u64>` permutation of record indexes,
-  built on background executor.
-- [ ] Numeric columns sort numerically (Milestone 3's type inference
-  drives this); other columns sort lexicographically with a sane
-  locale-free ordering.
-- [ ] Empty / null values sorted to the end, not scattered.
-- [ ] Sorting must not freeze the UI; tested by spinning a 1M-row
-  numeric column sort.
-- [ ] Sort + filter compose: filter narrows rows, sort orders the
-  narrowed set.
+- [x] Click a header to sort; click again to reverse; third click
+  clears. (Alt/Option-click sets the search column scope instead.)
+  The header shows a ▲ / ▼ direction arrow and the status bar shows
+  `sorted by <column> ▲`.
+- [x] `query::sort` module: `Vec<u64>` permutation of record indexes,
+  built on the background executor. `apply(doc, rows, spec)` sorts the
+  supplied view (filtered set or all records) and returns a new
+  permutation; a generation counter discards stale results.
+- [x] Numeric columns sort numerically (type inference drives this);
+  other columns sort case-insensitively on trimmed bytes with a
+  locale-free ordering. The sort is stable.
+- [x] Empty / non-numeric values sorted to the end, for both
+  directions.
+- [x] Sorting must not freeze the UI; tested by spinning a 1M-row
+  numeric column sort (**126 ms** for `amount`, well under 3 s).
+- [x] Sort + filter compose: `kick_sort` builds its base from
+  `filter_rows`, and a filter change re-runs the sort.
 
 #### Type inference
 
-- [ ] `schema::infer` scans each column once and assigns one of:
-  integer, float, boolean, text, date-like, datetime-like, UUID-like,
-  email-like, URL-like, mostly-null.
-- [ ] Inference is heuristic and reports confidence, not a strict
-  schema. Mostly-null columns are still text.
-- [ ] Inference runs on background executor once per open.
+- [~] `schema::infer` samples each column once, bounded to 2048 rows,
+  and assigns integer / float / boolean / text / empty. The richer
+  date-like / datetime-like / UUID-like / email-like / URL-like
+  classifications and a full-column scan are follow-ups. On the
+  generated fixture it labels `id`/`user_id` integer, `amount`/`risk_score`
+  float, `is_verified` boolean, and the rest text.
+- [x] Inference is heuristic and reports confidence
+  (`ColumnProfile::numeric_fraction`), not a strict schema. All-empty
+  columns are `Empty`; a column at the 0.9 numeric threshold is
+  numeric.
+- [~] Inference runs on the background executor. The sorter computes
+  it inside the sort task, and the column inspector computes it inside
+  the stats task; caching the profiles on the document at open is still
+  an optional follow-up.
 
 #### Column inspector
 
-- [ ] Right-side panel showing the selected column.
-- [ ] Display: column name, inferred type, total rows, non-empty,
+- [x] Right-side panel showing the selected column (Cmd/Ctrl+I and the
+  toolbar **Inspector** button; `×` closes it). It follows the selection
+  and rescans only when the column changes.
+- [x] Display: column name, inferred type, total rows, non-empty,
   empty/null, distinct count (cardinality), duplicate count, min,
   max, longest, shortest, sample values.
-- [ ] Frequent-values table (top N with counts).
-- [ ] Exact vs approximate distinction: distinct count is exact when
-  the column is small enough to fit a `HashSet`; above a threshold
-  it falls back to a HyperLogLog sketch.
+- [x] Frequent-values table (top N with counts).
+- [x] Exact vs approximate distinction: distinct is exact while the
+  value set fits in a `HashMap`; above `max_exact_distinct` (100k) it
+  switches to a dependency-free HyperLogLog sketch (1024 registers,
+  with the small-range linear-counting correction) and reports
+  `DistinctCount::Approximate`.
+- [ ] The inspector scans the whole document, not the filtered/sorted
+  view. Scoping stats to the current view is a follow-up.
 
 #### Tests
 
-- [ ] Type inference tests for each kind with positive and negative
-  fixtures.
-- [ ] Sort tests: numeric vs lexicographic, empty placement, sort +
-  filter composition.
-- [ ] Column inspector metrics tests against the generated fixture
-  and against an explicit small fixture with known counts.
+- [x] Type inference tests for each implemented kind with positive
+  and negative fixtures (integer, float, boolean, text, empty,
+  numeric-threshold boundary, header names).
+- [x] Sort tests: numeric vs lexicographic, empty placement, sort +
+  filter composition, stability, non-numeric last.
+- [x] Column inspector metrics tests against explicit small fixtures
+  with known counts (empties, distinct/duplicates, numeric vs text
+  min/max, frequent ranking, samples, the exact→approximate
+  threshold, headerless naming). A generated-fixture stats assertion
+  is still optional.
 
 ### Dependencies
 
-- `hashbrown` (optional, for cardinality tracking) — new.
-- `ordered-float` (optional) for safe float comparisons — new.
+- `hashbrown` (optional, for cardinality tracking) — **not** added:
+  the exact phase uses `std::collections::HashMap` and the approximate
+  phase is a small hand-rolled HyperLogLog.
+- `ordered-float` (optional) for safe float comparisons — **not**
+  added: `f64::total_cmp` (stable since Rust 1.62) gives a total
+  order without a dependency.
 
 ### Acceptance criteria
 
-- Sorting a 1M-row numeric column completes in < 3 s on the
-  reference machine without freezing the UI.
-- Type inference on the generated fixture labels columns correctly
-  (id → integer, amount → float, verified → boolean, email →
-  email-like, timestamp → datetime-like, country → text, etc.).
-- The column inspector opens for any column, displays the documented
-  metrics, and explicitly distinguishes "exact" from "approximate"
-  when the distinct-count threshold is crossed.
-- `cargo test --release` passes; new tests cover inference and sort.
+- [x] Sorting a 1M-row numeric column completes in < 3 s on the
+  reference machine without freezing the UI (126 ms).
+- [~] Type inference on the generated fixture labels columns
+  correctly for the implemented kinds (`id`/`user_id` integer,
+  `amount`/`risk_score` float, `is_verified` boolean, the rest text).
+  Email/date/UUID/URL typing is deferred.
+- [x] The column inspector opens for any column (Cmd/Ctrl+I / toolbar
+  button), displays the documented metrics, and explicitly
+  distinguishes "exact" from "approximate" when the distinct-count
+  threshold is crossed.
+- [x] `cargo test --release` passes; new tests cover inference, sort,
+  and the inspector metrics (~266 total).
 
 ---
 
@@ -372,38 +453,125 @@ column-level metadata.
 
 #### In-record diagnostics
 
-- [ ] Inconsistent row width detector with per-row detail.
-- [ ] Unterminated-quote navigation.
-- [ ] Empty / duplicate header navigation.
-- [ ] Detection of unusually long records (existing `WarningKind`
-  variant; needs emitting).
-- [ ] Navigation jumps the grid to the offending row.
+- [x] Inconsistent row width detector with per-row detail.
+- [x] Unterminated-quote navigation.
+- [~] Empty / duplicate header navigation. These are header-level
+  warnings with no `record_index`; the diagnostics panel lists them
+  but a click reports that there is no row to jump to instead of
+  moving the grid.
+- [x] Detection of unusually long records (`VeryLongRecord`).
+  `parser::indexing` now flags any record longer than 1 MiB in a post
+  pass over the finished offset table, so a multi-MB cell or a record
+  that swallowed the file after an unterminated quote is reported at
+  its own row.
+- [x] Navigation jumps the grid to the offending row.
+- [x] Diagnostics panel (Cmd/Ctrl+D and the toolbar **Diagnostics**
+  button) lists every warning — kind, row, and note — and jumps the
+  grid to that record on click. It reads the immutable
+  `ParseMeta.warnings` directly, so there is no background task or
+  cache. Offending rows carry a warning-coloured `⚠` row-number
+  gutter so the jump lands on a visibly flagged row. A record hidden
+  by the active filter reports in the status bar rather than silently
+  landing on an unrelated row.
 
 #### Encoding diagnostics
 
-- [ ] Per-cell UTF-8 validity flag exposed by `Cell`.
-- [ ] Encoding UI: columns with N non-UTF-8 cells are flagged.
-- [ ] (Optional) Detect BOM and report encoding.
+- [x] Per-cell UTF-8 validity flag exposed by `Cell` (`Cell::is_utf8`).
+- [x] Data-side `encoding::scan`: one pass over the document counting
+  non-UTF-8 cells per column and returning an `EncodingReport`
+  (columns with counts, total, BOM flag, records scanned). O(file),
+  allocation-light, and intended to run on the background executor.
+  `--probe` prints the BOM flag and invalid-cell count.
+- [x] Encoding UI: opening the diagnostics panel runs `encoding::scan`
+  on the background executor (generation-guarded; cached until the
+  document changes) and lists the BOM notice and each column with
+  non-UTF-8 cells.
+- [x] (Optional) Detect BOM and report encoding. `encoding::scan`
+  reports `bom`, `--probe` prints it, and the diagnostics panel shows
+  a `UTF-8 BOM present` notice. (The parser still does not strip it.)
+
+#### Header detection
+
+- [x] Improved automatic detection: the first row's per-column
+  text/typed shape is compared against the following rows. A header
+  vote is text-over-typed (the `name` over `42` shape); a data vote is
+  typed-over-typed. A headerless file whose first row matches the data
+  shape (`alice,30 / carol,40`) is now recognised. The genuinely
+  ambiguous all-text case keeps the local numeric-fraction fallback
+  (and is what the override is for).
+- [x] `HeaderMode { Auto, Header, Headerless }` on `IndexOptions`;
+  `detect_with` forces the interpretation; `detect` / `parse` stay
+  Auto for existing callers.
+- [x] Toolbar **Headers** control cycles Auto → On → Off. Forcing a
+  mode re-indexes the already-open source on the background executor
+  (`anvil_core::reindex`, reusing the mmap / extracted temp file, no
+  re-open or re-extract), resets stale filter/sort/search state, and
+  clamps an out-of-range selection. The mode is per tab.
+- [x] Headerless columns are labelled `col0`, `col1`, … consistently
+  in the grid header, search scope chip, sort label, column inspector,
+  and encoding scan.
 
 #### Archive diagnostics
 
-- [ ] Surface skipped archive entries (rejected_reason) in the
-  archive picker.
-- [ ] Surface decompression-ratio warnings (already emitted as
+- [x] Surface skipped archive entries (rejected_reason) in the
+  archive picker. The **Archive…** overlay now renders a *skipped
+  entries* section listing each rejected entry's name and reason
+  (`archive_picker::skipped_entries`), capped at 40 rows with an
+  "…and N more" summary so a noisy archive stays readable.
+- [x] Surface decompression-ratio warnings (already emitted as
   errors; make sure they're presented in the UI nicely).
-- [ ] Detect encrypted entries explicitly with a friendlier message.
+  `evaluate_entry` checks the central-directory uncompressed/compressed
+  ratio against `MAX_COMPRESSION_RATIO` and rejects a high-ratio entry
+  up front with a "suspicious compression ratio (Nx > 200x limit)"
+  reason, so it appears in the skipped list instead of failing during
+  extraction. The extraction-time guard remains as a backstop.
+- [x] Detect encrypted entries explicitly with a friendlier message.
+  `evaluate_entry` rejects encrypted candidates with the
+  `REJECTED_ENCRYPTED` reason (shown in the picker);
+  `extract_into_temp` returns the new `AnvilError::EncryptedEntry`, and
+  `loader::load` returns that typed error when an archive has data files
+  but every one is password-protected.
+- [x] Unsupported compression methods are likewise reported at listing
+  rather than only when extraction fails.
 
 #### Richer filters
 
-- [ ] Compound predicates (`AND` / `OR`).
+- [x] Compound predicates (`AND` / `OR`).
+  `query::filter::FilterExpr` is an AND/OR tree with parentheses and
+  standard precedence (AND binds tighter than OR). `parse_expr` is a
+  recursive-descent parser over a small tokenizer; `apply_expr`
+  precomputes each predicate once and short-circuits per row. The
+  existing single-predicate `parse` / `apply` keep working unchanged.
+  Boolean keywords are case-insensitive; a value that would collide with
+  one can be quoted (`name contains "AND"`), and multi-word values still
+  work unquoted (`city == New York AND amount > 100`).
 - [ ] Saved filters.
-- [ ] Filter against inferred numeric type (so
-  `amount > 1000.0` works as a real comparison).
+- [x] Filter against inferred numeric type (so
+  `amount > 1000.0` works as a real comparison). Ordering operators
+  already parse each cell and the threshold as `f64`, skipping
+  non-numeric cells; a decimal-threshold test now locks the behaviour.
+  Inference-driven type validation (e.g. date comparisons) is not part
+  of this and is covered by the richer-type-classes follow-up.
 
 #### Tests
 
-- [ ] Diagnostics tests with the `malformed.csv` fixture.
-- [ ] Filter expression tests (compound, numeric, regex maybe).
+- [x] Diagnostics tests: the unterminated-quote `record_index` points
+  at the partial record (regression for the off-by-one), the panel
+  toggles via Cmd/Ctrl+D / the toolbar, a row warning moves the
+  cursor to that record, a warning hidden by the active filter
+  reports instead of moving, and a header-level warning reports that
+  there is no row.
+- [x] Header detection tests: the text/typed vote cases (header vs
+  headerless), the ambiguous all-text fallback, forced `Header` /
+  `Headerless` modes, `reindex` reusing the opened source, the
+  per-tab toolbar cycle, selection clamping when the row count shrinks,
+  and the `colN` labels.
+- [x] Filter expression tests: 9 unit tests for the compound grammar
+  (precedence, parentheses, multi-word and quoted values, keyword case
+  folding, parse errors, single-predicate equivalence, OR
+  dedup/short-circuit, decimal thresholds) plus a UI test that runs a
+  compound expression through the filter bar. Regex matching remains a
+  possible addition.
 
 ### Dependencies
 
@@ -413,6 +581,9 @@ column-level metadata.
 
 - Opening `fixtures/malformed.csv` shows the warning count and lets
   the user click through to each offending row.
+- A headerless file is detected when its first row matches the data
+  shape, and the toolbar **Headers** control can force the
+  interpretation either way; headerless columns show `col0`, `col1`, ….
 - Filters compose; numeric comparisons work.
 - `cargo test --release` passes.
 
@@ -491,6 +662,144 @@ make what exists feel finished.
 - macOS, Windows, and Linux each pass the CI build/test/probe matrix;
   the GUI's core open, inspect, keyboard, and clipboard workflows have
   been exercised on each target.
+
+---
+
+## Milestone 6: Natural-language Ask (opt-in)
+
+**Goal.** Let the user type a phrase such as "US orders over 100" and
+get a filter expression, using deterministic rules first and an optional
+local model only when the rules cannot cleanly resolve the phrase. See
+`docs/adr/0001-natural-language-ask.md`.
+
+**User-visible outcome.**
+
+- `Cmd/Ctrl+Shift+L` opens an **Ask** bar.
+- Submitting a phrase previews the constructed filter expression; the
+  user accepts it into the normal filter bar (where it can be edited) or
+  cancels.
+- If the rules cannot fully parse the phrase, the unmatched spans are
+  shown rather than guessed.
+- If an optional local model is configured, it is consulted only when the
+  rules fail; the default build never contacts anything.
+
+### Tasks
+
+#### Prerequisites
+- [ ] `FilterExpr::Not`, plus `parse_expr` support for `NOT` / `not` and
+  `apply_expr` evaluation; display in the filter bar. Deferred: Tier 1
+  handles negation only through negating operators (`is not`,
+  `not contains`, `not empty`). Row-scope `any` / `all` landed without
+  a general `NOT`.
+- [~] Column alias map. `NlSchema::aliases` is accepted and tested, so
+  the parser is alias-aware; a user-configurable alias file is still
+  open.
+
+#### Tier 1 rules parser (`anvil_core::query::nl`, GPUI-free)
+- [x] Tokenizer (whitespace, quoted spans, trailing commas as `and`).
+- [x] Operator lexicon ("is", "over", "under", "at least",
+  "contains", "starts with", "empty", "not empty", symbols, ...).
+- [x] Column resolution: headers, `colN`, aliases, multi-word and quoted
+  names. Fuzzy/prefix matching is still open.
+- [x] Value binding: longest sampled value first, then numeric literals,
+  then a low-confidence raw fallback.
+- [x] Conjunctions: "and" -> `And`, "or" -> `Or`; a bare value after a
+  conjunction reuses the previous column (`status is failed or`
+  `refunded`). General `not` waits on `FilterExpr::Not`.
+- [x] `NlResult` returns the `FilterExpr`, unmatched spans, and a
+  `clean` flag for the escalation contract.
+- [x] 16 unit tests: a phrase table plus ambiguous and unparseable
+  phrases.
+
+#### Ask bar (Cmd/Ctrl+Shift+L)
+- [x] New bar reusing `TextEdit`; live preview of the parsed expression;
+  accept into the filter bar (which then runs the existing apply path);
+  `×` / Esc to cancel.
+- [x] Show unmatched spans when the parse is incomplete.
+- [~] Never auto-apply; Enter accepts only a clean interpretation whose
+  preview round-trips through the filter parser. Regression verification
+  is in progress; focus returns to the grid after cancel.
+
+#### Tier 1.5 extended rules (default Tier 2)
+- [x] Filler-word normalization ("show me", "list all", "rows where", ...).
+- [x] Fuzzy column matching (single-token edit distance, ambiguity-safe).
+- [x] `between A and B` -> `>= A AND <= B`.
+- [x] More operator synonyms ("no more than", "at minimum",
+  "matches", "like", ...).
+- [ ] Relative dates ("last month", "this year") expanded against a
+  reference date.
+- [ ] A user-configurable synonym / alias file.
+
+#### Tier 2 optional embedded model (`nl-model`, off by default)
+- [x] `NlBackend` trait plus `interpret`, which always re-parses and
+  schema-validates a backend's output via `parse_expr`. An external
+  `ModelBackend` exists as a power-user override but requires a
+  pre-installed command, so it is not the default.
+- [x] Embedded inference backend (`src/nlmodel.rs`): `candle-core` +
+  `candle-transformers` + `tokenizers` + `ureq`, behind the
+  off-by-default `nl-model` feature. Loads a quantized Llama or Qwen2
+  GGUF (default Qwen2.5-Coder-1.5B-Instruct Q4_K_M, overridable with
+  `ANVIL_NL_MODEL_*` / `ANVIL_NL_TOKENIZER_*`), generates greedily, and
+  validates the candidate with `validate_nl_candidate`.
+- [~] Download UX: `ureq` fetches and caches the model on the first
+  Ctrl/Cmd+Enter. A size/consent dialog, progress bar, and cancel are
+  still open.
+- [x] Escalate only when Tier 1 and Tier 1.5 do not cleanly resolve and
+  the backend is available (Ctrl/Cmd+Enter); otherwise show the partial
+  parse.
+
+#### Native GLiNER extraction backend (current implementation slice)
+
+- [~] Evaluate GLiNER2.5 Small through the community `gliner-rs` Candle
+  implementation. Verify extraction accuracy and dependency cost before
+  adopting it; Python and a separate inference runtime are out of scope.
+- [~] Optional in-process backend with bounded requests, background inference,
+  and actionable model errors. Keep the model loaded between requests.
+- [~] Extract and validate a single predicate against the active schema;
+  reject low confidence, multiple values, and common unsupported compound
+  requests. General semantic coverage is not guaranteed; review is required.
+- [~] Wire the backend to Ask preview/accept; invalidate obsolete results on
+  edits and document changes, and prevent acceptance of partial interpretations.
+- [x] Resolve indirect columns from sampled values in the GLiNER
+  backend: the interpreter now receives the per-column sample callback,
+  each column label carries its type, aliases, and up to five sampled
+  values, and a single extracted value binds to the unique column whose
+  samples contain it (`Which users are from Canada?` ->
+  `country == Canada`). Ambiguous matches fail closed; low classifier
+  confidence is overridden only by an unambiguous sample match.
+- [x] Map row-scope phrases ("at least one column is blank", "every
+  column is filled", "any row that has an empty column") to
+  `AnyColumn` / `AllColumn` in the Tier 1 rules parser, and through a
+  lenient `filter scope` classification (`one column` / `any column` /
+  `all columns`, each with a description) in the GLiNER backend. A
+  negated `no column is empty` / `has no empty column` flips to
+  `all notempty`; a missing scope label stays single-column.
+- [ ] Verify the real model, validation, and UI regression tests.
+- [ ] Compound model extraction with AND/OR grouping (follow-up; existing
+  deterministic compound parsing remains available).
+- [ ] Provide model download progress and cancellation for distribution.
+
+### Dependencies
+
+- Embedded generative backend: optional Candle runtime (`nl-model`).
+- Native GLiNER backend (`nl-gliner`, off by default): pinned `gliner-rs`
+  0.2.3 uses Candle 0.11, matching the existing inference runtime. It also
+  brings tokenizers 0.22 and CLI dependencies. See ADR 0002 for the
+  maintenance tradeoff and explicit model setup command.
+
+### Acceptance criteria
+
+- `Cmd/Ctrl+Shift+L` opens the Ask bar; a clean phrase such as
+  "country is US and amount over 100" previews
+  `country == US AND amount > 100`, and accepting it runs the existing
+  filter path. (Value-first/implied-column phrasing such as
+  "US orders over 100" is intentionally not clean, so it escalates to
+  Tier 2 or prompts the user.)
+- An unparseable phrase leaves the filter unchanged and shows what could
+  not be understood.
+- The default build has no new dependency and makes no network calls.
+- `cargo test --release` passes; the rules parser has a phrase-table test
+  suite.
 
 ---
 

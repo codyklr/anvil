@@ -13,7 +13,9 @@ use gpui::{
     Pixels, SharedString, StyledText,
 };
 
-use anvil_core::{find_ranges, CellPos, ColumnIndex, ParsedDocument, SearchOptions, Selection};
+use anvil_core::{
+    find_ranges, CellPos, Cells, ParsedDocument, SearchOptions, Selection, WarningKind,
+};
 
 use super::theme;
 
@@ -34,21 +36,29 @@ impl ColumnLayout {
         let min_w = f32::from(theme::MIN_COLUMN_WIDTH);
         let pad = f32::from(theme::CELL_PAD_X) * 2.0;
 
+        // Seed the measured columns with their header width.
         for (col, width) in widths.iter_mut().enumerate().take(measured) {
-            let mut widest =
-                text_width(doc.meta.headers.get(col).map(String::as_str).unwrap_or(""));
-            for row in 0..sampled_rows {
-                if let Some(cell) = doc.cell(row, ColumnIndex(col)) {
-                    let w = text_width(cell.as_str());
-                    if w > widest {
-                        widest = w;
-                    }
-                }
-                if widest >= MAX_AUTO_WIDTH {
-                    break;
+            *width = text_width(doc.meta.headers.get(col).map(String::as_str).unwrap_or(""));
+        }
+        // Update every column from a single forward pass per sampled row.
+        // Calling `doc.cell` once per column re-walked the record from its
+        // start for each column (O(columns^2) per row); one `Cells` pass is
+        // O(record length). `text_width` itself is O(1) (it caps at 64
+        // characters), so the decode dominates.
+        for row in 0..sampled_rows {
+            let Some(record) = doc.record_bytes(row) else {
+                continue;
+            };
+            let iter = Cells::new(record, doc.meta.delimiter, doc.meta.quote);
+            for (col, cell) in iter.enumerate().take(measured) {
+                let w = text_width(std::str::from_utf8(cell.as_ref()).unwrap_or(""));
+                if w > widths[col] {
+                    widths[col] = w;
                 }
             }
-            *width = (widest + pad).clamp(min_w, MAX_AUTO_WIDTH);
+        }
+        for width in widths.iter_mut().take(measured) {
+            *width = (*width + pad).clamp(min_w, MAX_AUTO_WIDTH);
         }
 
         let mut offsets = Vec::with_capacity(n + 1);
@@ -131,14 +141,21 @@ fn rect_contains(rect: Option<(CellPos, CellPos)>, record: u64, column: usize) -
 pub struct GridModel {
     pub doc: Arc<ParsedDocument>,
     pub layout: Arc<ColumnLayout>,
+    /// Record -> representative parse-warning kind, sorted by record and
+    /// deduplicated to the most informative kind per row. Computed once
+    /// at open because `ParseMeta.warnings` never changes for a
+    /// document; the grid binary-searches it per visible row.
+    pub warnings: Arc<[(u64, WarningKind)]>,
 }
 
 impl GridModel {
     pub fn new(doc: Arc<ParsedDocument>) -> Self {
         let layout = ColumnLayout::compute(&doc);
+        let warnings = Arc::from(cache_warning_rows(&doc));
         Self {
             doc,
             layout: Arc::new(layout),
+            warnings,
         }
     }
 
@@ -147,28 +164,111 @@ impl GridModel {
     }
 }
 
+/// Rank a warning kind by how much it explains about a row, so a row
+/// that trips several checks shows its root cause (an unterminated
+/// quote also makes a record very long, but the quote is the real
+/// story). Header warnings have no `record_index` and are excluded from
+/// the row index; the diagnostics panel still lists them.
+fn warning_severity(kind: WarningKind) -> u8 {
+    match kind {
+        WarningKind::UnterminatedQuote => 3,
+        WarningKind::VeryLongRecord => 2,
+        WarningKind::InconsistentColumnCount => 1,
+        WarningKind::EmptyHeader | WarningKind::DuplicateHeader => 0,
+    }
+}
+
+/// Build the sorted, per-record warning index cached on `GridModel`.
+fn cache_warning_rows(doc: &ParsedDocument) -> Vec<(u64, WarningKind)> {
+    let mut rows: Vec<(u64, WarningKind)> = doc
+        .meta
+        .warnings
+        .iter()
+        .filter_map(|w| w.record_index.map(|r| (r, w.kind)))
+        .collect();
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| warning_severity(b.1).cmp(&warning_severity(a.1)))
+    });
+    rows.dedup_by_key(|(record, _)| *record);
+    rows
+}
+
+/// The representative warning kind for `record`, or `None`.
+/// `rows` must be sorted by record (the `GridModel` cache is).
+fn warning_kind_for(rows: &[(u64, WarningKind)], record: u64) -> Option<WarningKind> {
+    rows.binary_search_by(|(r, _)| r.cmp(&record))
+        .ok()
+        .map(|i| rows[i].1)
+}
+
+/// Glyph shown in the row-number gutter for a warning row.
+fn warning_glyph(kind: WarningKind) -> &'static str {
+    match kind {
+        WarningKind::UnterminatedQuote => "✖",
+        _ => "⚠",
+    }
+}
+
+/// Colour of the row-number gutter for a warning row. Quoting problems
+/// are errors; the rest are warnings.
+fn warning_color(kind: WarningKind) -> gpui::Rgba {
+    match kind {
+        WarningKind::UnterminatedQuote => theme::ERROR,
+        _ => theme::WARN,
+    }
+}
+
 /// The sticky header row. Renders only the visible column headers.
-pub fn render_header(model: &GridModel, scroll_x: f32, viewport_w: f32) -> impl IntoElement {
+///
+/// `scoped_column` is the column currently selected as the search
+/// scope (set by Alt/Option-clicking a header); it is painted with a
+/// persistent marker so the scope is visible even when the search bar
+/// is closed. `sort` is `(column, descending)` for the active sort and
+/// adds a direction arrow to that header. `on_header_click` receives
+/// the clicked column and the mouse-down event so the view can tell a
+/// plain click (sort) from a modifier click (search scope). It uses
+/// the same `entity.update` closure pattern as the per-cell handlers.
+pub fn render_header<F>(
+    model: &GridModel,
+    scroll_x: f32,
+    viewport_w: f32,
+    scoped_column: Option<usize>,
+    sort: Option<(usize, bool)>,
+    on_header_click: F,
+) -> impl IntoElement
+where
+    F: Fn(usize, &MouseDownEvent, &mut gpui::App) + Clone + 'static,
+{
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
     for col in vis {
-        let label = model
-            .doc
-            .meta
-            .headers
-            .get(col)
-            .cloned()
-            .unwrap_or_else(|| format!("col {col}"));
-        cells.push(
-            div()
-                .flex_shrink_0()
-                .w(model.layout.width_of(col))
-                .px(theme::CELL_PAD_X)
-                .truncate()
-                .text_color(theme::TEXT_STRONG)
-                .child(label),
-        );
+        let mut label = model.doc.meta.column_label(col);
+        if let Some((sort_col, descending)) = sort {
+            if sort_col == col {
+                label.push(' ');
+                label.push(if descending { '▼' } else { '▲' });
+            }
+        }
+        let click = on_header_click.clone();
+        let mut cell = div()
+            .flex_shrink_0()
+            .w(model.layout.width_of(col))
+            .px(theme::CELL_PAD_X)
+            .truncate()
+            .cursor_pointer()
+            .debug_selector(move || format!("header-cell-{col}"))
+            .text_color(theme::TEXT_STRONG)
+            .hover(|s| s.bg(theme::BG_ROW_HOVER));
+        if scoped_column == Some(col) {
+            // Persistent marker for the search column scope.
+            cell = cell.bg(theme::BG_MATCH_ACTIVE);
+        }
+        cell = cell.on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+            click(col, ev, app_cx);
+        });
+        cells.push(cell.child(label));
     }
 
     div()
@@ -228,10 +328,26 @@ pub struct RowContext<'a> {
     /// not a match, so the cost is bounded to ~30 visible rows × ~6
     /// columns on the 1M-row fixture.
     pub search_query: &'a str,
-    /// Search options that affect highlighting (currently
-    /// `case_sensitive`). The data-side `find_ranges` honours this;
-    /// rendering does not re-derive anything from it.
+    /// Search options that affect highlighting: `case_sensitive`
+    /// selects the comparison, and `column` restricts highlighting to
+    /// the scoped column. The data-side `find_ranges` still only
+    /// decides byte ranges; the column gate lives in `should_highlight`
+    /// so a match row does not light up columns outside the scope.
     pub search_options: SearchOptions,
+    /// Record indexes that carry a parse warning, paired with a
+    /// representative kind and sorted by record. Cached on `GridModel`;
+    /// the row renderer binary-searches it to flag the gutter.
+    pub warning_rows: &'a [(u64, WarningKind)],
+}
+
+/// Should matched text be highlighted in `column` under `options`?
+/// `None` scope highlights every column; a set scope highlights only
+/// the matching column (and the row tint still marks the whole row).
+fn should_highlight(options: &SearchOptions, column: usize) -> bool {
+    match options.column {
+        None => true,
+        Some(scoped) => scoped == column,
+    }
 }
 
 /// Renders a single data row. `index` is the 0-based record index.
@@ -249,7 +365,7 @@ pub struct RowContext<'a> {
 /// receives the same, but only fires while the pointer is over that
 /// cell; the caller checks `MouseMoveEvent::dragging()` to implement
 /// drag-select. Because each cell is its own hitbox, drag-select needs
-/// no coordinate arithmetic or vertical-scroll bookkeeping — whichever
+/// no coordinate arithmetic or vertical-scroll bookkeeping - whichever
 /// cell the pointer is over reports itself.
 pub fn render_row<F, G>(
     model: &GridModel,
@@ -285,20 +401,29 @@ where
     } else {
         None
     };
+    // Whether this record carries a parse warning, and which kind.
+    // Computed once per row so the gutter can flag it without a
+    // per-cell scan.
+    let row_warning = warning_kind_for(ctx.warning_rows, index);
 
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
-    for col in vis {
-        // Borrow the cell's bytes (zero-copy from the mmap) for the
-        // substring scan; convert to a String only when actually
-        // rendering. When the cell is missing, `bytes` is `None` and
-        // we render the empty-cell glyph.
-        let cell_bytes_opt = model
-            .doc
-            .cell(index, ColumnIndex(col))
-            .map(|c| c.into_string());
-        let text = cell_bytes_opt.clone().unwrap_or_default();
+    // Decode the record's visible cells in a single forward pass.
+    // Calling `doc.cell` per column re-walked the record from its start
+    // each time (O(visible_columns x record length)); one `Cells` pass
+    // is O(record length). Cells stay borrowed from the mmap, and only
+    // the element's text is copied into a `SharedString`.
+    let mut cell_iter = model.doc.record_bytes(index).map(|record| {
+        Cells::new(record, model.doc.meta.delimiter, model.doc.meta.quote).skip(vis.start)
+    });
+    for col in vis.clone() {
+        let cow = cell_iter.as_mut().and_then(|iter| iter.next());
+        let bytes: &[u8] = match &cow {
+            Some(cell) => cell.as_ref(),
+            None => &[],
+        };
+        let text = std::str::from_utf8(bytes).unwrap_or("");
         let is_selected = selection.contains(index, col);
         let is_flashed = rect_contains(copy_flash, index, col);
         let down_handler = mouse_down.clone();
@@ -315,28 +440,30 @@ where
         }
         if text.is_empty() {
             cell_div = cell_div.text_color(theme::TEXT_EMPTY).child("∅");
-        } else if let (Some(needle), Some(text_owned)) = (needle_bytes, cell_bytes_opt.as_ref()) {
-            // Match row: highlight every occurrence of the needle
-            // inside the cell text. We use `find_ranges` (data-side)
-            // for the byte positions, then build a `StyledText` with
-            // one HighlightStyle per match. The cost is one
-            // case-folded lowercase copy per visible cell in a match
-            // row; cheap in practice (~30 visible rows × ~6 columns).
-            let ranges = find_ranges(text_owned.as_bytes(), needle, search_options.case_sensitive);
-            if ranges.is_empty() {
-                // Row matched but this cell did not — render plain.
-                cell_div = cell_div.child(SharedString::from(text_owned.clone()));
+        } else if should_highlight(search_options, col) {
+            if let Some(needle) = needle_bytes {
+                // Match row: highlight every occurrence of the needle
+                // inside the cell. `find_ranges` returns byte ranges;
+                // the cost is one case-folded copy per visible cell in
+                // a match row (~30 rows x ~6 columns).
+                let ranges = find_ranges(bytes, needle, search_options.case_sensitive);
+                if ranges.is_empty() {
+                    // Row matched but this cell did not: render plain.
+                    cell_div = cell_div.child(SharedString::from(text.to_string()));
+                } else {
+                    let highlight = HighlightStyle {
+                        background_color: Some(Hsla::from(theme::BG_MATCH_TEXT)),
+                        ..Default::default()
+                    };
+                    let styled = StyledText::new(SharedString::from(text.to_string()))
+                        .with_highlights(ranges.into_iter().map(|r| (r, highlight)));
+                    cell_div = cell_div.child(styled);
+                }
             } else {
-                let highlight = HighlightStyle {
-                    background_color: Some(Hsla::from(theme::BG_MATCH_TEXT)),
-                    ..Default::default()
-                };
-                let styled = StyledText::new(SharedString::from(text_owned.clone()))
-                    .with_highlights(ranges.into_iter().map(|r| (r, highlight)));
-                cell_div = cell_div.child(styled);
+                cell_div = cell_div.child(SharedString::from(text.to_string()));
             }
         } else {
-            cell_div = cell_div.child(SharedString::from(text));
+            cell_div = cell_div.child(SharedString::from(text.to_string()));
         }
         // Wire the click on the cell. The captured closure receives
         // the live `MouseDownEvent` (with the shift modifier) plus a
@@ -407,8 +534,14 @@ where
                 .flex_shrink_0()
                 .w(theme::ROW_NUMBER_WIDTH)
                 .px(theme::CELL_PAD_X)
-                .text_color(theme::TEXT_DIM)
-                .child(format!("{}", index + 1)),
+                .text_color(match row_warning {
+                    Some(kind) => warning_color(kind),
+                    None => theme::TEXT_DIM,
+                })
+                .child(match row_warning {
+                    Some(kind) => format!("{} {}", warning_glyph(kind), index + 1),
+                    None => format!("{}", index + 1),
+                }),
         )
         .child(
             div().flex_1().overflow_hidden().child(
@@ -444,6 +577,64 @@ mod tests {
         assert!(!rect_contains(None, 0, 0));
     }
 
+    #[test]
+    fn warning_kind_for_uses_sorted_membership_and_severity() {
+        let rows = [
+            (1u64, WarningKind::InconsistentColumnCount),
+            (4, WarningKind::VeryLongRecord),
+            (9, WarningKind::UnterminatedQuote),
+        ];
+        assert_eq!(warning_kind_for(&rows, 0), None);
+        assert_eq!(
+            warning_kind_for(&rows, 1),
+            Some(WarningKind::InconsistentColumnCount)
+        );
+        assert_eq!(warning_kind_for(&rows, 2), None);
+        assert_eq!(
+            warning_kind_for(&rows, 4),
+            Some(WarningKind::VeryLongRecord)
+        );
+        assert_eq!(
+            warning_kind_for(&rows, 9),
+            Some(WarningKind::UnterminatedQuote)
+        );
+        assert_eq!(warning_kind_for(&rows, 10), None);
+        assert_eq!(warning_kind_for(&[], 3), None);
+    }
+
+    #[test]
+    fn cache_warning_rows_keeps_the_most_severe_kind_per_record() {
+        // A record that is both unterminated and very long shows the
+        // quote (the root cause); records without an index are dropped.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("warn.csv");
+        let big = "x".repeat(2 * 1024 * 1024);
+        std::fs::write(&path, format!("a,b\n{big},\"unterminated\n")).expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let rows = cache_warning_rows(&doc);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, 0);
+        assert_eq!(rows[0].1, WarningKind::UnterminatedQuote);
+    }
+
+    #[test]
+    fn should_highlight_honours_column_scope() {
+        // No scope: every column in a match row is eligible.
+        let all = SearchOptions::default();
+        assert!(should_highlight(&all, 0));
+        assert!(should_highlight(&all, 3));
+
+        // Scoped: only the selected column highlights.
+        let scoped = SearchOptions {
+            column: Some(2),
+            ..SearchOptions::default()
+        };
+        assert!(!should_highlight(&scoped, 0));
+        assert!(should_highlight(&scoped, 2));
+        assert!(!should_highlight(&scoped, 3));
+    }
+
     /// Smoke test: render_row with a populated search query and a
     /// match in the rendered row should not panic and should build
     /// the substring highlight path. We can't observe the rendered
@@ -471,6 +662,7 @@ mod tests {
             search_active: 1,
             search_query: "needle",
             search_options: SearchOptions::default(),
+            warning_rows: &[],
         };
 
         // Row 0 is a match (it contains "needle" in column 0).
@@ -502,8 +694,86 @@ mod tests {
             search_active: 1,
             search_query: "needle",
             search_options: SearchOptions::default(),
+            warning_rows: &[],
         };
 
         let _elem = render_row(&model, 2, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+    }
+
+    /// A column-scoped search option must still render a match row
+    /// without panicking, rendering non-scoped columns plain while
+    /// highlighting only the scoped column.
+    #[test]
+    fn render_row_with_column_scope_does_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scoped.csv");
+        std::fs::write(&path, b"a,b\nneedle,other\nfoo,needle bar\nbaz,qux\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let model = GridModel::new(std::sync::Arc::new(doc));
+
+        let selection = Selection::empty();
+        let ctx = RowContext {
+            selection: &selection,
+            scroll_x: 0.0,
+            viewport_w: 1000.0,
+            copy_flash: None,
+            search_matches: &[0, 1],
+            search_active: 1,
+            search_query: "needle",
+            search_options: SearchOptions {
+                column: Some(0),
+                ..SearchOptions::default()
+            },
+            warning_rows: &[],
+        };
+
+        // Row 0's match is in the scoped column; row 1's match is in
+        // column 1, so its column 1 cell is gated off.
+        let _elem0 = render_row(&model, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem1 = render_row(&model, 1, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+    }
+
+    /// Layout-throughput benchmark for a very wide file (500 columns x
+    /// 300 rows). Run with:
+    /// `cargo test --release --bin anvil measure_wide_column_layout -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn measure_wide_column_layout() {
+        let cols = 500usize;
+        let rows = 300usize;
+        let mut csv = String::with_capacity(cols * rows * 4);
+        for c in 0..cols {
+            if c > 0 {
+                csv.push(',');
+            }
+            csv.push_str(&format!("h{c}"));
+        }
+        csv.push('\n');
+        for r in 0..rows {
+            for c in 0..cols {
+                if c > 0 {
+                    csv.push(',');
+                }
+                csv.push_str(&format!("{r}-{c}"));
+            }
+            csv.push('\n');
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wide.csv");
+        std::fs::write(&path, csv.as_bytes()).expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        assert_eq!(doc.column_count(), cols);
+        let started = std::time::Instant::now();
+        let layout = ColumnLayout::compute(&doc);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "layout {} cols x {} rows in {:.0?}",
+            cols,
+            doc.record_count(),
+            elapsed
+        );
+        assert_eq!(layout.widths.len(), cols);
     }
 }

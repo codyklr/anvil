@@ -41,6 +41,39 @@ pub struct ParseMeta {
     pub warnings: Vec<ParseWarning>,
 }
 
+/// Display name for a column: the header when present and non-empty,
+/// otherwise a zero-based generated label (`col0`, `col1`, …).
+/// Headerless files leave `headers` empty, so they get generated labels
+/// while `has_headers` stays meaningful.
+pub fn column_label(headers: &[String], column: usize) -> String {
+    headers
+        .get(column)
+        .filter(|h| !h.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("col{column}"))
+}
+
+impl ParseMeta {
+    /// Display name for `column` (see [`column_label`]).
+    pub fn column_label(&self, column: usize) -> String {
+        column_label(&self.headers, column)
+    }
+}
+
+/// How the first logical line is interpreted.
+///
+/// `Auto` runs the content heuristic; `Header` and `Headerless` are the
+/// explicit user overrides that skip the heuristic entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeaderMode {
+    #[default]
+    Auto,
+    /// Always treat the first row as the header (even all-numeric data).
+    Header,
+    /// Never treat the first row as a header; every row is data.
+    Headerless,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParseWarning {
     pub kind: WarningKind,
@@ -149,6 +182,14 @@ pub struct Cell<'a> {
 impl<'a> Cell<'a> {
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.inner).unwrap_or("")
+    }
+
+    /// Whether the cell's decoded bytes are valid UTF-8. `as_str` and
+    /// `into_string` silently fall back to lossy/empty for invalid
+    /// input, so this is the flag the encoding diagnostics scan uses to
+    /// count cells that would otherwise be hidden.
+    pub fn is_utf8(&self) -> bool {
+        std::str::from_utf8(&self.inner).is_ok()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -8,8 +8,10 @@ use std::path::PathBuf;
 
 use anvil_core::source::local::open_local;
 use anvil_core::{
-    apply_filter, open_path, parse_filter, parse_opened, search_records, ArchiveSource, CellPos,
-    ColumnIndex, LoadResult, OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
+    apply_filter, infer_schema, open_path, parse_filter, parse_opened, parse_opened_with, reindex,
+    scan_encoding, search_records, sort_rows, ArchiveSource, CellPos, ColumnIndex, HeaderMode,
+    IndexOptions, LoadResult, OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
+    SortKind, SortOrder, SortSpec,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -216,6 +218,62 @@ fn file_without_headers_is_detected() {
     assert_eq!(doc.column_count(), 3);
 }
 
+#[test]
+fn headerless_text_rows_are_detected_when_the_shape_matches_data() {
+    // `alice,30` is text-over-typed just like the following rows, so the
+    // first row is data, not a header.
+    let (doc, _d) = parse_bytes(b"alice,30\ncarol,40\n");
+    assert!(!doc.meta.has_headers);
+    assert_eq!(doc.record_count(), 2);
+    assert_eq!(cell(&doc, 0, 0), "alice");
+    // Headerless columns get generated `colN` labels.
+    assert_eq!(doc.meta.column_label(0), "col0");
+    assert_eq!(doc.meta.column_label(1), "col1");
+}
+
+#[test]
+fn forced_header_mode_overrides_detection() {
+    let (_dir, path) = write_temp("headers.csv", b"alice,bob\ncarol,dave\n");
+    let opened = open_local(&path).expect("open");
+    // All-text is ambiguous and defaults to a header under Auto.
+    let auto = parse_opened(&opened);
+    assert!(auto.meta.has_headers);
+    assert_eq!(auto.meta.record_count, 1);
+
+    let headerless = parse_opened_with(
+        &opened,
+        IndexOptions {
+            header_mode: HeaderMode::Headerless,
+            ..IndexOptions::default()
+        },
+    );
+    assert!(!headerless.meta.has_headers);
+    assert_eq!(headerless.meta.record_count, 2);
+    assert_eq!(headerless.meta.column_count, 2);
+}
+
+#[test]
+fn reindex_reuses_the_opened_source() {
+    let (_dir, path) = write_temp("reindex.csv", b"a,b\n1,2\n3,4\n");
+    let opened = open_local(&path).expect("open");
+    let doc = anvil_core::index_opened(opened);
+    assert!(doc.meta.has_headers);
+
+    let forced = reindex(
+        &doc,
+        IndexOptions {
+            header_mode: HeaderMode::Headerless,
+            ..IndexOptions::default()
+        },
+    );
+    assert!(!forced.meta.has_headers);
+    assert_eq!(forced.meta.record_count, 3);
+
+    // Dropping the original must not invalidate the clone's mmap.
+    drop(doc);
+    assert_eq!(cell(&forced, 2, 1), "4");
+}
+
 // ---- scale / pathological inputs ---------------------------------------
 
 #[test]
@@ -244,6 +302,91 @@ fn extremely_long_cell() {
     let (doc, _d) = parse_bytes(bytes.as_bytes());
     assert_eq!(cell(&doc, 0, 0).len(), 1_000_000);
     assert_eq!(cell(&doc, 0, 1), "z");
+}
+
+#[test]
+fn very_long_record_warns() {
+    // 2 MiB of cell content exceeds the 1 MiB record-length diagnostic.
+    let big = "x".repeat(2 * 1024 * 1024);
+    let bytes = format!("a,b\nsmall,1\n{big},2\n");
+    let (doc, _d) = parse_bytes(bytes.as_bytes());
+    let warning = doc
+        .meta
+        .warnings
+        .iter()
+        .find(|w| w.kind == anvil_core::WarningKind::VeryLongRecord)
+        .expect("very-long-record warning");
+    assert_eq!(warning.record_index, Some(1));
+    assert_eq!(doc.record_count(), 2);
+    assert_eq!(cell(&doc, 0, 0), "small");
+}
+
+#[test]
+fn ordinary_records_do_not_warn_as_very_long() {
+    // A 1M-character cell stays just under the 1 MiB limit and must not
+    // produce a false positive.
+    let big = "x".repeat(1_000_000);
+    let bytes = format!("a,b\n\"{big}\",z\n");
+    let (doc, _d) = parse_bytes(bytes.as_bytes());
+    assert!(doc
+        .meta
+        .warnings
+        .iter()
+        .all(|w| w.kind != anvil_core::WarningKind::VeryLongRecord));
+}
+
+#[test]
+fn very_long_record_threshold_is_configurable() {
+    let (_dir, path) = write_temp("threshold.csv", b"a,b\n1,2\n3,4\n");
+    let opened = open_local(&path).expect("open");
+    // Each data record ("1,2\n") is 4 bytes including its newline.
+    let lenient = parse_opened_with(
+        &opened,
+        IndexOptions {
+            max_record_bytes: 4,
+            ..IndexOptions::default()
+        },
+    );
+    assert!(lenient
+        .meta
+        .warnings
+        .iter()
+        .all(|w| w.kind != anvil_core::WarningKind::VeryLongRecord));
+
+    let strict = parse_opened_with(
+        &opened,
+        IndexOptions {
+            max_record_bytes: 3,
+            ..IndexOptions::default()
+        },
+    );
+    let flagged: Vec<u64> = strict
+        .meta
+        .warnings
+        .iter()
+        .filter(|w| w.kind == anvil_core::WarningKind::VeryLongRecord)
+        .filter_map(|w| w.record_index)
+        .collect();
+    assert_eq!(flagged, vec![0, 1]);
+}
+
+#[test]
+fn cell_is_utf8_reports_invalid_bytes() {
+    let (doc, _d) = parse_bytes(b"a,b\n\xff,ok\n");
+    assert!(!doc.cell(0, ColumnIndex(0)).expect("cell").is_utf8());
+    assert!(doc.cell(0, ColumnIndex(1)).expect("cell").is_utf8());
+}
+
+#[test]
+fn encoding_scan_flags_invalid_column() {
+    let (doc, _d) = parse_bytes(b"a,b\n1,\xff\n2,\xfe\n");
+    let report = scan_encoding(&doc);
+    assert!(report.has_invalid_utf8());
+    assert_eq!(report.total_invalid_cells(), 2);
+    assert_eq!(report.columns.len(), 1);
+    assert_eq!(report.columns[0].column, 1);
+    assert_eq!(report.columns[0].name, "b");
+    assert_eq!(report.columns[0].invalid_cells, 2);
 }
 
 #[test]
@@ -305,6 +448,25 @@ fn unterminated_quote_is_flagged() {
         .iter()
         .any(|w| w.kind == anvil_core::WarningKind::UnterminatedQuote);
     assert!(flagged, "expected an unterminated-quote warning");
+}
+
+#[test]
+fn unterminated_quote_index_points_at_the_partial_record() {
+    // Regression: the warning used to subtract one from the record index,
+    // so once earlier rows had completed it pointed at the previous row.
+    let (doc, _d) = parse_bytes(b"a,b\n1,2\n3,\"unterminated\n4,5\n");
+    let warning = doc
+        .meta
+        .warnings
+        .iter()
+        .find(|w| w.kind == anvil_core::WarningKind::UnterminatedQuote)
+        .expect("unterminated-quote warning");
+    assert_eq!(
+        warning.record_index,
+        Some(1),
+        "the quoted partial record is record index 1"
+    );
+    assert_eq!(doc.record_count(), 2);
 }
 
 // ---- open_path dispatch -------------------------------------------------
@@ -447,20 +609,49 @@ fn zip_duplicate_entry_names_do_not_panic() {
 /// Minimal STORED-method ZIP writer, used only to produce archives the
 /// `zip` crate's writer refuses to create (duplicate names, odd paths).
 fn raw_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let owned: Vec<(&str, &[u8], u16, u32)> = entries
+        .iter()
+        .map(|(name, data)| (*name, *data, 0u16, data.len() as u32))
+        .collect();
+    raw_zip_impl(&owned)
+}
+
+/// Like `raw_zip`, but sets the same general-purpose flags (e.g. bit 0,
+/// the encryption bit) on every entry.
+fn raw_zip_with_flags(entries: &[(&str, &[u8])], flags: u16) -> Vec<u8> {
+    let owned: Vec<(&str, &[u8], u16, u32)> = entries
+        .iter()
+        .map(|(name, data)| (*name, *data, flags, data.len() as u32))
+        .collect();
+    raw_zip_impl(&owned)
+}
+
+/// Like `raw_zip`, but declares a bogus uncompressed size in the headers
+/// while storing only `data`. Used to exercise the compression-ratio guard
+/// without building a genuine high-ratio payload.
+fn raw_zip_with_declared_size(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+    let owned: Vec<(&str, &[u8], u16, u32)> = entries
+        .iter()
+        .map(|(name, data, declared)| (*name, *data, 0u16, *declared))
+        .collect();
+    raw_zip_impl(&owned)
+}
+
+fn raw_zip_impl(entries: &[(&str, &[u8], u16, u32)]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut offsets = Vec::new();
-    for (name, data) in entries {
+    for (name, data, flags, uncompressed) in entries {
         offsets.push(out.len() as u32);
         let crc = crc32fast::hash(data);
         out.extend_from_slice(&0x04034b50u32.to_le_bytes());
         out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        out.extend_from_slice(&0u16.to_le_bytes()); // flags
+        out.extend_from_slice(&flags.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
         out.extend_from_slice(&0u16.to_le_bytes()); // mod time
         out.extend_from_slice(&0u16.to_le_bytes()); // mod date
         out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed
+        out.extend_from_slice(&uncompressed.to_le_bytes()); // uncompressed
         out.extend_from_slice(&(name.len() as u16).to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // extra len
         out.extend_from_slice(name.as_bytes());
@@ -469,18 +660,18 @@ fn raw_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
 
     let central_start = out.len() as u32;
     let mut central = Vec::new();
-    for (i, (name, data)) in entries.iter().enumerate() {
+    for (i, (name, data, flags, uncompressed)) in entries.iter().enumerate() {
         let crc = crc32fast::hash(data);
         central.extend_from_slice(&0x02014b50u32.to_le_bytes());
         central.extend_from_slice(&20u16.to_le_bytes()); // version made by
         central.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&flags.to_le_bytes()); // flags
         central.extend_from_slice(&0u16.to_le_bytes()); // method
         central.extend_from_slice(&0u16.to_le_bytes()); // time
         central.extend_from_slice(&0u16.to_le_bytes()); // date
         central.extend_from_slice(&crc.to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed
+        central.extend_from_slice(&uncompressed.to_le_bytes()); // uncompressed
         central.extend_from_slice(&(name.len() as u16).to_le_bytes());
         central.extend_from_slice(&0u16.to_le_bytes()); // extra
         central.extend_from_slice(&0u16.to_le_bytes()); // comment
@@ -502,6 +693,93 @@ fn raw_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     out.extend_from_slice(&central_start.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes()); // comment len
     out
+}
+
+#[test]
+fn zip_encrypted_entry_is_skipped_and_reported() {
+    // Bit 0 of the general-purpose flags marks an entry as encrypted. The
+    // `zip` writer cannot produce this, so set the bit by hand.
+    let bytes = raw_zip_with_flags(&[("secret.csv", b"a,b\n1,2\n")], 1);
+    let (_d, path) = write_temp("locked.zip", &bytes);
+    match open_path(&path).expect("open zip") {
+        OpenResult::Archive(source) => {
+            assert_eq!(source.total_candidates(), 0);
+            let rejected = source
+                .candidates
+                .iter()
+                .find(|c| c.entry_name == "secret.csv")
+                .expect("candidate listed");
+            assert!(!rejected.usable);
+            assert_eq!(rejected.rejected_reason, anvil_core::REJECTED_ENCRYPTED);
+            assert!(source.first_encrypted_entry().is_some());
+        }
+        OpenResult::Direct(_) => panic!("zip was opened as a plain file"),
+    }
+
+    // `load` turns "nothing usable, but it is encrypted" into the targeted
+    // error so the UI can show a friendlier message than "no data files".
+    let err = match anvil_core::load(&path) {
+        Ok(_) => panic!("encrypted archive should not load"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, anvil_core::AnvilError::EncryptedEntry(ref name) if name == "secret.csv"),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn zip_mixed_encrypted_and_plain_keeps_plain_usable() {
+    let mixed = raw_zip_flagged_mixed(&[
+        ("secret.csv", b"a,b\n1,2\n", 1u16),
+        ("open.csv", b"x,y\n3,4\n", 0u16),
+    ]);
+    let (_d, path) = write_temp("mixed.zip", &mixed);
+    match open_path(&path).expect("open zip") {
+        OpenResult::Archive(source) => {
+            assert_eq!(source.total_candidates(), 1);
+            assert_eq!(source.single_usable().unwrap().entry_name, "open.csv");
+            assert_eq!(
+                source.first_encrypted_entry().unwrap().entry_name,
+                "secret.csv"
+            );
+        }
+        OpenResult::Direct(_) => panic!("zip was opened as a plain file"),
+    }
+}
+
+/// Raw writer variant where each entry carries its own flags.
+fn raw_zip_flagged_mixed(entries: &[(&str, &[u8], u16)]) -> Vec<u8> {
+    let owned: Vec<(&str, &[u8], u16, u32)> = entries
+        .iter()
+        .map(|(name, data, flags)| (*name, *data, *flags, data.len() as u32))
+        .collect();
+    raw_zip_impl(&owned)
+}
+
+#[test]
+fn zip_ratio_capped_entry_is_skipped() {
+    // Store a tiny payload but declare a ~1 GiB uncompressed size. The
+    // ratio guard should reject it before any extraction is attempted.
+    let bytes = raw_zip_with_declared_size(&[("bomb.csv", b"a,b\n1,2\n", 1024 * 1024 * 1024)]);
+    let (_d, path) = write_temp("bomb.zip", &bytes);
+    match open_path(&path).expect("open zip") {
+        OpenResult::Archive(source) => {
+            assert_eq!(source.total_candidates(), 0);
+            let rejected = source
+                .candidates
+                .iter()
+                .find(|c| c.entry_name == "bomb.csv")
+                .expect("candidate listed");
+            assert!(!rejected.usable);
+            assert!(
+                rejected.rejected_reason.contains("compression ratio"),
+                "unexpected reason: {}",
+                rejected.rejected_reason
+            );
+        }
+        OpenResult::Direct(_) => panic!("zip was opened as a plain file"),
+    }
 }
 
 #[test]
@@ -606,6 +884,129 @@ fn measure_filter_large_fixture() {
     );
     assert!(!matches.is_empty());
     assert!(elapsed.as_secs_f64() < 2.0, "filter took {elapsed:?}");
+}
+
+/// Throughput of a case-insensitive whole-record search over the
+/// generated 1M-row fixture, which is Cmd/Ctrl+F's default path.
+///
+/// Run with: cargo test --release --test core -- --ignored measure_search
+#[test]
+#[ignore]
+fn measure_search_large_fixture() {
+    let path = std::path::Path::new("fixtures/large.csv");
+    if !path.exists() {
+        eprintln!("fixtures/large.csv not present; run gen_fixture first");
+        return;
+    }
+    let opened = open_local(path).expect("open fixture");
+    let result = parse_opened(&opened);
+    let doc = ParsedDocument {
+        opened,
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    };
+    // Default options are case-insensitive; "us" hits the uppercase
+    // `US` country values, forcing the fold path.
+    let opts = SearchOptions::default();
+    let started = std::time::Instant::now();
+    let matches = search_records(&doc, "us", &opts);
+    let elapsed = started.elapsed();
+    eprintln!(
+        "searched {} rows (case-insensitive) -> {} matches in {:.0?}",
+        doc.record_count(),
+        matches.len(),
+        elapsed
+    );
+    assert!(!matches.is_empty());
+}
+
+/// Throughput of the autocomplete value sampler over the fixture.
+///
+/// Run with: cargo test --release --test core -- --ignored measure_sample
+#[test]
+#[ignore]
+fn measure_sample_distinct_large_fixture() {
+    let path = std::path::Path::new("fixtures/large.csv");
+    if !path.exists() {
+        eprintln!("fixtures/large.csv not present; run gen_fixture first");
+        return;
+    }
+    let opened = open_local(path).expect("open fixture");
+    let result = parse_opened(&opened);
+    let doc = ParsedDocument {
+        opened,
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    };
+    let column = doc
+        .meta
+        .headers
+        .iter()
+        .position(|h| h == "country")
+        .expect("country column");
+    let started = std::time::Instant::now();
+    let values = anvil_core::sample_distinct(&doc, column, 50_000, 1000);
+    let elapsed = started.elapsed();
+    eprintln!(
+        "sampled {} distinct `country` values in {:.0?}",
+        values.len(),
+        elapsed
+    );
+    assert!(!values.is_empty());
+}
+
+/// Throughput + correctness of a numeric sort over the generated
+/// 1M-row fixture, plus the inferred column labels.
+///
+/// Run with: cargo test --release --test core -- --ignored measure_sort
+#[test]
+#[ignore]
+fn measure_sort_large_fixture() {
+    let path = std::path::Path::new("fixtures/large.csv");
+    if !path.exists() {
+        eprintln!("fixtures/large.csv not present; run gen_fixture first");
+        return;
+    }
+    let opened = open_local(path).expect("open fixture");
+    let result = parse_opened(&opened);
+    let doc = ParsedDocument {
+        opened,
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    };
+
+    let profiles = infer_schema(&doc);
+    eprintln!(
+        "inferred: {}",
+        profiles
+            .iter()
+            .map(|p| format!("{}={:?}", p.name, p.column_type))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let column = profiles
+        .iter()
+        .position(|p| p.name == "amount")
+        .or_else(|| profiles.iter().position(|p| p.column_type.is_numeric()))
+        .expect("a numeric column");
+    let spec = SortSpec {
+        column,
+        order: SortOrder::Ascending,
+        kind: SortKind::for_column_type(profiles[column].column_type),
+    };
+    let rows: Vec<u64> = (0..doc.record_count()).collect();
+
+    let started = std::time::Instant::now();
+    let sorted = sort_rows(&doc, &rows, &spec);
+    let elapsed = started.elapsed();
+    eprintln!(
+        "sorted {} rows by `{}` in {:.0?}",
+        doc.record_count(),
+        profiles[column].name,
+        elapsed
+    );
+    assert_eq!(sorted.len(), 1_000_000);
+    assert!(elapsed.as_secs_f64() < 3.0, "sort took {elapsed:?}");
 }
 
 #[test]

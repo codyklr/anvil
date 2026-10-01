@@ -10,13 +10,17 @@
 
 use std::borrow::Cow;
 
-use crate::parser::{Cells, ParseMeta, ParseWarning, WarningKind};
+use crate::parser::{Cells, HeaderMode, ParseMeta, ParseWarning, WarningKind};
 
 /// Candidate delimiters we try. Order is the final tie-break (comma first,
 /// because it is by far the most common data format).
 pub const CANDIDATES: &[(u8, &str)] = &[(b',', ","), (b'\t', "\\t"), (b';', ";"), (b'|', "|")];
 
 const SAMPLE_BYTES: usize = 64 * 1024;
+
+/// How many following logical lines the header heuristic compares the
+/// first line against. Bounded so a huge file is still cheap to sniff.
+const HEADER_CONTEXT_ROWS: usize = 20;
 
 #[derive(Debug)]
 pub struct DetectOutcome {
@@ -43,8 +47,16 @@ impl DetectOutcome {
     }
 }
 
-/// Sniff delimiter + quote + headers from a byte sample.
+/// Sniff delimiter + quote + headers from a byte sample, using the
+/// automatic header heuristic.
 pub fn detect(bytes: &[u8]) -> DetectOutcome {
+    detect_with(bytes, HeaderMode::Auto)
+}
+
+/// Sniff delimiter + quote + headers from a byte sample. `mode` forces
+/// the header interpretation (`Header` / `Headerless`) or runs the
+/// content heuristic (`Auto`).
+pub fn detect_with(bytes: &[u8], mode: HeaderMode) -> DetectOutcome {
     let sample = &bytes[..bytes.len().min(SAMPLE_BYTES)];
     let lines = split_logical_lines(sample, b'"');
 
@@ -66,7 +78,13 @@ pub fn detect(bytes: &[u8]) -> DetectOutcome {
     let first_line = lines[0];
     let first_cells: Vec<Cow<[u8]>> = Cells::new(first_line, delim, b'"').collect();
 
-    let likely_header = looks_like_header(&first_cells);
+    let likely_header = match mode {
+        // A forced header still requires at least one cell; an empty
+        // first line stays headerless.
+        HeaderMode::Header => !first_cells.is_empty(),
+        HeaderMode::Headerless => false,
+        HeaderMode::Auto => looks_like_header_in_context(&first_cells, &lines[1..], delim),
+    };
     let headers = if likely_header {
         first_cells
             .iter()
@@ -193,9 +211,74 @@ fn mode_of(counts: &[usize]) -> usize {
     best
 }
 
+/// How a single cell reads: empty, numeric/boolean, or free text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Textness {
+    Empty,
+    Typed,
+    Text,
+}
+
+fn textness(bytes: &[u8]) -> Textness {
+    let s = String::from_utf8_lossy(bytes);
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        Textness::Empty
+    } else if looks_numeric(trimmed) || looks_boolean(trimmed) {
+        Textness::Typed
+    } else {
+        Textness::Text
+    }
+}
+
+/// Decides whether the first line is a header by comparing its cells
+/// against the following data lines.
+///
+/// The signal is per column: a *header vote* is a text cell above a
+/// typed (numeric/boolean) value (the classic `name` over `42` shape),
+/// and a *data vote* is a typed cell above a typed value (the first line
+/// looks like just another data row). Text-over-text is deliberately not
+/// a data vote: `first_name,last_name` over `alice,bob` must keep
+/// defaulting to a header. When the votes tie (or there is nothing to
+/// compare), fall back to the local [`looks_like_header`] rule.
+fn looks_like_header_in_context(
+    first_cells: &[Cow<[u8]>],
+    rest_lines: &[&[u8]],
+    delimiter: u8,
+) -> bool {
+    if first_cells.len() < 2 {
+        return false;
+    }
+    let mut header_votes = 0usize;
+    let mut data_votes = 0usize;
+    for line in rest_lines.iter().take(HEADER_CONTEXT_ROWS) {
+        let cells: Vec<Cow<[u8]>> = Cells::new(line, delimiter, b'"').collect();
+        for column in 0..first_cells.len().min(cells.len()) {
+            let f = textness(first_cells[column].as_ref());
+            let r = textness(cells[column].as_ref());
+            if f == Textness::Empty || r == Textness::Empty {
+                continue;
+            }
+            if f == Textness::Text && r == Textness::Typed {
+                header_votes += 1;
+            } else if f == Textness::Typed && r == Textness::Typed {
+                data_votes += 1;
+            }
+        }
+    }
+    if header_votes > data_votes {
+        true
+    } else if data_votes > header_votes {
+        false
+    } else {
+        looks_like_header(first_cells)
+    }
+}
+
 /// Decides whether the first line is a header. A line is treated as data
 /// (not a header) when at least half of its non-empty cells parse as
-/// numbers or booleans.
+/// numbers or booleans. This is the local fallback used when comparing
+/// the first line against the following data lines yields no signal.
 fn looks_like_header(first_cells: &[Cow<[u8]>]) -> bool {
     if first_cells.len() < 2 {
         return false;
@@ -246,4 +329,66 @@ fn looks_boolean(s: &str) -> bool {
         s.to_ascii_lowercase().as_str(),
         "true" | "false" | "yes" | "no" | "y" | "n" | "t" | "f"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_header_over_typed_data_is_a_header() {
+        let out = detect(b"name,age\nalice,30\nbob,40\n");
+        assert!(out.has_headers);
+        assert_eq!(out.headers, vec!["name", "age"]);
+    }
+
+    #[test]
+    fn typed_first_row_over_typed_data_is_headerless() {
+        let out = detect(b"1,2\n3,4\n5,6\n");
+        assert!(!out.has_headers);
+    }
+
+    #[test]
+    fn numeric_first_row_over_text_data_is_headerless() {
+        let out = detect(b"1,2,3\na,b,c\n");
+        assert!(!out.has_headers);
+    }
+
+    /// The genuinely ambiguous all-text case stays a header under Auto.
+    #[test]
+    fn all_text_over_all_text_defaults_to_header() {
+        let out = detect(b"first_name,last_name\nalice,bob\n");
+        assert!(out.has_headers);
+    }
+
+    /// A headerless file whose first row matches the data shape is now
+    /// detected even though the first row contains text.
+    #[test]
+    fn name_over_age_shape_is_headerless() {
+        let out = detect(b"alice,30\ncarol,40\n");
+        assert!(!out.has_headers);
+    }
+
+    #[test]
+    fn force_header_mode_treats_numeric_first_row_as_header() {
+        let out = detect_with(b"1,2\n3,4\n", HeaderMode::Header);
+        assert!(out.has_headers);
+        assert_eq!(out.headers, vec!["1", "2"]);
+    }
+
+    #[test]
+    fn force_headerless_mode_ignores_a_text_header() {
+        let out = detect_with(b"name,age\nalice,30\n", HeaderMode::Headerless);
+        assert!(!out.has_headers);
+        assert!(out.headers.is_empty());
+    }
+
+    #[test]
+    fn auto_detect_matches_detect_with_auto() {
+        let bytes = b"a,b\n1,2\n";
+        let plain = detect(bytes);
+        let explicit = detect_with(bytes, HeaderMode::Auto);
+        assert_eq!(plain.has_headers, explicit.has_headers);
+        assert_eq!(plain.headers, explicit.headers);
+    }
 }

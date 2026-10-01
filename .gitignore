@@ -2,3 +2,9 @@
 
 # macOS
 .DS_Store
+
+# Large generated fixtures — regenerate locally with:
+#   cargo run --release --bin gen_fixture
+# (kept out of history: GitHub rejects blobs over 100 MiB)
+/fixtures/large.csv
+/fixtures/archive.zip

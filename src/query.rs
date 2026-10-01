@@ -18,8 +18,11 @@
 //! `ParsedDocument`.
 
 pub mod filter;
+pub mod nl;
+pub mod sort;
+pub mod suggest;
 
-use crate::parser::{Cell, Cells, ColumnIndex, ParsedDocument};
+use crate::parser::{Cells, ColumnIndex, ParsedDocument};
 
 /// Per-call options for [`search`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -65,18 +68,23 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
     }
     let column_count = doc.column_count();
 
-    // Build a Finder against the lowercase needle once. We allocate
-    // one owned lowercase buffer and one Finder. The Finder holds a
-    // borrowed reference into the buffer, so they live together.
+    // Build the SIMD finder once against the (possibly lowercased)
+    // needle. The Finder borrows the buffer, so they live together.
     let lowercase_needle: Option<Vec<u8>> = if options.case_sensitive {
         None
     } else {
         Some(needle.bytes().map(ascii_lower).collect())
     };
-    let finder = FinderHandle::new(
-        options.case_sensitive.then_some(needle.as_bytes()),
-        lowercase_needle.as_deref(),
-    );
+    let needle_bytes: &[u8] = if options.case_sensitive {
+        needle.as_bytes()
+    } else {
+        lowercase_needle.as_deref().unwrap_or(&[])
+    };
+    let finder = memchr::memmem::Finder::new(needle_bytes);
+    let case_sensitive = options.case_sensitive;
+    // Reused across every cell on the fold path, so a case-insensitive
+    // search does not allocate per cell.
+    let mut scratch: Vec<u8> = Vec::new();
 
     let cap = options.max_matches.unwrap_or(u64::MAX);
 
@@ -91,7 +99,7 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
                 Some(c) => c,
                 None => continue,
             };
-            if cell_matches(&cell, &finder) {
+            if cell_matches(cell.as_bytes(), &finder, case_sensitive, &mut scratch) {
                 out.push(row);
                 if out.len() as u64 >= cap {
                     return out;
@@ -107,7 +115,7 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
             };
             let iter = Cells::new(record_bytes, doc.meta.delimiter, doc.meta.quote);
             for cell in iter {
-                if cell_matches_cow(&cell, &finder) {
+                if cell_matches(cell.as_ref(), &finder, case_sensitive, &mut scratch) {
                     out.push(row);
                     if out.len() as u64 >= cap {
                         return out;
@@ -121,46 +129,28 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
     out
 }
 
-/// Small wrapper around a `memchr::memmem::Finder` that owns the
-/// needle bytes when case-insensitive. We always go through this so
-/// the call site is a single match() call.
-enum FinderHandle<'a> {
-    /// Case-sensitive: borrowed needle bytes.
-    Sensitive(&'a [u8]),
-    /// Case-insensitive: lowercase buffer; we lowercase each cell on
-    /// the fly and search it with `memchr::memmem::find`.
-    Insensitive(&'a [u8]),
-}
-
-impl<'a> FinderHandle<'a> {
-    fn new(sensitive: Option<&'a [u8]>, insensitive: Option<&'a [u8]>) -> Self {
-        if let Some(b) = sensitive {
-            FinderHandle::Sensitive(b)
-        } else if let Some(b) = insensitive {
-            FinderHandle::Insensitive(b)
-        } else {
-            // Empty needle should have been rejected by the caller.
-            FinderHandle::Sensitive(&[])
-        }
+/// Test one cell against a prebuilt `Finder`.
+///
+/// Case-sensitive cells are searched in place. For case-insensitive
+/// search, an all-ASCII-lowercase cell (no uppercase bytes) is also
+/// searched in place; otherwise the cell is folded into `scratch` once
+/// and the SIMD finder runs over that. `scratch` is reused across cells,
+/// so the fold path does not allocate per cell.
+fn cell_matches(
+    cell: &[u8],
+    finder: &memchr::memmem::Finder<'_>,
+    case_sensitive: bool,
+    scratch: &mut Vec<u8>,
+) -> bool {
+    if cell.is_empty() {
+        return false;
     }
-
-    fn matches(&self, cell: &[u8]) -> bool {
-        if cell.is_empty() {
-            return false;
-        }
-        match self {
-            FinderHandle::Sensitive(needle) => memchr::memmem::find(cell, needle).is_some(),
-            FinderHandle::Insensitive(needle) => {
-                if needle.is_empty() {
-                    return false;
-                }
-                // Lowercase each contiguous run of the cell until we
-                // either find the needle or exhaust the cell. For a
-                // short ASCII cell (most CSVs) this is one pass.
-                ascii_contains_lower(cell, needle)
-            }
-        }
+    if case_sensitive || !cell.iter().any(u8::is_ascii_uppercase) {
+        return finder.find(cell).is_some();
     }
+    scratch.clear();
+    scratch.extend(cell.iter().map(|b| ascii_lower(*b)));
+    finder.find(scratch.as_slice()).is_some()
 }
 
 /// Returns the byte ranges of every occurrence of `needle` inside
@@ -198,32 +188,20 @@ pub fn find_ranges(
     }
 }
 
-fn cell_matches(cell: &Cell<'_>, finder: &FinderHandle<'_>) -> bool {
-    finder.matches(cell.as_bytes())
-}
-
-fn cell_matches_cow(cell: &[u8], finder: &FinderHandle<'_>) -> bool {
-    finder.matches(cell)
-}
-
 /// Does `haystack` contain `needle` as a substring, comparing
-/// case-insensitively over ASCII bytes? For non-ASCII bytes we leave
-/// them as-is: in CSV data the vast majority of comparisons are ASCII,
-/// and a Unicode-aware case fold would need a crate. A Unicode byte
-/// cannot match an ASCII needle, so an accented character next to a
-/// Latin-only needle behaves intuitively (no spurious match).
-fn ascii_contains_lower(haystack: &[u8], needle: &[u8]) -> bool {
-    // Build the first-N-byte window of the haystack lowercased on the
-    // fly, then slide it. For typical cells (≤100 bytes) this is much
-    // cheaper than allocating an owned lowercase copy.
+/// case-insensitively over ASCII bytes? Used by the filter's `contains`
+/// operator (`query::filter::contains_ci`). For typical cells this is a
+/// short scan; the search path uses a reusable scratch buffer instead.
+pub(crate) fn ascii_contains_lower(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
     if needle.len() > haystack.len() {
         return false;
     }
-    let mut buf = [0u8; 256];
     let n = needle.len();
+    let mut buf = [0u8; 256];
     if n > buf.len() {
-        // Fallback: alloc path for very long needles (unusual in CSV
-        // search input; the search box is intended for short terms).
         let lowered: Vec<u8> = haystack.iter().map(|b| ascii_lower(*b)).collect();
         return memchr::memmem::find(&lowered, needle).is_some();
     }
@@ -234,7 +212,6 @@ fn ascii_contains_lower(haystack: &[u8], needle: &[u8]) -> bool {
         return true;
     }
     for &b in haystack.iter().skip(n) {
-        // shift left by one, append next byte lowercased
         for j in 0..(n - 1) {
             buf[j] = buf[j + 1];
         }

@@ -5,8 +5,8 @@
 //! `record_offsets`. The list has length `record_count + 1`; the final
 //! entry is the length of the source.
 
-use crate::parser::delimit::detect;
-use crate::parser::{ParseMeta, ParseWarning, WarningKind};
+use crate::parser::delimit::detect_with;
+use crate::parser::{HeaderMode, ParseMeta, ParseWarning, WarningKind};
 use crate::source::OpenedSource;
 
 #[derive(Debug)]
@@ -15,10 +15,44 @@ pub struct IndexResult {
     pub record_offsets: Vec<u64>,
 }
 
+/// Default record-length limit for the `VeryLongRecord` diagnostic.
+/// Chosen well above an ordinary CSV row: a multi-MB cell, or a record
+/// that swallowed the rest of the file after an unterminated quote,
+/// trips it while a merely large 1M-character cell does not.
+pub const DEFAULT_MAX_RECORD_BYTES: u64 = 1 << 20; // 1 MiB
+
+/// Indexing options. Currently only the record-length diagnostic limit;
+/// it is threaded through so callers (and tests) can tune the threshold
+/// without a process-wide constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexOptions {
+    /// Records longer than this emit a `VeryLongRecord` warning. The
+    /// length includes the record's trailing newline.
+    pub max_record_bytes: u64,
+    /// How the first row is interpreted. `Auto` runs the content
+    /// heuristic; `Header` / `Headerless` force the interpretation.
+    pub header_mode: HeaderMode,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            header_mode: HeaderMode::Auto,
+        }
+    }
+}
+
 /// Build an index for `opened` given an initial `meta`. Mutates `meta` in
 /// place: sets `record_count`, `header_range`, merges detect warnings,
-/// and appends warnings encountered during walking.
+/// and appends warnings encountered during walking. Uses the default
+/// [`IndexOptions`].
 pub fn build(opened: &OpenedSource, meta: ParseMeta) -> IndexResult {
+    build_with(opened, meta, IndexOptions::default())
+}
+
+/// [`build`] with explicit options.
+pub fn build_with(opened: &OpenedSource, meta: ParseMeta, options: IndexOptions) -> IndexResult {
     let total = opened.len() as usize;
     let bytes = opened.bytes();
 
@@ -59,6 +93,11 @@ pub fn build(opened: &OpenedSource, meta: ParseMeta) -> IndexResult {
     // Used to count a final record that is not newline-terminated.
     let mut record_has_content = false;
 
+    // NOTE: this byte-at-a-time loop measurably beats a `memchr3` skip
+    // loop on dense CSVs (20 delimiters per row): the structural bytes
+    // are too frequent for the SIMD scan to skip anything, while the
+    // per-call scanner setup dominates. Kept simple on purpose. See the
+    // 2026-11-10 performance-log entry.
     while pos < total {
         let b = bytes[pos];
 
@@ -127,9 +166,14 @@ pub fn build(opened: &OpenedSource, meta: ParseMeta) -> IndexResult {
     }
 
     if in_quotes {
+        // `record_index` is the index of the partial record currently
+        // being walked: it only advances when a newline closes a record,
+        // and opening a quote never does. Subtracting one pointed at the
+        // previous completed record whenever earlier rows existed, which
+        // would send diagnostics navigation to the wrong row.
         warnings.push(ParseWarning {
             kind: WarningKind::UnterminatedQuote,
-            record_index: Some(record_index.saturating_sub(1)),
+            record_index: Some(record_index),
             note: "file ended while inside a quoted field".into(),
         });
     }
@@ -140,6 +184,25 @@ pub fn build(opened: &OpenedSource, meta: ParseMeta) -> IndexResult {
     }
 
     offsets.push(total as u64);
+
+    // Flag any record that is unusually large. This is a post-pass over
+    // the finished offset table so the walker above stays allocation-
+    // free and single-minded. A record's byte length includes its
+    // trailing newline (or the sentinel for the final record).
+    for record in 0..record_index as usize {
+        let (Some(&start), Some(&end)) = (offsets.get(record), offsets.get(record + 1)) else {
+            break;
+        };
+        let len = end.saturating_sub(start);
+        if len > options.max_record_bytes {
+            warnings.push(ParseWarning {
+                kind: WarningKind::VeryLongRecord,
+                record_index: Some(record as u64),
+                note: format!("record is {len} bytes (limit {})", options.max_record_bytes),
+            });
+        }
+    }
+
     meta.record_count = record_index;
     meta.column_count = max_columns;
     meta.warnings = warnings;
@@ -151,6 +214,11 @@ pub fn build(opened: &OpenedSource, meta: ParseMeta) -> IndexResult {
 
 /// One-shot helper used by the binary: detect layout + index records.
 pub fn parse(opened: &OpenedSource) -> IndexResult {
-    let meta = detect(opened.bytes()).into_meta();
-    build(opened, meta)
+    parse_with(opened, IndexOptions::default())
+}
+
+/// [`parse`] with explicit options.
+pub fn parse_with(opened: &OpenedSource, options: IndexOptions) -> IndexResult {
+    let meta = detect_with(opened.bytes(), options.header_mode).into_meta();
+    build_with(opened, meta, options)
 }

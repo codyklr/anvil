@@ -50,12 +50,18 @@ pub const TEXT_EMPTY: Rgba = rgb(0x666666);
 
 pub const ACCENT: Rgba = rgb(0x0e639c);
 pub const WARN: Rgba = rgb(0xd7ba7d);
+/// Error emphasis (e.g. an unterminated-quote row marker).
+pub const ERROR: Rgba = rgb(0xe06c75);
 
 pub const TOOLBAR_HEIGHT: Pixels = px(38.);
 pub const TAB_BAR_HEIGHT: Pixels = px(28.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
 /// Width of the left-hand file-manager panel.
 pub const FILE_PANEL_WIDTH: Pixels = px(220.);
+/// Width of the right-hand column-inspector panel.
+pub const INSPECTOR_WIDTH: Pixels = px(320.);
+/// Width of the right-hand diagnostics panel.
+pub const DIAGNOSTICS_WIDTH: Pixels = px(320.);
 /// Left padding for a file row nested under an archive group header.
 pub const FILE_PANEL_ENTRY_INDENT: Pixels = px(18.);
 pub const HEADER_HEIGHT: Pixels = px(24.);

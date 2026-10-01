@@ -133,18 +133,69 @@ impl Selection {
     ) {
         let cur = self.cursor.unwrap_or(CellPos::new(0, 0));
         let row_max = record_count.saturating_sub(1) as i64;
-        let row = clamp_signed(cur.record_index as i64 + row_delta, 0, row_max) as u64;
+        // `row_delta` / `col_delta` may be `i64::MIN` / `i64::MAX`
+        // (Home / End, Cmd/Ctrl+Home / End). Saturating arithmetic
+        // keeps those extremes well-defined instead of overflowing.
+        let row = clamp_signed(
+            (cur.record_index as i64).saturating_add(row_delta),
+            0,
+            row_max,
+        ) as u64;
         let col_max = if column_count == 0 {
             0
         } else {
             (column_count - 1) as i64
         };
-        let col = clamp_signed(cur.column_index as i64 + col_delta, 0, col_max) as usize;
-        let next = CellPos::new(row, col);
+        let col = clamp_signed(
+            (cur.column_index as i64).saturating_add(col_delta),
+            0,
+            col_max,
+        ) as usize;
+        self.apply_destination(CellPos::new(row, col), extend);
+    }
+
+    /// Move the cursor to the adjacent cell in row-major order,
+    /// wrapping across row boundaries and around the document ends.
+    /// `forward == true` is Tab; `false` is Shift-Tab.
+    ///
+    /// Does nothing when the document has zero rows or columns. The
+    /// wrap stays inside the document because the total cell count is
+    /// `record_count * column_count`.
+    pub fn move_cell(
+        &mut self,
+        forward: bool,
+        column_count: usize,
+        record_count: u64,
+        extend: bool,
+    ) {
+        if column_count == 0 || record_count == 0 {
+            return;
+        }
+        let cols = column_count as u64;
+        let total = record_count.saturating_mul(cols);
+        if total == 0 {
+            return;
+        }
+        let cur = self.cursor.unwrap_or(CellPos::new(0, 0));
+        let clamped_row = cur.record_index.min(record_count - 1);
+        let clamped_col = (cur.column_index as u64).min(cols - 1);
+        let linear = clamped_row * cols + clamped_col;
+        let next_linear = if forward {
+            (linear + 1) % total
+        } else {
+            (linear + total - 1) % total
+        };
+        let next = CellPos::new(next_linear / cols, (next_linear % cols) as usize);
+        self.apply_destination(next, extend);
+    }
+
+    /// Commit a computed destination cell. When `extend` is set the
+    /// original anchor is preserved (anchoring at the current cursor
+    /// when there was no anchor yet, so the first shift-arrow makes a
+    /// real range); otherwise the selection becomes a single cell.
+    fn apply_destination(&mut self, next: CellPos, extend: bool) {
         if extend {
-            // Preserve the original anchor so the user can grow the
-            // range. If there was no anchor yet, anchor at the current
-            // cursor so the very first shift-arrow makes a real range.
+            let cur = self.cursor.unwrap_or(CellPos::new(0, 0));
             let new_anchor = self.anchor.unwrap_or(cur);
             self.cursor = Some(next);
             self.anchor = Some(new_anchor);
@@ -214,7 +265,7 @@ impl Selection {
     /// content faithfully for paste-into-spreadsheet destinations
     /// (Excel, Numbers, Sheets) which all understand quoted TSV.
     ///
-    /// Empty cells are emitted as the empty string — no quotes. A cell
+    /// Empty cells are emitted as the empty string - no quotes. A cell
     /// lookup that returns `None` (out-of-bounds row/column) is also
     /// emitted as the empty string.
     ///
@@ -353,7 +404,7 @@ mod tests {
         let mut s = Selection::empty();
         s.move_cursor(0, 1, 5, 10, true);
         assert_eq!(s.cursor(), Some(CellPos::new(0, 1)));
-        // The anchor should be where the user "was" — the default origin
+        // The anchor should be where the user "was" - the default origin
         // (0,0). After this first extend the range is (0,0)-(0,1).
         assert_eq!(s.anchor(), Some(CellPos::new(0, 0)));
         assert!(s.is_range());
@@ -398,6 +449,77 @@ mod tests {
         s.set(CellPos::new(0, 0));
         s.move_cursor(1, 0, 5, 0, false);
         assert_eq!(s.cursor(), Some(CellPos::new(0, 0)));
+    }
+
+    #[test]
+    fn move_cursor_with_extreme_delta_saturates() {
+        // Cmd/Ctrl+Home/End pass `i64::MIN` / `i64::MAX` as the row
+        // delta. This must not overflow; it must land on the first /
+        // last row respectively.
+        let mut s = Selection::empty();
+        s.set(CellPos::new(5, 2));
+        s.move_cursor(i64::MIN, 0, 4, 10, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(0, 2)));
+        s.move_cursor(i64::MAX, 0, 4, 10, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(9, 2)));
+    }
+
+    #[test]
+    fn move_cursor_with_extreme_column_delta_saturates() {
+        // Home / End pass `i64::MIN` / `i64::MAX` as the column delta.
+        let mut s = Selection::empty();
+        s.set(CellPos::new(5, 2));
+        s.move_cursor(0, i64::MIN, 4, 10, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(5, 0)));
+        s.move_cursor(0, i64::MAX, 4, 10, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(5, 3)));
+    }
+
+    #[test]
+    fn move_cell_advances_and_wraps_rows() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 2));
+        // Last column of row 0 → first column of row 1.
+        s.move_cell(true, 3, 3, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(1, 0)));
+    }
+
+    #[test]
+    fn move_cell_backward_wraps_to_previous_row_end() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(1, 0));
+        s.move_cell(false, 3, 3, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(0, 2)));
+    }
+
+    #[test]
+    fn move_cell_wraps_around_document_ends() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(2, 2));
+        s.move_cell(true, 3, 3, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(0, 0)));
+        s.move_cell(false, 3, 3, false);
+        assert_eq!(s.cursor(), Some(CellPos::new(2, 2)));
+    }
+
+    #[test]
+    fn move_cell_from_empty_anchors_at_origin() {
+        let mut s = Selection::empty();
+        s.move_cell(true, 3, 3, true);
+        assert_eq!(s.cursor(), Some(CellPos::new(0, 1)));
+        assert_eq!(s.anchor(), Some(CellPos::new(0, 0)));
+    }
+
+    #[test]
+    fn move_cell_no_op_on_empty_document() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        let mut zero_cols = s.clone();
+        zero_cols.move_cell(true, 0, 5, false);
+        assert_eq!(zero_cols, s);
+        let mut zero_rows = s.clone();
+        zero_rows.move_cell(true, 5, 0, false);
+        assert_eq!(zero_rows, s);
     }
 
     // ---- copy_text / TSV formatter -------------------------------------

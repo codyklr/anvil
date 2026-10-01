@@ -34,6 +34,9 @@ pub(super) enum Action {
         column_delta: i64,
         extend: bool,
     },
+    /// Move the cursor to the adjacent cell in row-major order,
+    /// wrapping across rows (Tab / Shift-Tab).
+    NextCell { forward: bool },
     /// Copy the current selection to the clipboard.
     Copy,
     /// Clear the selection, or close the archive picker if already
@@ -50,6 +53,12 @@ pub(super) enum Action {
     ToggleFilePanel,
     /// Open the filter bar (Cmd/Ctrl+L). No-op when already open.
     OpenFilter,
+    /// Open the natural-language Ask bar (Cmd/Ctrl+Shift+L).
+    OpenAsk,
+    /// Show or hide the column-inspector panel (Cmd/Ctrl+I).
+    ToggleInspector,
+    /// Show or hide the diagnostics panel (Cmd/Ctrl+D).
+    ToggleDiagnostics,
 }
 
 /// Translate a keystroke into an [`Action`], or `None` when the chord is
@@ -72,7 +81,40 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
     }
 
     if key == "l" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
-        return Some(Action::OpenFilter);
+        return Some(if modifiers.shift {
+            Action::OpenAsk
+        } else {
+            Action::OpenFilter
+        });
+    }
+
+    if key == "i" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::ToggleInspector);
+    }
+
+    if key == "d" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::ToggleDiagnostics);
+    }
+
+    // Cmd/Ctrl+Home / Cmd/Ctrl+End jump to the first / last row while
+    // keeping the current column. Plain Home / End still jump to the
+    // first / last column below.
+    if (key == "home" || key == "end")
+        && modifiers.secondary()
+        && !modifiers.alt
+        && !modifiers.function
+    {
+        return Some(Action::MoveCursor {
+            row_delta: if key == "home" { i64::MIN } else { i64::MAX },
+            column_delta: 0,
+            extend: modifiers.shift,
+        });
+    }
+
+    if key == "tab" {
+        return Some(Action::NextCell {
+            forward: !modifiers.shift,
+        });
     }
 
     if key == "escape" {
@@ -113,7 +155,7 @@ mod tests {
         action_for(&Keystroke::parse(chord).expect("valid keystroke"))
     }
 
-    /// Cmd on macOS, Ctrl elsewhere — whichever `secondary()` matches.
+    /// Cmd on macOS, Ctrl elsewhere - whichever `secondary()` matches.
     fn copy_chord() -> &'static str {
         if cfg!(target_os = "macos") {
             "cmd-c"
@@ -227,6 +269,59 @@ mod tests {
     }
 
     #[test]
+    fn cmd_home_and_cmd_end_jump_to_row_extremes() {
+        let home = if cfg!(target_os = "macos") {
+            "cmd-home"
+        } else {
+            "ctrl-home"
+        };
+        let end = if cfg!(target_os = "macos") {
+            "cmd-end"
+        } else {
+            "ctrl-end"
+        };
+        assert_eq!(
+            act(home),
+            Some(Action::MoveCursor {
+                row_delta: i64::MIN,
+                column_delta: 0,
+                extend: false,
+            })
+        );
+        assert_eq!(
+            act(end),
+            Some(Action::MoveCursor {
+                row_delta: i64::MAX,
+                column_delta: 0,
+                extend: false,
+            })
+        );
+    }
+
+    #[test]
+    fn cmd_shift_home_extends_to_first_row() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-shift-home"
+        } else {
+            "ctrl-shift-home"
+        };
+        assert_eq!(
+            act(chord),
+            Some(Action::MoveCursor {
+                row_delta: i64::MIN,
+                column_delta: 0,
+                extend: true,
+            })
+        );
+    }
+
+    #[test]
+    fn tab_and_shift_tab_move_adjacent_cells() {
+        assert_eq!(act("tab"), Some(Action::NextCell { forward: true }));
+        assert_eq!(act("shift-tab"), Some(Action::NextCell { forward: false }));
+    }
+
+    #[test]
     fn escape_maps_to_escape() {
         assert_eq!(act("escape"), Some(Action::Escape));
     }
@@ -295,5 +390,40 @@ mod tests {
     #[test]
     fn plain_l_is_not_open_filter() {
         assert_eq!(act("l"), None);
+    }
+
+    #[test]
+    fn toggle_inspector_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-i"
+        } else {
+            "ctrl-i"
+        };
+        assert_eq!(act(chord), Some(Action::ToggleInspector));
+    }
+
+    #[test]
+    fn plain_i_is_not_toggle_inspector() {
+        assert_eq!(act("i"), None);
+    }
+
+    #[test]
+    fn toggle_diagnostics_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-d"
+        } else {
+            "ctrl-d"
+        };
+        assert_eq!(act(chord), Some(Action::ToggleDiagnostics));
+    }
+
+    #[test]
+    fn plain_d_is_not_toggle_diagnostics() {
+        assert_eq!(act("d"), None);
+    }
+
+    #[test]
+    fn alt_d_is_not_toggle_diagnostics() {
+        assert_eq!(act("alt-d"), None);
     }
 }

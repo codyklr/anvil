@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::{AnvilError, Result};
-use crate::parser::{indexing, ParsedDocument};
+use crate::parser::indexing::{self, IndexOptions};
+use crate::parser::ParsedDocument;
 use crate::source::archive::ArchiveSource;
 use crate::source::{open_path, OpenResult, OpenedSource};
 
@@ -39,6 +40,20 @@ pub fn index_opened(opened: OpenedSource) -> ParsedDocument {
     }
 }
 
+/// Re-index an already-indexed document with different options, reusing
+/// its memory map / extracted temp file. Used by the UI to apply a forced
+/// header mode without re-opening the file or re-extracting an archive
+/// entry. `ParsedDocument::opened` is shared by `Arc`, so the clone is
+/// cheap and keeps the mmap alive.
+pub fn reindex(doc: &ParsedDocument, options: IndexOptions) -> ParsedDocument {
+    let result = indexing::parse_with(&doc.opened, options);
+    ParsedDocument {
+        opened: doc.opened.clone(),
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    }
+}
+
 /// Open a path. Direct files resolve immediately; a ZIP with exactly one
 /// usable entry opens transparently; a ZIP with several prompts the caller.
 pub fn load(path: &Path) -> Result<LoadResult> {
@@ -51,6 +66,12 @@ pub fn load(path: &Path) -> Result<LoadResult> {
         OpenResult::Archive(source) => {
             let source = Arc::new(source);
             if source.total_candidates() == 0 {
+                // A password-protected archive is the common case where the
+                // extension looks like data but nothing is readable; say so
+                // explicitly instead of the generic "no supported files".
+                if let Some(entry) = source.first_encrypted_entry() {
+                    return Err(AnvilError::EncryptedEntry(entry.entry_name.clone()));
+                }
                 return Err(AnvilError::NoUsableEntries);
             }
             // Auto-open when there is exactly one clear favourite. Two

@@ -2270,3 +2270,3547 @@ clean extractions that would each be a small, verifiable slice. After
 that, Milestone 3 sort is the natural feature: it reuses the
 display->record mapping introduced here and must compose with the
 filter (sort the filtered indexes).
+
+## 2026-10-14 — Milestone 2 keyboard navigation completion (Cmd/Ctrl+Home/End, Tab/Shift-Tab)
+
+### Context
+
+Milestone 2 was functionally complete after the filter slice, but the
+selection/navigation checklist still had three unticked items.
+Two of them are pure grid keyboard navigation: Cmd/Ctrl+Home/End
+(jump to first/last row) and Tab/Shift-Tab (adjacent-cell movement).
+The third (Cmd/Ctrl+G go-to-row) needs a new input overlay and was
+left for a follow-up. This iteration completes the two keyboard items
+and, in doing so, found and fixed a latent integer-overflow bug in the
+existing Home/End column bindings.
+
+### Implemented
+
+Data side (`src/selection.rs`):
+
+- `Selection::move_cursor` now uses `saturating_add` instead of `+`.
+  The existing Home / End bindings pass `i64::MIN` / `i64::MAX` as
+  the column delta, so the old arithmetic could overflow (a debug-build
+  panic; wrapping in release). The new saturating path clamps to the
+  document edge as intended.
+- `Selection::move_cell(forward, column_count, record_count, extend)`:
+  moves to the adjacent cell in row-major order, wrapping across rows
+  and around the document ends. No-op on a zero-row/zero-column
+  document. Reuses a new private `apply_destination` helper that also
+  serves `move_cursor`, keeping anchor/`extend` semantics identical.
+
+Keyboard layer (`src/ui/commands.rs`):
+
+- New `Action::NextCell { forward }` for Tab / Shift-Tab.
+- `action_for` now maps Cmd/Ctrl+Home and Cmd/Ctrl+End to
+  `MoveCursor { row_delta: i64::MIN | i64::MAX, column_delta: 0 }`
+  (Shift extends), before the plain Home/End column-jump arms.
+- Tab maps to `NextCell { forward: !modifiers.shift }`.
+
+UI (`src/ui/view.rs`):
+
+- `run_action` handles `Action::NextCell` via a new
+  `move_cell_selection`.
+- `move_cell_selection` delegates to `Selection::move_cell` when there
+  is no filter, and walks the *visible* cells (position -> record
+  mapping, wrapping) when a filter is active.
+- `move_selection`'s filtered branch now uses `saturating_add` for the
+  row/column arithmetic so Cmd/Ctrl+Home/End work while filtered and
+  cannot overflow.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 198 passed (72 lib + 62 binary + 64
+  integration), 0 failed, 2 ignored (the throughput tests). Was 185.
+- `cargo test --release --lib selection` — 32 passed.
+- `cargo test --release --bin anvil` — 62 passed, including the three
+  new UI tests.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, 20 cols, ~359 ms.
+- `./target/release/anvil --probe fixtures/archive.zip` — 1,000,000
+  rows, ~548 ms.
+- `./target/release/anvil` — launches and stays alive for 5 s with no
+  panic (no interactive key exercise; the behaviours are covered by
+  the headless UI tests).
+
+### Tests added / changed
+
+- `src/selection.rs`: 7 new unit tests —
+  `move_cursor_with_extreme_delta_saturates`,
+  `move_cursor_with_extreme_column_delta_saturates`,
+  `move_cell_advances_and_wraps_rows`,
+  `move_cell_backward_wraps_to_previous_row_end`,
+  `move_cell_wraps_around_document_ends`,
+  `move_cell_from_empty_anchors_at_origin`,
+  `move_cell_no_op_on_empty_document`.
+- `src/ui/commands.rs`: 3 new unit tests —
+  `cmd_home_and_cmd_end_jump_to_row_extremes`,
+  `cmd_shift_home_extends_to_first_row`,
+  `tab_and_shift_tab_move_adjacent_cells`.
+- `src/ui/view.rs`: 3 new UI regression tests —
+  `cmd_home_and_end_jump_to_row_extremes`,
+  `tab_and_shift_tab_move_adjacent_cells`,
+  `filter_tab_and_row_jumps_walk_visible_rows`. The Tab UI test also
+  confirms GPUI delivers Tab to the grid's `on_key_down` rather than
+  swallowing it for focus traversal.
+
+### Roadmap changes
+
+- Milestone 2 → Keyboard navigation:
+  - `[ ] Cmd/Ctrl+Home/End jump to first / last row` → `[x]`, with a
+    note on the `i64::MIN` / `i64::MAX` + saturating-arithmetic
+    implementation.
+  - `[ ] Tab / Shift-Tab navigation between cells` → `[x]`, with a
+    note on `Selection::move_cell` and the filtered visible-row walk.
+- Milestone 2 → Tests: added a `[x]` line for the new unit + UI
+  coverage.
+- `Cmd/Ctrl+G — go-to-row input box` remains unchecked; it needs a new
+  overlay rather than a binding-table arm.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Recognised-keys table gained Cmd/Ctrl+Home, Cmd/Ctrl+End, and
+    Tab / Shift-Tab rows; the paragraph below now describes the
+    saturating deltas and `Action::NextCell`.
+  - Selection operations table gained `Selection::move_cell` and notes
+    `move_cursor`'s saturating arithmetic.
+  - Grid-integration keyboard bullet and the `commands::action_for`
+    description updated; `Action` list gained `NextCell`.
+  - Testing section: selection unit tests 25 → 32, UI regression tests
+    34 → 37, command tests 18 → 21, and the selection/commands/focus
+    table rows updated.
+  - Functional gaps and Planned Evolution no longer claim
+    Cmd/Ctrl+Home/End are outstanding.
+- `README.md`: test-count line updated (56 → 62 binary tests).
+
+### Issues / technical debt discovered
+
+- The latent `i64::MIN` overflow in `move_cursor` had been present
+  since the Home/End bindings landed; release builds wrapped and the
+  effect was correct, so the existing characterisation tests did not
+  catch it. Saturating arithmetic is now covered by explicit tests.
+- Tab is now consumed by the grid whenever it holds focus. There is no
+  other focusable widget in the main grid surface today, so this is
+  fine, but a future focusable child inside the grid would need to
+  stop the Tab event or rebind.
+- Tab / Shift-Tab do not extend a range (they move the cursor), which
+  matches spreadsheets. If a future slice wants Shift-Tab to extend,
+  `Selection::move_cell` already accepts `extend`.
+- `view.rs` is now ~3870 lines. The split recommendation from the
+  previous iteration is still overdue.
+
+### Open loops
+
+- Cmd/Ctrl+G go-to-row input box (last unchecked Keyboard-navigation
+  item).
+- Search input options (case-sensitive toggle, column scope) and
+  column-scoped search via header click.
+- Split `view.rs` before the next large UI feature.
+- Carried over: cap / group large archives, lazy-extraction
+  cancellation, per-tab `search_task` / `copy_flash_generation`,
+  panel resize/reorder, compound filters, sort (Milestone 3).
+
+### Next recommended task
+
+Milestone 2's keyboard-navigation checklist is now complete except for
+Cmd/Ctrl+G. Two reasonable next steps: (a) finish the search UX by
+surfacing the already-supported `case_sensitive` / `column` options in
+the bar and wiring column-scoped search from a header click, which
+closes the remaining Milestone 2 Search checkboxes; or (b) do the
+overdue `view.rs` split before starting Milestone 3. The search UX is
+smaller and closes out Milestone 2; the split should land before the
+next large feature (Milestone 3 sort / column inspector).
+
+## 2026-10-15 — Milestone 2 search options + column-scoped search
+
+### Context
+
+Milestone 2's Search section still had two unchecked tasks: exposing
+`SearchOptions` in the bar (case-sensitive toggle, column scope) and
+column-scoped search via a header click. The data side already
+supported both; this iteration wired the UI end to end. It also closes
+out the Milestone 2 Search checklist.
+
+### Implemented
+
+Search state (`src/ui/view.rs`):
+
+- New per-tab fields on `DocumentSnapshot` and live mirrors on
+  `MainView`: `search_case_sensitive: bool` and
+  `search_column: Option<usize>`, wired through `snapshot_active`,
+  `load_active`, and `clear_live_per_document` like the rest of the
+  search state.
+- `MainView::search_options()` is now the single source of truth for
+  `SearchOptions`; both `kick_search` and `render_grid` read it, so the
+  background result and the highlight pass cannot drift.
+- `toggle_search_column(column)`, `clear_search_column()`, and
+  `toggle_search_case_sensitive()` mutate the options and re-run an
+  open search so matches and highlighting follow immediately.
+  `toggle_search_column` toggles (clicking the scoped header clears
+  it) and keeps keyboard focus on the grid.
+- `close_search` preserves both options deliberately so the
+  "click a header, then Cmd/Ctrl+F" flow survives Esc; the scoped
+  header stays highlighted so the state remains visible.
+- `jump_to_active_match` now lands the cursor in the scoped column
+  when one is set, instead of an unrelated column.
+- `render_search_bar` gained an `Aa` case-sensitive toggle (highlighted
+  when active) and a column-scope chip showing the header name with an
+  inline × that clears the scope.
+
+Grid (`src/ui/grid.rs`):
+
+- `render_header` now takes `scoped_column` and an `on_header_click`
+  closure; the scoped header is painted `BG_MATCH_ACTIVE` and clicking
+  a header toggles the scope through the existing
+  `entity.update(&mut App)` pattern used by data cells. Header cells
+  carry a `header-cell-<col>` debug selector for tests.
+- New pure `should_highlight(options, column)` gates substring
+  highlighting to the scoped column; `render_row` renders non-scoped
+  cells of a match row plain while still applying the row tint.
+  `find_ranges` stays a pure per-cell helper.
+
+### Verified
+
+- `cargo build --release` — succeeds.
+- `cargo test --release` — 205 passed (72 lib + 69 binary + 64
+  integration), 0 failed, 2 ignored (throughput tests). Was 198.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, 20 cols, ~357 ms.
+- `./target/release/anvil` — launches and stays alive for 5 s with no
+  panic. Interactive header-click / toggle exercise was not performed
+  by hand; the real header-click path is covered by a headless UI test
+  (`header_click_toggles_search_column`) that locates the header cell
+  via a debug selector and synthesises the click.
+
+### Tests added / changed
+
+- `src/ui/view.rs` (5 new):
+  `search_case_sensitive_toggle_changes_matches` (case-insensitive
+  `alice` → 3 matches, `Aa` → 1),
+  `search_column_scope_limits_matches` (scope restricts matches and
+  lands the cursor in the scoped column),
+  `header_click_toggles_search_column` (real header click via
+  `debug_bounds`, toggle on then off),
+  `search_options_reflect_toggles`, and the pure
+  `search_column_label_resolves_headers_and_fallback`.
+- `src/ui/view.rs` (extended): `switching_tabs_restores_per_document_state`
+  now also asserts the new search options reset on a new tab and are
+  restored on switch-back.
+- `src/ui/grid.rs` (2 new): `should_highlight_honours_column_scope`
+  and `render_row_with_column_scope_does_not_panic`.
+
+### Roadmap changes
+
+- Milestone 2 → Search: `Search input + options` and
+  `Column-scoped search` ticked, with notes on the `Aa` toggle,
+  the scope chip, per-tab persistence, and the persistent header
+  highlight. The Milestone 2 Search checklist is now complete.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Primary-state table gained `search_case_sensitive` and
+    `search_column`.
+  - Functional gaps: the "search bar does not expose the toggles"
+    bullet is replaced with the implemented behaviour.
+  - Planned Evolution "Search (Milestone 2)" describes the
+    `search_options()` helper, the `Aa` toggle, header-click scoping,
+    the scoped-header highlight, and the `should_highlight` gate.
+  - Testing section: UI regression tests 37 → 42; grid unit tests and
+    the UI/search and grid-geometry table rows updated.
+- `README.md`: binary test count 62 → 69.
+
+### Issues / technical debt discovered
+
+- The scoped-header marker reuses `BG_MATCH_ACTIVE`, which is also the
+  active-search-match row colour. It is visually adequate but not
+  semantically distinct; a dedicated `BG_SEARCH_SCOPE` would be
+  clearer if the palette grows.
+- Column scope is per tab but case-sensitivity is arguably a global
+  user preference. It was kept per tab for consistency with the rest
+  of the search state; hoist it if a settings/config layer lands.
+- Scope is deliberately preserved across `close_search`. The scoped
+  header remains highlighted, so it is not hidden state, but there is
+  no other affordance (e.g. a status-bar hint) when the bar is closed.
+- Search always runs over the whole document, not the filtered set, so
+  a column scope and a filter can disagree about which rows exist. This
+  matches existing search behaviour; composing search with filter is a
+  separate, larger change.
+- `view.rs` is now ~4000 lines. The split remains overdue; this slice
+  added another ~120 lines plus tests.
+
+### Open loops
+
+- Cmd/Ctrl+G go-to-row input box (last Keyboard-navigation item).
+- Compound filter expressions, filter chips / column picker.
+- Split `view.rs` before the next large feature (Milestone 3 sort /
+  column inspector).
+- Search-within-filter composition and a `max_matches` cap surfaced in
+  the UI.
+- Carried over: cap / group large archives, lazy-extraction
+  cancellation, per-tab `search_task` / `copy_flash_generation`,
+  panel resize/reorder, sort (Milestone 3).
+
+### Next recommended task
+
+Milestone 2's Search and Keyboard-navigation checklists are now
+complete except for Cmd/Ctrl+G. The next largest coherent step is the
+overdue `view.rs` split (the search bar + options, filter bar, file
+panel, and document/tab model are four clean extractions), which the
+log has recommended before starting Milestone 3. If feature work is
+preferred over the refactor, Cmd/Ctrl+G closes the last Milestone 2
+navigation item, or Milestone 3 sort / type inference can start on top
+of the existing display->record mapping.
+
+## 2026-10-16 — Mouse/keyboard text editing in the filter input
+
+### Context
+
+The filter bar (Cmd/Ctrl+L) and search bar were hand-rolled single-line
+inputs: `MainView` held a `String`, rendered it as a truncated `div`,
+and the key handler appended `key_char`s and `pop()`ed on Backspace.
+There was no caret, no selection, and no mouse interaction, so clicking
+or dragging in the field did nothing. This iteration makes the filter
+input behave like a normal text field: click to place the caret,
+click-drag / Shift+click to select (highlighted), arrow / Home / End /
+word movement, Shift-extension, Cmd/Ctrl+A, and Backspace/Delete over
+the selection.
+
+### Implemented
+
+New GPUI-free model (`src/ui/text_edit.rs`, 18 unit tests):
+
+- `TextEdit { text, caret, anchor }` with `insert` (replaces the
+  selection), `backspace` / `delete`, `move_left/right/home/end/
+  word_left/word_right`, `set_caret(index, extend)`, `select_all`,
+  `selection()` / `selected_text()` / `has_selection()`. Every
+  mutation clamps byte offsets to UTF-8 char boundaries, so multibyte
+  text cannot be split. `From<&str>` / `From<String>` build an editor
+  with the caret at the end.
+
+Filter bar (`src/ui/view.rs`):
+
+- `filter_input` is now a `TextEdit` on `MainView` and
+  `DocumentSnapshot` (per tab, mirrored through `snapshot_active` /
+  `load_active` / `clear_live_per_document`).
+- `render_filter_bar` takes `Window`, paints the text with
+  `StyledText` (selection as a `BG_SELECTED` highlight range), and
+  positions a 1px caret from `text_caret_x` (which shapes the line with
+  `window.text_system().shape_line(..)` and reads `x_for_index`).
+- A hitbox-free `canvas` records the text area's window bounds each
+  frame (`filter_text_bounds`), reusing the grid's overlay pattern.
+  Mouse-down/drag map pointer x to a byte index via
+  `closest_index_for_x`, place/extend the caret, and toggle
+  `filter_dragging`.
+- `on_filter_key_down` now maps editing keys onto `TextEdit`
+  operations: arrows, Home/End, Shift-extension, Option+arrows (macOS)
+  / Ctrl+arrows (elsewhere) for word movement, Cmd/Ctrl+A select-all,
+  Backspace/Delete. Enter still applies, Esc still closes.
+- New free helpers `text_index_at_point`, `text_caret_x`,
+  `shape_input_line`.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 226 passed (72 lib + 90 binary + 64
+  integration), 0 failed, 2 ignored (throughput tests). Was 205.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, ~354 ms.
+- `./target/release/anvil` — launches and stays alive for 5 s with no
+  panic. The filter bar is not open on launch, so interactive editing
+  was not exercised by hand; the caret/selection/mouse paths are
+  covered by the headless UI tests, including a real synthesised
+  click-drag through the rendered field bounds.
+
+### Tests added / changed
+
+- `src/ui/text_edit.rs`: 18 unit tests covering the empty editor,
+  caret-at-end construction, append, replace-selection, backspace
+  (char / selection / start no-op), delete (char / selection),
+  selection collapse on movement, shift-extension, Home/End, select-all
+  + collapse, word movement across operator tokens, char-boundary
+  clamping, and multibyte backspace. One expectation was corrected
+  during development (word-left from between `==` and `US` lands before
+  `==`, not after `country`).
+- `src/ui/view.rs`: 3 UI tests — `filter_keyboard_caret_and_selection`
+  (Home/End/Shift+Home), `filter_select_all_typing_and_backspace`
+  (Cmd/Ctrl+A + typing replaces, select-all + Backspace clears), and
+  `filter_mouse_click_and_drag` (click near the right edge puts the
+  caret at the end; a drag from the start selects a non-empty prefix).
+- Existing filter tests were unaffected: `From<&str>` keeps
+  `view.filter_input = "...".into()` working.
+
+### Roadmap changes
+
+- Milestone 2 → Filter: added a checked task for the editable filter
+  input (caret, selection, mouse click/drag, word movement), plus an
+  unchecked follow-up to migrate the search bar to the same model.
+- Milestone 2 → Tests: added a checked line for the `TextEdit` unit
+  tests and the filter-editing UI tests.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Repository tree gained `ui/text_edit.rs`.
+  - Primary-state table: `filter_input` is a `TextEdit`; added
+    `filter_text_bounds` and `filter_dragging`.
+  - New "Editable text inputs" section describing the model, the
+    `StyledText` + shaped-line rendering, the bounds-recording canvas,
+    the mouse/key routing, and the current scope/limitations.
+  - Testing section: UI regression tests 42 → 45, a `Text edit
+    (binary)` row, and the coverage paragraph updated.
+  - Functional gaps note that the search bar has not been migrated and
+    that there is no caret blink or in-field horizontal scroll.
+- `README.md`: binary test count 69 → 90.
+
+### Issues / technical debt discovered
+
+- The search bar still uses the old append/pop input. It should adopt
+  `TextEdit` next; the rendering helpers (`text_caret_x`,
+  `text_index_at_point`, `shape_input_line`) are already reusable, but
+  the bar wiring is search-specific (live search on edit, Enter
+  cycling).
+- No caret blink. The caret is a static 1px bar; adding a blink needs a
+  timer + generation guard like the copy flash.
+- No horizontal scroll when the text is wider than the field; the caret
+  can move off the clipped edge. Rare for short filter expressions but
+  worth handling with the migrated search input (queries can be
+  longer).
+- Hit-testing and caret placement both shape the line with
+  `window.text_style()`. This matches the rendered `StyledText` font and
+  size today; if the bars ever use a custom font/size, the two paths
+  must share the same style.
+- `MainView` gained two more transient fields; per-tab search/filter
+  state plus render artifacts continue to grow `view.rs` (~4100 lines).
+  The `view.rs` split is still overdue.
+- An architecture consultation for this slice failed with a harness
+  `malformed_response`; the design was settled by direct inspection of
+  the vendored gpui source instead (no `TextInput` element;
+  `TextLayout` / `shape_line` are the intended primitives).
+
+### Open loops
+
+- Migrate the search bar to `TextEdit` (caret, selection, mouse).
+- Caret blink; in-field horizontal scroll / visible caret for long
+  text; double-click word selection.
+- Apply `TextEdit` to Cmd/Ctrl+G go-to-row when that lands.
+- Carried over: compound filters, filter chips, split `view.rs`, cap /
+  group large archives, lazy-extraction cancellation, per-tab
+  `search_task` / `copy_flash_generation`, panel resize/reorder, sort
+  (Milestone 3).
+
+### Next recommended task
+
+The highest-value follow-up is to migrate the **search bar** to the
+same `TextEdit` model, which finishes the user-facing text-editing
+capability across both bars and is a bounded change now that the model
+and helpers exist. The overdue `view.rs` split should still land before
+Milestone 3; `text_edit.rs` already removes one concern from the file.
+
+## 2026-10-17 — Migrate the search bar to the editable TextEdit model
+
+### Context
+
+The previous iteration introduced `ui::text_edit::TextEdit` and gave the
+filter input a real caret, selection, and mouse interaction; the search
+bar was left on the old append/pop handler. This iteration migrates the
+search bar to the same model, so both inputs now behave consistently.
+It is the closing half of the "editable text inputs" capability.
+
+### Implemented
+
+`src/ui/view.rs`:
+
+- `search_query` is now a `TextEdit` on `MainView` and
+  `DocumentSnapshot` (per tab, mirrored through `snapshot_active` /
+  `load_active` / `clear_live_per_document`).
+- New transient fields `search_text_bounds: Option<Bounds<Pixels>>` and
+  `search_dragging: bool` on `MainView`.
+- `on_search_key_down` now routes editing keys to `TextEdit`: arrows,
+  Home/End, Shift-extension, Option/Ctrl+arrow word movement,
+  Cmd/Ctrl+A select-all, and Backspace/Delete over the selection. Any
+  text-changing operation re-runs the live background search via
+  `kick_search`; caret-only movement does not.
+- `render_search_bar` takes `Window` and renders an editable area
+  (`StyledText` with a `BG_SELECTED` selection range, a shaped caret,
+  and a hitbox-free `canvas` recording `search_text_bounds`). The
+  existing `Aa` toggle and column-scope chip are unchanged.
+- New `search_mouse_down` / `search_mouse_move` / `search_mouse_up`
+  place and extend the caret from pointer x, mirroring the filter
+  handlers. `kick_search` reads `search_query.text()`.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 229 passed (72 lib + 93 binary + 64
+  integration), 0 failed, 2 ignored (throughput tests). Was 226.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, ~351 ms.
+- `./target/release/anvil` — launches and stays alive for 5 s with no
+  panic. Interactive key/mouse exercise was done through the headless
+  UI tests, including a synthesised click-drag on the rendered search
+  field.
+
+### Tests added / changed
+
+- 3 UI tests in `src/ui/view.rs`:
+  - `search_keyboard_caret_and_selection` (Home/End/Shift+Home),
+  - `search_mouse_click_and_drag` (click near the right edge puts the
+    caret at the end; drag from the start selects a non-empty prefix),
+  - `search_insert_at_caret_re_runs_search` (typing at a mid-string
+    caret builds `needle` and the live search updates to `[0, 1]`).
+- Existing search assertions were mechanically updated from
+  `view.search_query` to `view.search_query.text()`.
+
+### Roadmap changes
+
+- Milestone 2 → Filter: ticked the "apply the same editable text input
+  to the search bar" follow-up.
+- Milestone 2 → Tests: updated the text-editing test line to cover both
+  bars and the live re-search after a mid-string insert.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Primary-state table: `search_query` is a `TextEdit`; added
+    `search_text_bounds` and `search_dragging`.
+  - "Editable text inputs" section now states both bars use `TextEdit`,
+    describes the shared rendering pattern, and notes the one
+    behavioural difference (search re-runs live, filter applies on
+    Enter).
+  - Functional gaps and the testing counts/rows updated (UI regression
+    tests 45 → 48).
+- `README.md`: binary test count 90 → 93.
+
+### Issues / technical debt discovered
+
+- `render_filter_bar` and `render_search_bar` now duplicate the
+  editable-area rendering (text/selection/caret/bounds canvas/mouse
+  wiring). A small shared helper would remove ~60 duplicated lines and
+  is a good candidate alongside the overdue `view.rs` split.
+- Still no caret blink and no horizontal scroll when the text is wider
+  than the field; a long search query can push the caret past the
+  clipped edge.
+- Hit-testing and caret placement both rely on `window.text_style()`
+  matching the rendered `StyledText`; keep them in sync if a custom
+  font/size is ever introduced.
+- `view.rs` is now ~4400 lines and growing; the split remains overdue.
+
+### Open loops
+
+- Extract the shared editable-area renderer.
+- Caret blink; in-field horizontal scroll / keep-caret-visible;
+  double-click word selection.
+- Apply `TextEdit` to Cmd/Ctrl+G go-to-row when that lands.
+- Carried over: compound filters, filter chips, split `view.rs`, cap /
+  group large archives, lazy-extraction cancellation, per-tab
+  `search_task` / `copy_flash_generation`, panel resize/reorder, sort
+  (Milestone 3).
+
+### Next recommended task
+
+The overdue `view.rs` split is now the clear next step: it is ~4400
+lines, both text inputs duplicate a ~60-line editable-area renderer,
+and Milestone 3 (sort / column inspector) will add more UI. Extracting
+the editable input, the search options, and the filter bars into their
+own modules would land a meaningful refactor with the existing UI tests
+as the safety net. If refactoring is deferred, Cmd/Ctrl+G is the last
+small Milestone 2 navigation item, or Milestone 3 sort can start on the
+existing display→record mapping.
+
+## 2026-10-18 — Split view.rs into focused modules
+
+### Context
+
+`src/ui/view.rs` had grown to ~4,800 lines (the previous three handoff
+entries all flagged the split as overdue). This iteration lands the
+recommended refactor: extract the shared editable-text renderer, the
+search and filter bars, and the headless UI test suite. No behaviour
+changes and no state-ownership changes — every field still lives on
+`MainView`; the methods simply moved.
+
+### Implemented
+
+New modules:
+
+- `src/ui/input.rs` (~116 lines): `text_index_at_point`,
+  `text_caret_x`, `shape_input_line`, and `editable_text_area` — the
+  shared `StyledText` + selection-highlight + caret + bounds-recording
+  `canvas` renderer. This removes the ~60-line duplication between the
+  two bars.
+- `src/ui/view/search.rs` (~537 lines): the search half of
+  `impl MainView` (`open_search` … `search_mouse_up`,
+  `render_search_bar`, `search_status_text`) plus `search_column_label`.
+- `src/ui/view/filter.rs` (~320 lines): the filter half of
+  `impl MainView` (`open_filter` … `filter_mouse_up`,
+  `render_filter_bar`, `filter_status_text`).
+- `src/ui/view/tests.rs` (~1,605 lines): the `#[cfg(test)]` UI suite,
+  now declared as `#[cfg(test)] mod tests;` from `view.rs`.
+
+`view.rs` is now ~2,259 lines (down from ~4,795) and keeps the
+`MainView` state, multi-document/tab lifecycle, open orchestration,
+toolbar / tab-bar / file-panel / status / grid rendering, keyboard
+actions, clipboard, drag auto-scroll, archive picker, and `Render`.
+
+Mechanics: methods moved into child modules as `pub(super)` inherent
+methods. `view::search` / `view::filter` / `view::tests` can access
+`MainView`'s private fields because they are descendants of `view`;
+`pub(super)` makes the moved methods callable from `view` and
+`view::tests`. `input` is a sibling module under `ui` used by both bars.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 229 passed (72 lib + 93 binary + 64
+  integration), 0 failed, 2 ignored. Identical to before the split.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
+  rows, ~354 ms.
+- `./target/release/anvil` — launches and stays alive for 5 s with no
+  panic.
+
+### Tests added / changed
+
+None. The suite was moved verbatim; only the test module's path changed
+(`src/ui/view/tests.rs`). The existing 229 tests are the refactor's
+safety net and all still pass.
+
+### Roadmap changes
+
+- No feature checkboxes moved. Updated the UI-test path reference in the
+  Milestone 2 tests list to `src/ui/view/tests.rs`.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`:
+  - Repository tree now shows `ui/input.rs` and the
+    `ui/view/{search,filter,tests}.rs` submodules.
+  - "Editable text inputs" section describes the shared
+    `input::editable_text_area` instead of two duplicated renderers.
+  - The `view.rs` technical-debt bullet records the split and the
+    reduced size; further extraction is now optional/lower priority.
+  - Testing section points at `src/ui/view/tests.rs`.
+- `README.md`: module tree updated for the new files.
+
+### Issues / technical debt discovered
+
+- `MainView` still owns `DocumentSnapshot`, the tab lifecycle, open
+  orchestration, and all the chrome rendering; `view.rs` at ~2,259 lines
+  is now manageable but not minimal. A later `view::documents` and
+  `view::chrome` extraction is possible but no longer urgent.
+- All state still lives on one large `MainView` struct (~160 lines of
+  fields). Splitting the modules did not (and should not, without an
+  ADR) change ownership.
+- `use super::*;` in the child modules pulls in the parent's imports;
+  it works but is broad. If the modules grow further, switch to explicit
+  imports to make dependencies visible.
+- Two architecture consultations for this refactor failed with harness
+  errors (`malformed_response` / `provider_incomplete`); the split was
+  planned and executed locally, with the compiler and the 229-test suite
+  as the verification surface.
+
+### Open loops
+
+- Optional: extract `view::documents` (tab/file-panel model) and
+  `view::chrome` (toolbar/status) if the file grows again.
+- Caret blink; in-field horizontal scroll / keep-caret-visible;
+  double-click word selection.
+- Apply `TextEdit` to Cmd/Ctrl+G go-to-row when that lands.
+- Carried over: compound filters, filter chips, cap / group large
+  archives, lazy-extraction cancellation, per-tab `search_task` /
+  `copy_flash_generation`, panel resize/reorder, sort (Milestone 3).
+
+### Next recommended task
+
+The refactor debt that blocked Milestone 3 is now cleared. The natural
+next step is **Milestone 3 sort / type inference / column inspector**,
+starting with the data-side `query::sort` + `schema::infer` modules
+(GPUI-free and unit-testable) and then a header-click sort UI on top of
+the existing display→record mapping. If a smaller slice is preferred,
+Cmd/Ctrl+G remains the last unchecked Milestone 2 navigation item.
+
+## 2026-10-19 — Milestone 3: type inference + sortable grid
+
+### Context
+
+Milestone 3 opens with a sortable grid driven by cheap column
+metadata. This iteration lands the data-side foundation plus the
+end-to-end UI: heuristic type inference, a keyed sort permutation, and
+header-click sorting that composes with the existing filter. It also
+resolves the header-click conflict with the previous slice's search
+column scope.
+
+### Implemented
+
+Data side:
+
+- `src/schema.rs` (new): `ColumnType` (Integer / Float / Boolean /
+  Text / Empty), `ColumnProfile { name, column_type, sampled_rows,
+  non_empty, numeric_fraction }`, and `infer(doc) -> Vec<ColumnProfile>`.
+  Samples up to `INFER_SAMPLE_ROWS` (2048) per column, treating a
+  column as numeric once `numeric_fraction >= 0.9`.
+- `src/query/sort.rs` (new): `SortOrder`, `SortKind`, `SortSpec`, and
+  `apply(doc, rows, spec) -> Vec<u64>`. Decodes one key per row, sorts
+  a stable index permutation with `f64::total_cmp` for numeric and
+  case-insensitive trimmed bytes for text, and always places empty /
+  non-numeric values last. `rows` is the supplied view, so sorting
+  composes with filtering.
+- `src/lib.rs` re-exports `infer_schema` / `ColumnProfile` /
+  `ColumnType` and `sort_rows` / `SortKind` / `SortOrder` / `SortSpec`.
+
+UI (`src/ui/view.rs`, `src/ui/grid.rs`, `src/ui/view/filter.rs`):
+
+- Per-tab `sort_spec` / `sort_rows` / `sort_generation` on
+  `DocumentSnapshot` and `MainView` (plus `sort_task`), mirrored
+  through `snapshot_active` / `load_active` / `clear_live_per_document`.
+- `view_rows()` returns the sorted permutation when active, else the
+  filtered set, else `None`; `render_grid`, `move_selection`, and
+  `move_cell_selection` all read it, so navigation and rendering agree.
+- `cycle_sort(column)` cycles none → ascending → descending → none;
+  `kick_sort` runs `infer_schema` + `sort_rows` on the background
+  executor with a generation guard. The filter task calls `kick_sort`
+  after installing new rows, and `clear_filter` re-sorts the full set.
+- `grid::render_header` now passes the `MouseDownEvent` to the click
+  callback and draws a ▲ / ▼ arrow on the sorted column. A plain click
+  cycles the sort; **Alt/Option-click** toggles the search column
+  scope (previously a plain click did that). The status bar shows
+  `sorted by <column> ▲`.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 249 passed (90 lib + 95 binary + 64
+  integration), 0 failed, 3 ignored. Was 229.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `cargo test --release --test core -- --ignored measure_sort --nocapture`
+  — **1,000,000 rows sorted by `amount` in 126 ms** (budget 3 s), and
+  inference printed `id`/`user_id` Integer, `amount`/`risk_score`
+  Float, `is_verified` Boolean, the rest Text.
+- `anvil --probe fixtures/large.csv` — 1,000,000 rows, ~140 ms.
+- `anvil` launches and stays alive 5 s with no panic; sort UI behaviour
+  is covered by headless tests.
+
+### Tests added / changed
+
+- `src/schema.rs`: 9 unit tests (integer, mixed int/float, boolean,
+  text, empty, the 0.9 threshold on both sides, header names,
+  all-empty column).
+- `src/query/sort.rs`: 9 unit tests (numeric vs lexicographic,
+  ascending/descending, case-insensitive text, empties last in both
+  directions, non-numeric last, filter composition, stability, empty
+  input).
+- `src/ui/view/tests.rs`: `header_click_cycles_sort` (real header
+  click through the debug selector, asserting the permutation after
+  each of the three clicks) and `sort_composes_with_filter` (filter to
+  US rows, sort by `amount` asc then desc). Renamed the previous
+  `header_click_toggles_search_column` to
+  `alt_header_click_toggles_search_column` and made it Alt-click.
+- `tests/core.rs`: ignored `measure_sort_large_fixture` throughput +
+  inference-label test.
+
+### Roadmap changes
+
+- Milestone 3 → Sorting: all six tasks ticked (126 ms result noted).
+- Milestone 3 → Type inference: marked `[~]` — sampling inference with
+  confidence is done, but richer types and once-per-open caching are
+  follow-ups.
+- Milestone 3 → Tests: inference and sort test lines ticked.
+- Dependencies: `ordered-float` not needed (`f64::total_cmp`);
+  `hashbrown` still planned for the inspector.
+- Acceptance criteria updated: sort budget met, inference partially
+  met, inspector outstanding.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: repository tree gained `schema.rs` and
+  `query/sort.rs`; "current" now lists `query::sort` and `schema::infer`
+  and the planned list keeps only `schema::stats` + diagnostics;
+  primary-state table gained the four sort fields; Performance records
+  the 126 ms sort and inferred labels; Testing counts and rows updated
+  (UI regression tests 48 → 50); Functional gaps and Planned Evolution
+  rewritten for landed sort / partial inference.
+- `README.md`: module tree gained `schema.rs` and `query/sort.rs`; test
+  count 93 → 95 binary.
+
+### Issues / technical debt discovered
+
+- Type inference runs inside the sort task, not once per open, so it is
+  recomputed on each sort request. Bounded to 2048 rows so it is cheap,
+  but the column inspector wants cached profiles on the document.
+- The header-click mapping changed: sort is the plain click and the
+  search column scope moved to Alt/Option-click. This is a behaviour
+  change to the Milestone 2 search slice; the roadmap and tests were
+  updated together.
+- `sort_rows` holds a full `Vec<u64>` permutation plus a transient
+  `Vec<Key>` (one allocation per text key). For text columns on 1M rows
+  this is the heaviest path; numeric keys are 8 bytes. Not measured for
+  text yet.
+- Sorting is per tab and survives switching, but is not persisted across
+  app restarts (no config layer yet).
+- The header arrow is rendered into the header label string, so it
+  contributes to the auto column width; acceptable but worth revisiting
+  with real text measurement.
+
+### Open loops
+
+- Column inspector (`schema::stats`, right-side panel) and the richer
+  type set (date / datetime / UUID / email / URL).
+- Cache inferred profiles on the document at open time.
+- Text-column sort memory/throughput measurement.
+- Carried over: compound filters, filter chips, cap / group large
+  archives, lazy-extraction cancellation, per-tab `search_task` /
+  `copy_flash_generation`, panel resize/reorder, diagnostics
+  (Milestone 4).
+
+### Next recommended task
+
+Continue Milestone 3 with the **column inspector**: add
+`anvil_core::schema::stats` (cardinality with the exact/approximate
+distinction, min/max, longest/shortest, sample values) computed on the
+background executor, cache profiles on the document at open, and add a
+right-side panel showing the selected column's metrics. Alternatively,
+flesh out type inference (richer types + once-per-open caching) first,
+which the inspector depends on.
+
+## 2026-10-20 — Keep the active search match on screen (both axes)
+
+### Context
+
+Navigating search matches (Enter / Shift+Enter, F3 / Shift+F3) scrolled
+the list vertically but never horizontally, so a match in a column to
+the right of the current viewport stayed off-screen. Two related bugs
+surfaced while fixing it: the vertical scroll used the raw record index
+as a list display position (wrong once a filter or sort reorders the
+rows), and arrow / Tab navigation could walk the selection cursor off
+the horizontal edge without scrolling.
+
+### Implemented
+
+`src/ui/view.rs`:
+
+- `ensure_column_visible(column, cx)` scrolls `scroll_x` so the column
+  is fully inside `[scroll_x, scroll_x + viewport_w]`, with a small
+  margin and a clamp to the content width. It reuses the same
+  `ColumnLayout` offsets the grid renders with.
+- `display_position(record)` maps a record index to its 0-based display
+  position through `view_rows()` (sorted permutation or filtered set),
+  falling back to identity when there is no filter/sort.
+- `move_selection` and `move_cell_selection` now call
+  `ensure_column_visible` after moving, so arrow / Tab navigation keeps
+  the cursor column on screen.
+
+`src/ui/view/search.rs`:
+
+- `first_match_column(row)` returns the scoped column when set,
+  otherwise the first column whose cell contains the needle (using
+  `find_ranges` with the current case-sensitivity), otherwise `None`.
+- `jump_to_active_match` now lands on that column, scrolls vertically
+  by `display_position(row)` instead of the raw record index, and
+  scrolls horizontally by `ensure_column_visible(col)`.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 251 passed (90 lib + 97 binary + 64
+  integration), 0 failed, 3 ignored. Was 249.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe fixtures/large.csv` — ~354 ms.
+- `anvil` launches and stays alive 5 s with no panic; the new behaviour
+  is covered by headless tests.
+
+### Tests added / changed
+
+- `src/ui/view/tests.rs`:
+  - `search_jump_scrolls_horizontally_to_match` — a 40-column fixture
+    with `needle` only in the last column; after a whole-record search
+    and a jump with a forced 400 px viewport, the cursor lands on
+    column 39, `scroll_x > 0`, and the column is fully visible.
+  - `display_position_maps_through_view_rows` — identity without a
+    filter, remapped with a filtered set, and a fallback for a record
+    not present.
+- Added a shared `wide_document(cols, needle_col)` test helper.
+
+### Roadmap changes
+
+- Milestone 2 → Search: corrected the header-click wording to
+  Alt/Option-click and added a checked task for match
+  scroll-into-view (vertical display-order mapping + horizontal
+  column visibility + arrow/Tab scroll).
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the search section documents `display_position`,
+  `ensure_column_visible`, and `first_match_column`; UI regression
+  count 50 → 52; the UI/search table row mentions the far-right scroll
+  test.
+- `README.md`: binary test count 95 → 97.
+
+### Issues / technical debt discovered
+
+- `display_position` is a linear scan of `view_rows` per match jump.
+  For a 1M-row filtered/sorted set this is a few milliseconds per jump,
+  acceptable for keypress navigation but worth revisiting if it ever
+  shows up in a profile (the filtered set is sorted by record so it
+  could binary-search; the sort permutation is not).
+- A column wider than the viewport can never be fully shown; the clamp
+  picks the best available position. `MAX_AUTO_WIDTH` (360 px) keeps
+  this unlikely at normal window sizes.
+- The horizontal margin is a fixed `CELL_PAD_X * 2`; there is no
+  animated scroll or easing (the grid jumps directly), matching the
+  existing vertical jump behaviour.
+
+### Open loops
+
+- Cache inferred profiles on the document at open; column inspector
+  (`schema::stats`).
+- Text-column sort memory/throughput measurement.
+- Carried over: compound filters, filter chips, cap / group large
+  archives, lazy-extraction cancellation, per-tab `search_task` /
+  `copy_flash_generation`, panel resize/reorder, diagnostics
+  (Milestone 4).
+
+### Next recommended task
+
+Continue Milestone 3 with the **column inspector** (`schema::stats` +
+right-side panel), which also motivates caching inferred profiles on
+the document at open. Alternatively the small `display_position`
+binary-search optimisation can ride along with a future filtered-view
+refactor.
+
+## 2026-10-21 — Fix: scroll the whole target cell into view
+
+### Context
+
+The previous iteration made search-match jumps scroll horizontally to
+the matching column, but the user reported that only the part of the
+cell around the matching text came into view. The root cause turned out
+to be the grid's viewport calculation, not the scroll target.
+
+### Root cause
+
+`render_grid` computed
+
+```
+viewport_w = window.viewport_size().width - ROW_NUMBER_WIDTH
+```
+
+but the grid body shares a flex **row** with the file-manager panel
+(220 px, open by default). The columns area is therefore
+`window_width - ROW_NUMBER_WIDTH - FILE_PANEL_WIDTH`. Overstating the
+viewport by 220 px meant `ensure_column_visible` scrolled too little and
+left the right side of the target column clipped behind the panel. The
+same stale value fed `ColumnLayout::visible` and `render_h_scrollbar`,
+so the header rendered extra clipped columns and the scrollbar thumb
+was slightly wrong.
+
+### Implemented
+
+- `src/ui/view.rs`: `render_grid` now subtracts
+  `theme::FILE_PANEL_WIDTH` when `file_panel_open && !documents.is_empty()`,
+  so `viewport_w` reflects the real columns area. This is the single
+  value used by `scroll_horizontal`, `ensure_column_visible`,
+  `ColumnLayout::visible`, and `render_h_scrollbar`.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 252 passed (90 lib + 98 binary + 64
+  integration), 0 failed, 3 ignored. Was 251.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe fixtures/large.csv` — ~349 ms.
+- `anvil` launches and stays alive 5 s with no panic.
+
+### Tests added / changed
+
+- `viewport_width_excludes_file_panel` — reads the actual window width
+  and asserts `viewport_w == window - row-gutter - panel`. Fails with
+  the old formula.
+- `search_jump_scrolls_horizontally_to_match` was made faithful: it now
+  uses a 300-column document and the real (panel-aware) viewport instead
+  of forcing `viewport_w = 400`, and asserts the **full column
+  rectangle** (`start .. start + width`) lies inside
+  `[scroll_x, scroll_x + viewport_w]`.
+
+### Roadmap changes
+
+- Milestone 2 → Search: the scroll-into-view task now notes the
+  file-panel viewport inset.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the horizontal-scrolling section documents the
+  `viewport_w` computation (window − gutter − panel) and that it is the
+  single source for scroll, visibility, and the scrollbar; UI
+  regression count 52 → 53.
+- `README.md`: binary test count 97 → 98.
+
+### Issues / technical debt discovered
+
+- `viewport_w` is still derived from the window rather than measured
+  from the grid element's own bounds. This is correct today because the
+  only horizontal inset is the file panel, but if another sibling
+  (a future right-side inspector) is added, the subtraction must be
+  extended. Capturing the grid's bounds via a `canvas` overlay would be
+  more robust.
+- The pattern of computing layout widths from `window.viewport_size()`
+  in `render_grid` runs before the panel is decided in `render`; the
+  check duplicates the panel-shown condition. Keep the two in sync.
+
+### Open loops
+
+- Cache inferred profiles on the document at open; column inspector
+  (`schema::stats`).
+- Text-column sort memory/throughput measurement.
+- Carried over: compound filters, filter chips, cap / group large
+  archives, lazy-extraction cancellation, per-tab `search_task` /
+  `copy_flash_generation`, panel resize/reorder, diagnostics
+  (Milestone 4).
+
+### Next recommended task
+
+Continue Milestone 3 with the **column inspector** (`schema::stats` +
+right-side panel). When that panel lands, switch `viewport_w` to the
+grid element's measured bounds so the horizontal inset is no longer a
+hand-maintained subtraction.
+
+## 2026-10-22 — Resolve debt: measure the grid viewport instead of subtracting insets
+
+### Context
+
+The 2026-10-21 fix computed `viewport_w` from the window width minus
+the row-number gutter and the file panel. That was correct but fragile:
+it hard-coded the only current horizontal inset, and the panel-shown
+condition was duplicated between `render_grid` and `render`. This
+iteration resolves that debt by deriving the viewport from the grid's
+own measured bounds.
+
+### Implemented
+
+- `src/ui/view.rs`, `render_grid`: `viewport_w` now comes from
+  `self.list_bounds` (the grid list area's window bounds, already
+  recorded by the auto-scroll overlay `canvas`) minus
+  `ROW_NUMBER_WIDTH`, with a fallback to the window width on the first
+  frame before any bounds exist. No panel/sibling arithmetic remains.
+- The overlay canvas now calls `cx.notify()` when the recorded bounds
+  change (guarded by inequality, so it cannot loop), so the viewport
+  settles within a frame after a window resize or a panel toggle.
+
+The file panel itself still checks `file_panel_open && !documents.is_empty()`
+to decide whether to render — that is its own concern and is not
+duplicated in the viewport calculation anymore.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 252 passed (90 lib + 98 binary + 64
+  integration), 0 failed, 3 ignored.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe fixtures/large.csv` — ~133 ms.
+- `anvil` launches and stays alive 5 s with no panic.
+
+### Tests added / changed
+
+- `viewport_width_excludes_file_panel` now also hides the panel and
+  asserts the measured viewport widens to `window − gutter`, proving
+  the bounds-derived path tracks layout changes (it needs one extra
+  rendered frame to settle, which the test documents).
+
+### Roadmap changes
+
+None.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the horizontal-scrolling section now describes the
+  measured-bounds viewport, the `cx.notify()` on bounds change, and the
+  first-frame fallback, replacing the hand-maintained inset note.
+
+### Issues / technical debt discovered
+
+- `list_bounds` was previously only used for drag auto-scroll; it now
+  also feeds the viewport. The two uses are compatible (both want the
+  scroll area's window bounds) but the name no longer says "auto
+  scroll". If a third consumer appears, rename it to `grid_bounds`.
+- The viewport is one frame behind a layout change by construction; the
+  notify closes the gap. There is no guard against a pathological
+  bounds oscillation, but pixel bounds are stable in practice.
+
+### Open loops
+
+- Cache inferred profiles on the document at open; column inspector
+  (`schema::stats`).
+- Text-column sort memory/throughput measurement.
+- Carried over: compound filters, filter chips, cap / group large
+  archives, lazy-extraction cancellation, per-tab `search_task` /
+  `copy_flash_generation`, panel resize/reorder, diagnostics
+  (Milestone 4).
+
+### Next recommended task
+
+Continue Milestone 3 with the **column inspector** (`schema::stats` +
+right-side panel). The viewport is now measured, so adding a right-side
+panel needs no changes to the horizontal scroll math.
+
+## 2026-10-23 — Rename `list_bounds` to `grid_bounds`
+
+### Implemented
+
+- `src/ui/view.rs`: renamed `MainView.list_bounds` to `grid_bounds` (all
+  6 uses) and updated its doc comment to state both consumers — drag
+  auto-scroll edge detection and the measured `viewport_w`.
+- `ARCHITECTURE.md`: state-table row, the drag auto-scroll section, and
+  the horizontal-scrolling section now use `grid_bounds`.
+
+Historical agent-log entries keep the old name, as they record what the
+field was called at the time.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 252 passed (90 lib + 98 binary + 64
+  integration), 0 failed, 3 ignored.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+
+### Next recommended task
+
+Unchanged: the Milestone 3 column inspector (`schema::stats` +
+right-side panel).
+
+## 2026-10-24 — Milestone 3: column inspector
+
+### Context
+
+Sorting and basic type inference landed earlier. This iteration adds the
+column inspector: a right-side panel showing the selected column's
+metrics, backed by a new data-side `schema::stats`. With the viewport
+now measured from the grid's `grid_bounds` (2026-10-22), the panel
+narrows the grid without any horizontal-scroll changes.
+
+### Implemented
+
+Data side (`src/schema/stats.rs`, new):
+
+- `ColumnStats` — name, inferred type, total/non-empty/empty rows,
+  distinct, duplicate count, min/max, longest/shortest, samples, and the
+  top-N frequent values.
+- `DistinctCount::{Exact, Approximate}` and `StatsOptions`
+  (`max_exact_distinct` 100k, `top_values` 10, `samples` 8).
+- Distinct is exact while the value set fits a `HashMap`; past the
+  threshold it switches to a dependency-free 1024-register HyperLogLog
+  with the small-range linear-counting correction, and drops the exact
+  set/map (so high-cardinality columns stay bounded).
+- `infer_column` exposed from `schema.rs`; `lib.rs` re-exports
+  `column_stats`, `ColumnStats`, `DistinctCount`, `StatsOptions`,
+  `ValueCount`.
+
+UI (`src/ui/view.rs`, `commands.rs`, `theme.rs`):
+
+- New global state: `inspector_open`, `inspector_column`,
+  `inspector_stats`, `inspector_generation`, `inspector_task`.
+- `Action::ToggleInspector` on Cmd/Ctrl+I and a toolbar **Inspect**
+  button; `toggle_inspector` opens/closed the panel.
+- `kick_inspector` runs `column_stats` on the background executor with a
+  generation guard and is a no-op when the selected column is unchanged
+  and stats are already present — so vertical navigation never rescans.
+  It is called on toggle, on tab switch/open, after every selection
+  move, and on cell click / drag release.
+- `load_active` invalidates cached stats so switching tabs rescans.
+- `render_inspector` builds the panel (header + `×`, scrollable body);
+  `render_column_stats` renders the metric rows, samples, and a
+  frequent-values list. `theme::INSPECTOR_WIDTH` is 320 px.
+- The panel is a `flex_shrink_0` sibling after the grid body, so the
+  measured grid narrows automatically.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 266 passed (99 lib + 103 binary + 64
+  integration), 0 failed, 3 ignored. Was 252.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe fixtures/large.csv` — ~351 ms.
+- `anvil` launches and stays alive 5 s with no panic; the panel is
+  rendered by the UI tests.
+
+### Tests added / changed
+
+- `src/schema/stats.rs`: 9 unit tests — counts/empties, distinct +
+  duplicates, numeric vs case-insensitive min/max, frequent ranking,
+  samples, the exact→approximate threshold, headerless naming,
+  non-numeric values, out-of-range column.
+- `src/ui/commands.rs`: `toggle_inspector_chord`,
+  `plain_i_is_not_toggle_inspector`.
+- `src/ui/view/tests.rs`: `cmd_i_toggles_inspector`,
+  `inspector_follows_selected_column`,
+  `inspector_reports_exact_distinct_and_frequencies`.
+
+### Roadmap changes
+
+- Milestone 3 → Column inspector: panel, metrics, frequent values, and
+  the exact/approximate distinction ticked; scoping stats to the
+  filtered/sorted view is a new unchecked follow-up.
+- Milestone 3 → Type inference: the "run once per open" note is relaxed
+  to optional (sort and inspector each compute it in their task).
+- Milestone 3 → Tests and acceptance criteria updated.
+- Dependencies: `hashbrown` not added (std `HashMap` + hand-rolled HLL).
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: repository tree gained `schema/stats.rs`; the
+  "current" section documents `schema::stats`; primary-state table
+  gained the five inspector fields; Planned Evolution gained a landed
+  "Column inspector" entry and the type-inference entry is updated;
+  testing counts/rows updated (UI regression 53 → 56); functional gaps
+  rewritten.
+- `README.md`: module tree and binary test count (98 → 103).
+
+### Issues / technical debt discovered
+
+- Inspector stats scan the whole document, not the filtered/sorted
+  view. That is a deliberate first cut; a view-scoped stats call would
+  take the `view_rows` permutation.
+- `ColumnStats` recomputes `infer_column` inside `stats`; with
+  sort also calling inference, the profiles are computed twice per
+  interaction. Caching them on the document at open is the follow-up
+  that removes both.
+- Frequent values are only available in exact mode (they need the
+  count map). Approximate-mode columns show no frequent list.
+- The panel is a fixed 320 px and cannot be resized or hidden by a
+  click on the column; the selection is what drives it.
+- The HLL estimate is uncalibrated beyond the small-range correction;
+  for very large cardinalities it is a rough estimate, which the UI
+  labels "approx".
+
+### Open loops
+
+- View-scoped inspector stats; cache inferred profiles at open.
+- Richer type classes (date / datetime / UUID / email / URL).
+- A generated-fixture stats assertion.
+- Carried over: compound filters, filter chips, cap / group large
+  archives, lazy-extraction cancellation, per-tab `search_task` /
+  `copy_flash_generation`, panel resize/reorder, diagnostics
+  (Milestone 4).
+
+### Next recommended task
+
+Milestone 3's headline features are now in place. The natural next step
+is **Milestone 4 (diagnostics and data quality)**: surface the existing
+`ParseWarning`s as a navigable list and jump the grid to the offending
+row, then inconsistent-width / unterminated-quote / duplicate-header
+navigation. If Milestone 3 polish is preferred, cache inferred profiles
+at open and scope inspector stats to the current view.
+
+## 2026-10-25 — Milestone 4: diagnostics panel + unterminated-quote index fix
+
+### Context
+
+Milestone 3 (sort, type inference, column inspector) had landed. The
+roadmap's next milestone is diagnostics and data quality, whose
+acceptance criterion is that opening `fixtures/malformed.csv` shows the
+warning count and lets the user click through to the offending row.
+The warnings already existed on `ParseMeta.warnings`; nothing surfaced
+them beyond a count. Verifying the data first exposed an off-by-one in
+the `UnterminatedQuote` warning's `record_index`.
+
+### Implemented
+
+- **`src/parser/indexing.rs`**: the `UnterminatedQuote` warning now
+  records the index of the partial record currently being walked
+  (`record_index`) instead of `record_index - 1`. The latter pointed at
+  the previous completed row whenever any earlier row had ended with a
+  newline; for `fixtures/malformed.csv` it reported record 0 instead of
+  record 1.
+- **`src/ui/view/diagnostics.rs`** (new): a right-side panel rendering
+  the active document's `ParseMeta.warnings`. Each row shows the warning
+  kind, the target row (`row N`, or `header`), and the note. Row
+  warnings are clickable and call `jump_to_warning`; header-level
+  warnings (`record_index == None`) are informational only.
+- `jump_to_warning(warning_index)`: moves the selection to the record
+  and scrolls the display order (sort-aware via `display_position`) to
+  the top. If the record is hidden by the active filter, it reports
+  `row N is hidden by the active filter` in the status bar and leaves
+  the cursor alone rather than silently scrolling to an unrelated row.
+  Keeps the cursor's current column.
+- **`src/ui/commands.rs`**: `Action::ToggleDiagnostics`, bound to
+  Cmd/Ctrl+D with the same alt/function guards as the other panel
+  chords.
+- **`src/ui/view.rs`**: `diagnostics_open: bool` (global, like the
+  inspector), `toggle_diagnostics`, the `run_action` arm, a toolbar
+  **Diagnostics** button, and the panel inserted as a `flex_shrink_0`
+  sibling of the grid. No background task or generation counter is
+  needed because warnings are immutable per document.
+- **`src/ui/theme.rs`**: `DIAGNOSTICS_WIDTH` (320 px).
+- **`README.md`**: test counts refreshed and the stale "Milestones 2–5"
+  not-yet-done list corrected (selection/clipboard/search/filter/sort/
+  inference/statistics are all implemented).
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 274 passed (99 lib + 110 binary + 65
+  integration), 0 failed, 3 ignored. Was 266 (99 + 103 + 64).
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe fixtures/large.csv` — 1,000,000 rows, 0 warnings,
+  363 ms.
+- `anvil --probe fixtures/malformed.csv` — 2 rows, 1 warning; the
+  fixed index now points at the partial record.
+- `anvil` launches and stays alive 6 s with no panic.
+
+### Tests added / changed
+
+- `tests/core.rs`: `unterminated_quote_index_points_at_the_partial_record`
+  (regression for the off-by-one).
+- `src/ui/commands.rs`: `toggle_diagnostics_chord`,
+  `plain_d_is_not_toggle_diagnostics`,
+  `alt_d_is_not_toggle_diagnostics`.
+- `src/ui/view/tests.rs`: `cmd_d_toggles_diagnostics`,
+  `diagnostics_navigation_moves_selection_to_warning_row`,
+  `diagnostics_navigation_refuses_a_filtered_out_row`,
+  `diagnostics_navigation_reports_header_warning`, plus a
+  `warning_document()` helper.
+
+### Roadmap changes
+
+- Milestone 4 → In-record diagnostics: inconsistent-row-width and
+  unterminated-quote navigation ticked; the diagnostics panel and
+  jump-to-row ticked; empty/duplicate header navigation marked
+  partially done (listed, not navigable, because they have no row);
+  very-long-record emission left unchecked.
+- Milestone 4 → Tests: diagnostics tests ticked.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: repository tree gained `view/diagnostics.rs`; the
+  "current" list and primary-state table document `diagnostics_open`;
+  the testing counts/rows and functional gaps were updated; the
+  diagnostics planned-evolution entry now records it as landed and
+  notes the index fix.
+
+### Issues / technical debt discovered
+
+- The `UnterminatedQuote` index bug was latent because no caller
+  consumed `record_index`; it is now covered by a regression test.
+- `WarningKind::VeryLongRecord` is still never emitted; a threshold
+  policy is needed. Explicitly deferred.
+- The panel renders every warning in a scrollable column rather than a
+  virtualized list; fine for the small warning counts we see, and a
+  `uniform_list` swap is a later optimisation if a pathological file
+  produces thousands of warnings.
+- Warnings carry no column information, so navigation lands on the
+  cursor's current column rather than the offending cell.
+- Header warnings are only partially actionable: listed but not
+  navigable.
+
+### Open loops
+
+- Very-long-record emission; per-row grid highlighting / gutter marker
+  for warnings; warning grouping/filtering by kind; next/previous
+  warning keyboard cycling.
+- Carried over: compound filters, filter chips, cache inferred
+  profiles at open, view-scoped inspector stats, richer type classes,
+  cap / group large archives, lazy-extraction cancellation,
+  panel resize/reorder.
+
+### Next recommended task
+
+Continue Milestone 4 with **encoding and archive diagnostics** (surface
+non-UTF-8 cells and skipped/rejected archive entries), or emit
+`VeryLongRecord` so the panel has a fourth row-level warning to
+navigate. Either is a small, self-contained slice. Alternatively,
+per-row grid highlighting of warnings would make the existing panel
+more useful without changing the data model.
+
+## 2026-10-26 — Milestone 4: very-long-record warning + grid warning gutter
+
+### Context
+
+The previous iteration landed the diagnostics panel and row navigation.
+This iteration completes the remaining In-record diagnostics task by
+emitting the defined-but-unused `WarningKind::VeryLongRecord`, and makes
+navigation land on a visibly flagged row by marking warning rows in the
+grid gutter. Both feed the existing panel, so no new UI surface was
+needed.
+
+### Implemented
+
+- **`src/parser/indexing.rs`**: after the walk finishes, a post pass
+  over the completed offset table flags any record longer than
+  `MAX_RECORD_BYTES` (1 MiB, including its trailing newline) with a
+  `VeryLongRecord` warning carrying the record index and the byte
+  length. The walker itself is unchanged, so no new per-byte cost.
+- **`src/ui/grid.rs`**: `RowContext` gained `warning_rows: &[u64]` (a
+  sorted, deduplicated slice). `render_row` binary-searches it and, for
+  a flagged row, prefixes the row-number gutter with `⚠` and colours it
+  `theme::WARN`. The pure `is_warning_row` helper has a unit test.
+- **`src/ui/view.rs`**: `render_grid` builds the sorted warning-row set
+  once per render pass from the active document's warnings and passes
+  it into every `RowContext`.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 277 passed (99 lib + 111 binary + 67
+  integration), 0 failed, 3 ignored. Was 274 (99 + 110 + 65).
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe` on a generated 2 MiB-record CSV reports
+  `1 warnings — [very long record] record is 2097155 bytes (limit
+  1048576)`.
+- `anvil --probe fixtures/large.csv` — 1,000,000 rows, 0 warnings (no
+  false positives on ordinary rows).
+
+### Tests added / changed
+
+- `tests/core.rs`: `very_long_record_warns` (2 MiB record at index 1),
+  `ordinary_records_do_not_warn_as_very_long` (a 1M-character cell stays
+  under the limit).
+- `src/ui/grid.rs`: `is_warning_row_uses_sorted_membership`; the three
+  existing `RowContext` literals gained `warning_rows: &[]`.
+
+### Roadmap changes
+
+- Milestone 4 → In-record diagnostics: very-long-record detection ticked,
+  and the diagnostics-panel note now mentions the `⚠` gutter. Only
+  header-level navigation remains partial (no row to jump to).
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the diagnostics-data section now describes
+  `VeryLongRecord`; the grid "Row retrieval" step and the `ui::grid`
+  current-modules bullet mention the warning gutter and
+  `RowContext::warning_rows`; the diagnostics planned-evolution entry
+  records the emission and gutter as landed; test counts updated.
+
+### Issues / technical debt discovered
+
+- The 1 MiB threshold is a fixed constant, not configurable. It
+  deliberately sits above the existing 1M-character-cell edge case so
+  that test and typical large cells do not warn; a future config file
+  could expose it.
+- `warning_rows` is rebuilt every `render_grid` (O(warnings) +
+  sort). Negligible for realistic warning counts; if a pathological
+  file produced hundreds of thousands of warnings it would be worth
+  caching on `GridModel`.
+- The gutter marker does not distinguish warning kinds; all warnings
+  look the same in the grid. The panel carries the kind.
+
+### Open loops
+
+- Warning grouping/filtering by kind; next/previous warning keyboard
+  cycling; distinguishing warning kinds in the gutter.
+- Carried over: empty/duplicate header navigation, encoding and archive
+  diagnostics, compound filters, filter chips, cache inferred profiles
+  at open, view-scoped inspector stats, richer type classes, cap/group
+  large archives, lazy-extraction cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Milestone 4's encoding diagnostics are the next unchecked group:
+expose a per-cell UTF-8 validity flag and flag columns with non-UTF-8
+cells. Archive diagnostics (surface skipped/rejected entries in the
+picker) is a similarly self-contained alternative. Either is a small
+vertical slice.
+
+## 2026-10-27 — Technical debt: cached warning index, kind-aware gutter, IndexOptions, dead-code cleanup
+
+### Context
+
+Before continuing Milestone 4 (encoding/archive diagnostics), this
+iteration cleared the debt recorded by the previous two diagnostics
+iterations plus the stale error-variant note in ARCHITECTURE.
+
+### Implemented
+
+- **`GridModel` warning cache (`src/ui/grid.rs`)**: `GridModel` now
+  carries `warnings: Arc<[(u64, WarningKind)]>`, built once at open by
+  `cache_warning_rows` (sorted by record, severity-ranked, deduplicated
+  to the most informative kind per row). `render_grid` no longer rebuilds
+  that index every render pass; it clones the `Arc` and passes
+  `model.warnings.as_ref()`.
+- **Kind-aware gutter**: `RowContext::warning_rows` is now
+  `&[(u64, WarningKind)]`; `warning_kind_for` replaces `is_warning_row`.
+  The row-number gutter shows `✖` in the new `theme::ERROR` for an
+  unterminated quote and `⚠` in `theme::WARN` for other warnings, so
+  warning kinds are distinguishable in the grid.
+- **Configurable record-length threshold (`src/parser/indexing.rs`)**:
+  added `IndexOptions { max_record_bytes }` (default
+  `DEFAULT_MAX_RECORD_BYTES` = 1 MiB) with `build_with` / `parse_with`
+  variants; `build` / `parse` remain default wrappers. `lib.rs`
+  re-exports `IndexOptions`, `parse_opened_with`, and
+  `DEFAULT_MAX_RECORD_BYTES`. Tests can now exercise the threshold on a
+  tiny fixture instead of allocating 2 MiB.
+- **Dead code removed (`src/error.rs`)**: dropped the never-constructed
+  `AnvilError::NotAZip`, `AmbiguousArchive`, and `LooksBinary` variants
+  and the now-unused `PathBuf` import.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 279 passed (99 lib + 112 binary + 68
+  integration), 0 failed, 3 ignored. Was 277.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe` on the 2 MiB-record CSV still reports
+  `1 warnings — [very long record] record is 2097155 bytes (limit
+  1048576)`; `fixtures/large.csv` reports 0 warnings.
+
+### Tests added / changed
+
+- `src/ui/grid.rs`: `warning_kind_for_uses_sorted_membership_and_severity`
+  and `cache_warning_rows_keeps_the_most_severe_kind_per_record`;
+  the three `RowContext` literals updated to the new slice type.
+- `tests/core.rs`: `very_long_record_threshold_is_configurable` uses
+  `parse_opened_with` with a 3/4-byte limit on a four-byte fixture;
+  imports gained `parse_opened_with` / `IndexOptions`.
+
+### Roadmap changes
+
+None — this was debt, not a roadmap task.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: error-surface table drops the three dead variants;
+  "User-visible errors" and "Diagnostics data" describe the panel,
+  kind-aware gutter, and cached `(record, WarningKind)` index; "Row
+  boundary indexing" documents `IndexOptions`; test counts updated; the
+  architectural-debt list no longer mentions the dead variants.
+- `README.md`: test counts refreshed.
+
+### Issues / technical debt discovered
+
+- A delegation consult was attempted twice for the multi-file change;
+  the first failed with a provider timeout and the second with a
+  client-side invalid-line-range error. Per policy neither was
+  auto-retried; correctness was established with the compiler and the
+  full test suite. The design had already been settled by the prior
+  architecture consultation (cache derived data on `GridModel`, mirror
+  `ColumnLayout`).
+- Severity ordering (`UnterminatedQuote > VeryLongRecord >
+  InconsistentColumnCount`) is a heuristic; the panel still exposes the
+  full per-row warning list, so no information is lost.
+- `IndexOptions` currently has a single field. It is a small, honest
+  seam for the Milestone 5 config file rather than a general options
+  bag.
+
+### Open loops
+
+- Carried over: empty/duplicate header navigation, encoding and archive
+  diagnostics, compound filters, filter chips, cache inferred profiles
+  at open, view-scoped inspector stats, richer type classes, cap/group
+  large archives, lazy-extraction cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Move on to Milestone 4 **encoding diagnostics**: expose a per-cell
+UTF-8 validity flag and flag columns with non-UTF-8 cells. Archive
+diagnostics (surface skipped/rejected entries in the picker) is the
+self-contained alternative.
+
+## 2026-10-28 — Milestone 4: encoding diagnostics (data side)
+
+### Context
+
+With the previous diagnostics iterations done, this begins the
+Milestone 4 encoding-diagnostics group. Non-UTF-8 cells were silently
+invisible: `Cell::as_str` / `into_string` fall back to empty/lossy
+output, so an invalid cell rendered exactly like an empty one and a
+leading UTF-8 BOM stayed glued to the first header cell.
+
+### Implemented
+
+- **`Cell::is_utf8` (`src/parser/mod.rs`)**: the per-cell validity flag
+  the encoding scan uses; `as_str` still falls back to `""` so the grid
+  behaviour is unchanged.
+- **`src/encoding.rs` (new)**: `scan(doc) -> EncodingReport`, one pass
+  over the data records using the existing `Cells` iterator. It counts
+  non-UTF-8 cells per column, records the total, detects a leading
+  `EF BB BF` BOM, and reports `records_scanned`. Only columns with at
+  least one invalid cell are included, each with a header name (or
+  `col N`). `ColumnEncoding` / `EncodingReport` and `scan_encoding` are
+  re-exported from `anvil_core`.
+- **`src/main.rs`**: `--probe` now prints the BOM flag and the invalid
+  UTF-8 total with up to five offending columns, giving the feature a
+  headless harness.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 285 passed (103 lib + 112 binary + 70
+  integration), 0 failed, 3 ignored. Was 279.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `anvil --probe /tmp/enc.csv` (two `0xff`/`0xfe` cells) reports
+  `invalid utf-8: 2 cell(s)` and `[b] 2 invalid cell(s)`;
+  `fixtures/large.csv` reports 0.
+
+### Tests added / changed
+
+- `src/encoding.rs`: 4 unit tests — clean UTF-8, per-column counting
+  (`0xff`/`0xfe`), an invalid byte in the header (not counted) versus a
+  headerless data column (reported as `col 0`), and BOM detection.
+- `tests/core.rs`: `cell_is_utf8_reports_invalid_bytes` and
+  `encoding_scan_flags_invalid_column`.
+
+### Roadmap changes
+
+- Milestone 4 → Encoding diagnostics: per-cell flag and the data-side
+  scan ticked; BOM detection marked partial (reported by the API and
+  probe, not the GUI); the GUI flagging task remains.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: repository tree gained `src/encoding.rs`; the
+  current-modules list documents `encoding`; the testing section gained
+  an encoding table row and the 4 unit-test count; the functional-gap
+  note about non-UTF-8 cells now reflects `Cell::is_utf8` /
+  `encoding::scan`.
+- `README.md`: data-side test count updated (68 → 70).
+
+### Issues / technical debt discovered
+
+- `encoding::scan` visits every data record and is O(file length); it
+  must run on the background executor when wired to the UI. It is not
+  wired yet.
+- The scanner counts cells but does not record which record indexes are
+  affected, so per-cell navigation is not possible yet. That may or may
+  not be wanted: the roadmap asks for column-level flagging.
+- The BOM is detected but not stripped by the parser, so the first
+  header cell still contains it. Stripping is a parser change (and would
+  shift `header_range`); deferred until the UI reports BOMs.
+
+### Open loops
+
+- Encoding UI: flag columns with non-UTF-8 cells (grid header marker or
+  diagnostics-panel entries), running `encoding::scan` on the background
+  executor with a generation guard.
+- Carried over: empty/duplicate header navigation, archive diagnostics,
+  compound filters, filter chips, cache inferred profiles at open,
+  view-scoped inspector stats, richer type classes, cap/group large
+  archives, lazy-extraction cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Wire the encoding report into the UI: when the diagnostics panel opens,
+run `encoding::scan` on the background executor (generation-guarded, like
+`schema::stats`) and list each affected column, plus a BOM notice. A
+column-header marker is a smaller alternative if the panel is preferred
+to stay synchronous.
+
+## 2026-10-29 — Milestone 4: encoding diagnostics wired into the panel
+
+### Context
+
+The previous iteration added the data-side `encoding::scan` and
+`Cell::is_utf8` but nothing in the GUI used them. This iteration wires
+the report into the diagnostics panel, completing the Milestone 4
+encoding-diagnostics group.
+
+### Implemented
+
+- **`MainView` state (`src/ui/view.rs`)**: `encoding_report:
+  Option<Arc<EncodingReport>>`, `encoding_generation: u64`,
+  `encoding_task: Option<Task<()>>`.
+- **`invalidate_encoding`** is called from `load_active`, so switching
+  tabs / opening a document drops a stale report and discards an
+  in-flight scan via the generation guard.
+- **`kick_encoding`** runs `encoding::scan` on
+  `cx.background_executor` with a generation guard, mirroring
+  `kick_inspector` / the filter and sort tasks. It is a no-op when the
+  panel is closed or a report is already cached for the document. It is
+  called from `toggle_diagnostics` (open), `apply`, `switch_to`, and the
+  lazy-load-ready path.
+- **`render_diagnostics` (`src/ui/view/diagnostics.rs`)** now has two
+  sections: *parse warnings* (unchanged, still click-to-navigate) and
+  *encoding*. The encoding section shows `scanning…`/`not scanned`,
+  a `UTF-8 BOM present` notice, one row per column with non-UTF-8 cells
+  (`<name> — N non-UTF-8 cell(s)`), or `clean UTF-8`. The panel header
+  is now `Diagnostics` since it covers both kinds of finding.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 287 passed (103 lib + 114 binary + 70
+  integration), 0 failed, 3 ignored. Was 285.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- GUI launches and stays alive with no panic. The panel's encoding path
+  is exercised headlessly (see tests below); the scan itself is also
+  covered by `--probe`.
+
+### Tests added / changed
+
+- `src/ui/view/tests.rs`: `diagnostics_scan_reports_invalid_utf8`
+  (opening the panel kicks the task and the report names column 1 with
+  two invalid cells) and `switching_document_invalidates_encoding_report`
+  (a second document clears the cached report).
+
+### Roadmap changes
+
+- Milestone 4 → Encoding diagnostics: the encoding UI and the optional
+  BOM reporting are ticked. The group is now complete (the parser still
+  does not strip the BOM; that is recorded, not required).
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the `encoding` current-modules bullet and the
+  diagnostics-panel entry record the background scan; the primary-state
+  table gained the three encoding fields; the UI/diagnostics test row
+  and the UI regression-test count (60 → 62) were updated.
+- `README.md`: binary test count updated (112 → 114).
+
+### Issues / technical debt discovered
+
+- The encoding report is cached per active document but not stored in
+  `DocumentSnapshot`, so switching away and back re-scans. The scan is
+  O(file); caching it in the snapshot would avoid the repeat. Deferred
+  until it is measured as a problem.
+- The BOM is detected and reported but not stripped, so the first header
+  cell still contains it. Stripping is a parser change that would shift
+  `header_range`; deferred.
+- Encoding findings are column-level and non-navigable. Per-cell
+  navigation would require the scanner to retain affected record
+  indexes, which would raise its memory cost; not currently wanted.
+
+### Open loops
+
+- Carried over: empty/duplicate header navigation, archive diagnostics,
+  compound filters, filter chips, cache inferred profiles at open,
+  view-scoped inspector stats, richer type classes, cap/group large
+  archives, lazy-extraction cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Milestone 4 **archive diagnostics**: surface skipped/rejected archive
+entries (the `rejected_reason` already computed in
+`source::archive::evaluate_entry`) in the archive picker, and present
+encrypted / ratio-capped entries with a friendlier message. After that,
+the remaining Milestone 4 work is richer filters (compound predicates),
+or the project can move to Milestone 5 hardening.
+
+## 2026-10-30 — Milestone 4: header detection, headerless labels, and a manual override
+
+### Context
+
+`looks_like_header` decided headers from the first row alone (it only
+returned "data" when at least half the first ~8 non-empty cells were
+numeric/boolean), so an all-text first row in a headerless file
+(`alice,bob / carol,dave`) was consumed as headers and the file lost a
+row. The user asked Anvil to understand that a first row is sometimes
+not a header, and that headerless files should label columns `col0`,
+`col1`, ….
+
+### Implemented
+
+- **Heuristic (`src/parser/delimit.rs`)**: `looks_like_header_in_context`
+  compares the first row's per-column textness (empty / typed / text)
+  against up to 20 following logical lines. Text-over-typed is a header
+  vote; typed-over-typed is a data vote; text-over-text is deliberately
+  no vote. Majority decides, and a tie/zero falls back to the previous
+  `looks_like_header` rule. So `name,age / alice,30` is a header,
+  `alice,30 / carol,40` is headerless, and the genuinely ambiguous
+  all-text file keeps defaulting to a header.
+- **Forced modes (`HeaderMode { Auto, Header, Headerless }`)** on
+  `IndexOptions`; `detect_with` skips the heuristic for the force
+  modes; `detect` / `parse` stay `Auto` for existing callers.
+- **Cheap re-index (`anvil_core::reindex`)**: `OpenedSource` now derives
+  `Clone` (the mmap and the extraction `TempDir` are shared behind
+  `Arc`s), so applying a forced mode re-runs `indexing::parse_with`
+  against the same source without re-opening the file or re-extracting
+  an archive entry.
+- **UI**: a toolbar **Headers** control cycles `Auto → On → Off`. The
+  mode is per tab (`DocumentSnapshot::header_mode`, mirrored live);
+  forcing a mode re-indexes on the background executor under the open
+  `generation` guard, swaps the tab's `Arc<ParsedDocument>` /
+  `GridModel` by tab id, resets stale filter / sort / search state, and
+  clamps an out-of-range selection. The encoding report is invalidated
+  and re-kicked if the panel is open.
+- **`col0`, `col1`, … labels**: new `parser::column_label` /
+  `ParseMeta::column_label`, used consistently by the grid header,
+  search scope chip, sort label, column inspector, and encoding scan.
+  Headerless files leave `headers` empty and are labelled at display
+  time; `has_headers` stays meaningful.
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 301 passed (111 lib + 117 binary + 73
+  integration), 0 failed, 3 ignored. Was 287.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- GUI launches and stays alive with no panic; the toolbar control,
+  re-index task, and persistence are exercised headlessly.
+
+### Tests added / changed
+
+- `src/parser/delimit.rs` (8): text header over typed data, typed first
+  row over typed data, numeric first row over text data, ambiguous
+  all-text fallback, `alice,30` headerless, forced `Header`, forced
+  `Headerless`, and `detect` == `detect_with(Auto)`.
+- `tests/core.rs` (3): `headerless_text_rows_are_detected_when_the_shape_matches_data`
+  (plus `colN` labels), `forced_header_mode_overrides_detection`,
+  `reindex_reuses_the_opened_source` (drops the original first to prove
+  the shared mmap outlives it).
+- `src/ui/view/tests.rs` (3): `cycle_header_mode_reindexes_active_document`,
+  `header_toggle_clamps_selection`, `header_mode_persists_per_tab`.
+- Updated existing assertions from `col 0` to `col0` (`schema/stats.rs`,
+  `encoding.rs`, `search_column_label` test).
+
+### Roadmap changes
+
+- Milestone 4 gained a **Header detection** group (heuristic, forced
+  modes, toolbar cycle, `colN` labels) — all ticked — plus header
+  detection tests and an acceptance bullet.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the delimiter/header sections document the vote
+  heuristic, `HeaderMode`, `detect_with`, `colN` labelling, and the
+  `reindex` path; the primary-state table gained `header_mode`; the
+  testing section lists the new tests and counts (73 integration,
+  65 UI regression).
+- `README.md`: test counts refreshed (73 data-side + 117 binary).
+
+### Issues / technical debt discovered
+
+- All-text header over all-text data remains ambiguous under `Auto`;
+  the override is the complete answer. Documented in the roadmap.
+- Forcing a mode re-runs `ColumnLayout::compute` (200-row sample) on the
+  UI thread inside `install_reindexed`, matching the existing open path.
+  Fine for now; moving layout measurement to the background task is a
+  later optimisation.
+- `reindex` clones `archive_candidates` (a small `Vec`); negligible
+  unless an archive has very many entries.
+
+### Open loops
+
+- Carried over: archive diagnostics, compound filters, filter chips,
+  cache inferred profiles at open, view-scoped inspector stats, richer
+  type classes, cap/group large archives, lazy-extraction cancellation,
+  panel resize/reorder.
+
+### Next recommended task
+
+Milestone 4 **archive diagnostics**: surface the already-computed
+`rejected_reason` for skipped archive entries in the picker, with
+friendlier messages for encrypted / ratio-capped entries. That is the
+last substantial Milestone 4 group before richer filters / Milestone 5.
+
+## 2026-10-31 — Milestone 4: archive diagnostics (skipped entries, encryption, ratio)
+
+### Context
+
+The previous iteration recommended the last substantial Milestone 4 group,
+archive diagnostics: surface the already-computed `rejected_reason` for
+skipped archive entries, present compression-ratio findings nicely, and
+give encrypted entries a friendlier message. The picker already showed a
+bare "N skipped entries" count, and encryption was only rejected during
+extraction with a generic `AnvilError::Other` string.
+
+### Implemented
+
+- **`evaluate_entry` (`src/source/archive.rs`)** now classifies each entry
+  up front and records a reason for every skip: directories, `__MACOSX` /
+  `.DS_Store` / hidden, `..`, oversized, unsupported extension, **encrypted**
+  (new `REJECTED_ENCRYPTED` const), **unsupported compression method**, and
+  a **central-directory compression ratio** above `MAX_COMPRESSION_RATIO`.
+  The decision helpers (`is_supported_method`, `ratio_exceeded`,
+  `compression_ratio`) are small and independently tested.
+- **`ArchiveSource::first_encrypted_entry`** exposes the first
+  password-protected skip so the loader can name it.
+- **`AnvilError::EncryptedEntry(String)`** replaces the generic string in
+  `extract_into_temp`; the extraction checks remain as a backstop.
+- **`loader::load`** returns `EncryptedEntry` when an archive has data
+  files but every candidate is encrypted, instead of the generic
+  `NoUsableEntries`.
+- **`ui::archive_picker`** gains `SkippedEntry` and `skipped_entries`, and
+  the toolbar **Archive…** overlay now renders a *skipped entries* section:
+  each rejected entry's name and reason, capped at 40 rows with an
+  "…and N more" summary so a noisy archive stays readable.
+- Removed an orphaned doc comment above `should_highlight` in
+  `ui/grid.rs` (a clippy `empty_line_after_doc_comments` warning).
+
+### Verified
+
+- `cargo build --release` — succeeds, no warnings.
+- `cargo test --release` — 311 passed (115 lib + 120 binary + 76
+  integration), 0 failed, 3 ignored. Was 301.
+- `cargo clippy --release --all-targets` — clean.
+- `cargo fmt --check` — clean.
+- `cargo run --release --bin anvil -- --probe fixtures/archive.zip` —
+  1,000,000 rows from `data/large.csv`, ~1 s.
+- `cargo run --release --bin anvil -- --probe fixtures/large.csv` —
+  1,000,000 rows, 20 columns, 477 ms.
+- `cargo run --release --bin anvil -- --probe fixtures/multi.zip` —
+  two candidate files, unchanged.
+- GUI launches and stays alive for 6 s with no panic/output.
+
+### Tests added / changed
+
+- `src/source/archive.rs` (4 unit tests): ratio boundaries and the
+  `compressed == 0` case, ratio rounding, the supported-method set, and
+  `extension_rank`.
+- `src/ui/archive_picker.rs` (3 unit tests): `format_size` binary units,
+  `skipped_entries` name-sorting and usable filtering, empty case.
+- `tests/core.rs` (3 integration tests): `zip_encrypted_entry_is_skipped_and_reported`
+  (flagged bit 0, reason equals `REJECTED_ENCRYPTED`, `load` returns the
+  typed error), `zip_mixed_encrypted_and_plain_keeps_plain_usable`, and
+  `zip_ratio_capped_entry_is_skipped` (declared size defeats the ratio
+  guard without a real payload). `raw_zip` was refactored into
+  `raw_zip_impl` with flag / declared-size helpers.
+
+### Roadmap changes
+
+- Milestone 4 → Archive diagnostics: all three bullets ticked, plus a
+  note that unsupported compression is reported at listing. The remaining
+  Milestone 4 work is empty/duplicate-header navigation and richer
+  filters.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: ZIP flow and `evaluate_entry` reject list document
+  encryption / unsupported-compression / ratio rejection at listing and
+  the reason strings; the multi-entry picker section describes the
+  skipped-entries list and the all-encrypted `EncryptedEntry` path; the
+  extraction step and archive-safety list call out the typed error and
+  the two-place ratio guard; the testing counts were refreshed (76
+  integration, archive.rs + archive_picker.rs unit tests).
+- `README.md`: test counts (76 data-side + 120 binary) and the
+  diagnostics summary refreshed.
+
+### Issues / technical debt discovered
+
+- The ratio guard uses the sizes declared in the central directory. A
+  crafted archive could understate its uncompressed size; the streaming
+  extraction check (actual copied bytes) remains the authoritative
+  backstop. Listing-time rejection is an early-warning optimisation, not
+  a replacement.
+- Skipped entries are still labelled by prose string. If a later feature
+  needs to act on the reason (e.g. a dedicated "password required"
+  action), `rejected_reason` should become a small enum.
+- The picker caps the skipped list at 40 rows but `ArchiveSource` still
+  holds every candidate; a very large archive builds a long list on every
+  rebuild. Not measured as a problem yet.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, compound filters,
+  filter chips, cache inferred profiles at open, view-scoped inspector
+  stats, richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Finish Milestone 4. Two groups remain: **empty/duplicate-header
+navigation** (small — the diagnostics panel lists header-level warnings
+but cannot jump anywhere; decide whether to highlight the header row or
+report clearly) and **richer filters** (a compound `AND` / `OR` /
+parenthesis parser on top of the existing `Vec<Filter>` AND model, with
+tests). After that the project is ready for Milestone 5 performance and
+UX hardening.
+
+## 2026-11-01 — Fix: panel close lag (synchronous grid viewport)
+
+### Context
+
+The user reported a visible lag between closing the inspector /
+diagnostics panels and the CSV table reflowing into the freed space.
+`MainView.viewport_w` — which drives header/row column culling, the
+horizontal scrollbar, and scroll-into-view — was derived from the
+**previous frame's** measured `grid_bounds` (recorded by the overlay
+canvas). Closing a panel therefore repainted the grid once at the old
+narrow width, and only widened after the canvas re-measured and called
+`cx.notify()`. The existing `viewport_width_excludes_file_panel` test
+even documented this: it forced an extra `cx.notify()` so the viewport
+could "settle".
+
+### Implemented
+
+- Added `MainView::grid_viewport_width`, which computes the columns-area
+  width synchronously as `window width - ROW_NUMBER_WIDTH - (each open
+  panel's theme width)`. The file panel, inspector, and diagnostics
+  panels are all `flex_shrink_0` with fixed widths, so this matches the
+  measured layout exactly — but is correct on the *same* render a panel
+  is toggled.
+- `render_grid` now uses that value; `grid_bounds` is still recorded for
+  drag auto-scroll, which genuinely needs the on-screen rectangle.
+- Updated the overlay canvas comment (the viewport no longer waits on
+  it).
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 311 passed (115 lib + 120 binary + 76
+  integration), 0 failed, 3 ignored.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 6 s with no panic.
+
+### Tests added / changed
+
+- Replaced `viewport_width_excludes_file_panel` with
+  `viewport_width_reflows_synchronously_with_panels`, which opens the
+  inspector and diagnostics and then closes everything, asserting the
+  viewport matches in the **same** frame each time (a single
+  `notify` + render, no forced extra frame). It fails against the old
+  previous-frame measurement.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the `viewport_w` section now documents the
+  synchronous `grid_viewport_width` computation and why the measured
+  approach lagged; the `grid_bounds` state-table row and the column
+  inspector note were updated accordingly.
+
+### Issues / technical debt discovered
+
+- The synchronous calculation duplicates the panel-presence conditions
+  used in `render` (file panel open && documents non-empty; inspector /
+  diagnostics open && model present). If a panel is ever added or made
+  resizable, both sites must change together. A future refactor could
+  have `render` compute a small `PanelLayout` once and pass it down.
+- The overlay canvas still calls `cx.notify()` when `grid_bounds`
+  changes, so a panel toggle now schedules one redundant follow-up
+  frame. It is invisible (the viewport is already correct) but could be
+  dropped if auto-scroll freshness is handled differently.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, compound filters,
+  filter chips, cache inferred profiles at open, view-scoped inspector
+  stats, richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Back to finishing Milestone 4: **empty/duplicate-header navigation**
+(small) and **richer filters** (compound `AND` / `OR` / parentheses).
+If the panel-reflow duplication is felt to be a risk, land the
+`PanelLayout` refactor first as its own iteration.
+
+## 2026-11-02 — Milestone 4: compound filter predicates (AND / OR / parentheses)
+
+### Context
+
+The remaining substantial Milestone 4 item was richer filters: compound
+predicates. The data side only supported a single predicate per apply
+(`apply` ANDs a `Vec<Filter>`), so `OR` and parentheses were impossible.
+I attempted to consult the architecture specialist for the grammar /
+representation design and then delegate the implementation to a worker.
+The architecture consultation timed out (180 s) and the worker calls were
+rejected by operator configuration / exhausted the worker token envelope,
+so the slice was implemented locally as a documented recovery. No design
+advice from the specialist was used.
+
+### Implemented
+
+- **`src/query/filter.rs`**:
+  - `FilterExpr { Predicate, And, Or }` — an AND/OR tree.
+  - `parse_expr` — recursive-descent parser over a small tokenizer.
+    Grammar: `expr := term (OR term)*`, `term := factor (AND factor)*`,
+    `factor := '(' expr ')' | predicate`. AND binds tighter than OR.
+  - Tokenizer handles `(`, `)`, quoted values (with `\"`), and words;
+    `AND` / `OR` are recognised case-insensitively only when unquoted, so
+    a literal keyword value can be quoted (`name contains "AND"`).
+  - Predicate values are collected until the next boolean keyword, paren,
+    or end of input, preserving the existing unquoted multi-word values
+    (`city == New York AND amount > 100`).
+  - `apply_expr` prepares each predicate once (`PreparedExpr`) and
+    short-circuits per row; no per-row allocation.
+  - `parse` and `apply` keep their signatures and behavior (apply folds a
+    slice into a left-associated AND tree), so existing callers and tests
+    are untouched.
+- **`src/lib.rs`**: re-export `apply_expr as apply_filter_expr`,
+  `parse_expr as parse_filter_expr`, and `FilterExpr`.
+- **UI** (`src/ui/view.rs`, `src/ui/view/filter.rs`): filter state is now
+  `Option<FilterExpr>`; `apply_filter_input` uses `parse_expr` /
+  `apply_expr`; the input placeholder advertises booleans.
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 321 passed (124 lib + 121 binary + 76
+  integration), 0 failed, 3 ignored. Was 311.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 6 s with no panic.
+
+### Tests added / changed
+
+- `src/query/filter.rs` (9 unit tests): AND-over-OR precedence and tree
+  shape, parentheses override plus redundant nesting, multi-word value
+  before a boolean operator, quoted keyword / quoted multi-word values,
+  case-insensitive keywords, parse errors (unbalanced parens, missing
+  value before `AND`, empty, trailing operator, stray word), single
+  predicate equivalence with `parse`/`apply`, OR dedup and short-circuit,
+  and decimal-threshold numeric ordering (`amount > 1000.0`).
+- `src/ui/view/tests.rs` (1 UI test):
+  `filter_input_applies_compound_expression_on_enter` runs
+  `country == US AND amount > 25` and `(amount > 25 OR country == UK)`
+  through the real filter bar and asserts the filtered rows.
+
+### Roadmap changes
+
+- Milestone 4 → Richer filters: compound predicates ticked; the numeric
+  comparison bullet ticked with a decimal-threshold test; the filter
+  expression test bullet ticked (regex remains possible). Saved filters
+  still open.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the filter module section documents `FilterExpr`,
+  `parse_expr` / `apply_expr`, the grammar, and the quoting rule; the
+  state-table row now reads `Option<FilterExpr>`; the testing table and
+  the `src/query/filter.rs` unit-test count (18 → 27) were updated; the
+  limitations note now records that `AND`/`OR`/parentheses exist but
+  `NOT` and saved filters do not.
+- `README.md`: test counts (76 + 121) and coverage/summary refreshed.
+
+### Issues / technical debt discovered
+
+- There is no `NOT` / `!` operator yet.
+- Predicate values are greedy, so a missing operator is silently absorbed:
+  `a == 1 b == 2` parses as the single predicate `a == 1 b == 2` (value
+  `"1 b == 2"`) rather than erroring. This matches the original
+  `parse` behavior; quoting or a stricter value rule could reject it in a
+  later pass.
+- Only double quotes are supported as a value escape; there is no single
+  quote or backslash-escape outside `\"`.
+- Delegation friction: the architecture consultation and worker attempts
+  failed (timeout / operator-configured check / token envelope). No
+  specialist output was integrated; the slice was verified locally.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, `NOT`,
+  filter chips, cache inferred profiles at open, view-scoped inspector
+  stats, richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation** (clicking a
+header-level warning should highlight the header row/column instead of
+only reporting "no row to jump to"), then move to Milestone 5
+(performance profiling, recent files, column resize, theme toggle).
+
+## 2026-11-03 — Fix: search/filter bars not closable, and caret drift
+
+### Context
+
+The user reported two UI bugs: (1) the search and filter bars could not
+be dismissed, and (2) the text caret drifted progressively ahead of the
+typed text. I diagnosed both before editing.
+
+- **Close:** neither bar had a visible close control, and the grid's
+  `Action::Escape` arm handled only `search_open`. Once focus returned to
+  the grid (e.g. after clicking a cell), the filter bar was impossible to
+  dismiss — only Esc while the bar itself held focus worked.
+- **Caret:** `ui::input::shape_input_line` shaped with
+  `window.text_style()`, which during render is the *default* 1rem style,
+  while the bars render text at `text_sm` (0.875rem). The caret x was
+  therefore computed at 16px against 14px glyphs, and the error grew with
+  text length — exactly the reported "gets farther away the more we type".
+
+Worker delegation was unavailable this session (the worker token envelope
+was already exhausted by the earlier compound-filter task), so the fixes
+were made locally as a documented recovery.
+
+### Implemented
+
+- **`src/ui/input.rs`**: added `input_font_size` (0.875rem) and shape the
+  caret/hit-test line at that size; `editable_text_area` now sets
+  `.text_sm()` explicitly so the shaped and rendered sizes cannot diverge.
+- **`src/ui/view/search.rs`** and **`src/ui/view/filter.rs`**: added a
+  visible `×` close control (`search-close` / `filter-close`) wired to
+  `close_search` / `close_filter`.
+- **`src/ui/view.rs`**: `Action::Escape` now closes the filter bar too (and
+  prefers closing whichever bar is open), so Esc works from the grid.
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 325 passed (124 lib + 125 binary + 76
+  integration), 0 failed, 3 ignored. Was 321.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 6 s with no panic.
+- Proven regression coverage: with the filter arm of `Action::Escape`
+  temporarily disabled, `escape_action_closes_filter_bar_when_grid_focused`
+  fails; restoring it passes. (The temporary `false &&` was removed.)
+- The caret alignment is a rendering-layout fix and is not asserted by an
+  automated test (no pixel harness); it follows from making the shape
+  size equal the rendered `text_sm` size.
+
+### Tests added
+
+- `src/ui/view/tests.rs` (4): `escape_closes_filter_bar`,
+  `escape_action_closes_filter_bar_when_grid_focused`,
+  `filter_close_button_dismisses_bar`, `search_close_button_dismisses_bar`
+  (the last two synthesise a real click on the `×` via a debug selector).
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the editable-field section documents the
+  `text_sm` shaping size and the drift it prevents, and the visible `×`
+  controls; the keyboard table's Esc row now says it closes the search or
+  filter bar; the UI regression-test count (65 → 69) and test list were
+  updated.
+- `README.md`: binary test count (121 → 125).
+
+### Issues / technical debt discovered
+
+- The filter/search bars still have no caret blink and no horizontal
+  scroll when the text is wider than the field (existing follow-up).
+- `editable_text_area` hardcodes the 0.875rem input size to match
+  `text_sm`; if a bar's text style changes, `input_font_size` must change
+  with it. A single `theme` constant would remove the duplication.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, `NOT`,
+  filter chips, cache inferred profiles at open, view-scoped inspector
+  stats, richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then move
+to Milestone 5 (performance profiling, recent files, column resize,
+theme toggle). The caret-size duplication noted above is a small cleanup
+worth folding into a future UI iteration.
+
+## 2026-11-04 — Milestone 2/4: filter input autocomplete
+
+### Context
+
+The user asked for suggestions in the filter input: start typing and a
+list of options appears, navigable with the arrow keys or selectable
+with the mouse, which fills in the text. This is a new cross-component
+feature, so an architecture consultation was run; it returned a concrete
+design (GPUI-free slot state machine, bounded sampler, MainView cache,
+`TextEdit::replace_range`, popup + key interception). The implementation
+worker then failed twice (`worker_failure`, token envelope exhausted) with
+no artifacts, so the designed feature was implemented locally as a
+documented recovery.
+
+### Implemented
+
+- **`src/query/suggest.rs` (new)**: `Slot` (Column / Operator / Value /
+  Keyword) and `SuggestContext { slot, replace, partial }`. `context`
+  scans tokens leniently (parens, quoted values, unterminated quotes) and
+  runs an incomplete-input-tolerant state machine to find the slot at the
+  caret and the byte range a suggestion should replace. `candidates`
+  returns case-insensitive prefix-filtered, deduped, capped suggestions.
+- **`src/schema/stats.rs`**: `sample_distinct(doc, column, max_rows,
+  max_distinct)` — a bounded, first-seen-order distinct-value sampler for
+  the value slot.
+- **`src/ui/text_edit.rs`**: `TextEdit::replace_range(range, text)` to
+  replace the partial token and move the caret/anchor.
+- **`src/ui/view.rs` / `src/ui/view/filter.rs`**: `filter_suggestions` /
+  `filter_suggestion_selected` / `filter_popup_open` /
+  `filter_value_cache` state; `refresh_filter_suggestions` (recomputed on
+  each edit and when the bar opens; samples a column once and caches it);
+  `accept_filter_suggestion` (replaces the token, appends a separator
+  space when needed, closes the popup). Keys: while the popup is open
+  Up/Down move the selection, Enter/Tab accept, Esc closes the popup
+  first; Down with the popup closed opens it. The popup renders as an
+  overlay (via `render_overlay`, so it paints above the grid) with the
+  selected row highlighted and clickable. `filter_value_cache` is cleared
+  in `load_active` on document change.
+- **`src/query/filter.rs`**: `resolve_column` is now `pub(crate)` and
+  reused by `suggest`.
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 349 passed (142 lib + 131 binary + 76
+  integration), 0 failed, 3 ignored. Was 325.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 6 s with no panic.
+- The popup genuinely renders and is hit-testable: the mouse test
+  resolves `debug_bounds("filter-suggestion-1")` and clicks it, which
+  fills the input.
+
+### Tests added
+
+- `src/query/suggest.rs` (14): empty/partial column, operator slot and
+  prefix, value slot column/op and prefix filtering, value-less op →
+  Keyword, `AND ` → Column, `(` → Column, multi-word value then boolean,
+  caret mid-word replace range, unknown column, multibyte byte range,
+  quoted partial.
+- `src/schema/stats.rs` (4): `sample_distinct` dedup/first-seen, row cap,
+  distinct cap + early stop, empty column.
+- `src/ui/text_edit.rs` (1): `replace_range` partial replacement,
+  empty-range insert, out-of-range clamp.
+- `src/ui/view/tests.rs` (5): popup opens on typing with the expected
+  item; Up/Down move and Enter accepts (filling `country `); Esc closes
+  the popup then the bar; mouse click fills the input; document switch
+  clears the value cache.
+
+### Roadmap changes
+
+- Milestone 2 → Filter: the "richer expression language" bullet (landed
+  earlier as `FilterExpr`) is now ticked, and a new completed
+  autocomplete bullet was added. Saved filters / filter chips remain
+  open.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: repo tree gains `query/suggest.rs`; the filter
+  module section documents the suggest state machine, popup, key
+  handling, `replace_range`, and the bounded cached sampler; the testing
+  section lists the new unit counts (suggest 14, stats 13) and the
+  filter-autocomplete test row; UI regression count 69 → 74.
+- `README.md`: binary test count 125 → 131 and the coverage summary.
+
+### Issues / technical debt discovered
+
+- The one-time value sample runs synchronously on the UI thread the first
+  time a value slot is opened for a column (bounded to 5000 rows / 100
+  values). Fine for normal files; a very wide/slow source could hitch and
+  would want the existing background-task pattern.
+- Suggestions are prefix-only (no fuzzy/substring), and the popup is
+  left-aligned under the bar rather than caret-anchored.
+- `refresh_filter_suggestions` is recomputed on edits and on popup-open,
+  but not on plain caret moves via clicks; suggestions can be stale until
+  the next edit. Documented as a follow-up.
+- The value cache is cleared in `load_active`; a re-index (header mode)
+  also goes through `load_active`? `install_reindexed` resets live state
+  and calls `load_active`, so it is covered.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, filter
+  chips, cache inferred profiles at open, view-scoped inspector stats,
+  richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then move
+to Milestone 5 (performance profiling, recent files, column resize,
+theme toggle). A small autocomplete follow-up would be to move the
+first-time value sample to the background executor and to refresh
+suggestions on caret clicks.
+
+## 2026-11-05 — Fix: autocomplete popup did not scroll with the selection
+
+### Context
+
+The user reported that arrowing Up/Down in the filter autocomplete moved
+the highlighted row but the popup did not scroll, so the selection could
+move off the visible area. Root cause: the popup rendered with
+`overflow_y_scroll()` but had no scroll handle, so nothing ever scrolled
+it as `filter_suggestion_selected` changed.
+
+### Implemented
+
+- **`src/ui/view.rs`**: added `filter_suggestion_scroll: ScrollHandle`
+  (init `ScrollHandle::new()`).
+- **`src/ui/view/filter.rs`**: the popup attaches
+  `.track_scroll(&self.filter_suggestion_scroll)`; Up/Down call
+  `scroll_to_item(selected)` after moving the selection, and
+  `refresh_filter_suggestions` scrolls back to item 0. GPUI's default
+  `FirstVisible` strategy scrolls the minimal amount to keep the row in
+  view.
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 350 passed (142 lib + 132 binary + 76
+  integration), 0 failed, 3 ignored. Was 349.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 5 s with no panic.
+- Regression test `filter_suggestions_scroll_to_keep_selection_visible`
+  builds a 50-value column, opens the value-slot popup, presses Down 15
+  times, and asserts the popup scroll offset is non-zero
+  (`offset.y = -291.5`, i.e. scrolled down). Without the scroll handle
+  the offset stays 0 and the test fails.
+
+### Tests added
+
+- `src/ui/view/tests.rs` (1): `filter_suggestions_scroll_to_keep_selection_visible`.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the filter-autocomplete paragraph notes the
+  `filter_suggestion_scroll` handle and `scroll_to_item`; UI regression
+  count 74 → 75.
+
+### Issues / technical debt discovered
+
+- None new. The previously noted autocomplete follow-ups (background
+  first-time value sample, prefix-only matching, refresh on caret clicks)
+  still stand.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, filter
+  chips, cache inferred profiles at open, view-scoped inspector stats,
+  richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder.
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 hardening.
+
+## 2026-11-06 — Fix: value autocomplete empty for some columns
+
+### Context
+
+The user reported that for some columns, typing `column == value` did not
+populate value suggestions. Diagnosis found four distinct gaps, all in
+how a column label or value has to round-trip through the parser:
+
+1. **Headerless columns** are offered/typed as `colN`, but `resolve_column`
+   only understood header names, `#N`, and numeric indexes, so it could not
+   resolve `col0` — the value slot saw `column: None` and offered nothing.
+2. **Numeric-named headers** (e.g. a column literally named `42`) were
+   parsed as an index, so they resolved to the wrong column or errored.
+3. **Multi-word column names** (`New York`) were inserted unquoted and
+   split into two tokens, so the column could not be resolved.
+4. **Value matching was prefix-only**, so once the user typed the second
+   word of a multi-word value (`New York` → partial `Y`) nothing matched.
+
+### Implemented
+
+- **`src/query/filter.rs` — `resolve_column`**: prefers an exact header
+  match over numeric parsing, accepts generated `colN` labels, and keeps
+  `#N` as an explicit index. So the labels the autocomplete offers always
+  resolve.
+- **`src/query/suggest.rs` — candidate matching**: replaced prefix-only
+  `push_matching` with a ranked matcher (`match_rank`: whole-string prefix
+  > word prefix > substring) and stable best-first ordering, so values
+  surface when typing a later word or a mid-string fragment.
+- **`src/ui/view.rs` / `src/ui/view/filter.rs`**: `FilterSuggestion`
+  carries a `quote` flag; a multi-word (or quoted) column suggestion is
+  inserted wrapped in double quotes (with `\"` escaping) so it stays one
+  token. This is what makes the value slot populate after accepting a
+  multi-word column.
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 357 passed (148 lib + 133 binary + 76
+  integration), 0 failed, 3 ignored. Was 350.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 5 s with no panic.
+
+### Tests added
+
+- `src/query/filter.rs` (1): `resolve_column_round_trips_generated_and_numeric_labels`
+  (`col0`/`col2`, out-of-range `col9`, a header named `42`, plain index,
+  `#N`).
+- `src/query/suggest.rs` (5): value slot for `col0` (headerless), for a
+  numeric-named header, and for a quoted multi-word column; word-prefix
+  and substring value matching; prefix-before-substring ordering.
+- `src/ui/view/tests.rs` (1): `accepting_a_multi_word_column_suggestion_quotes_it`
+  — accepting `New York` inserts `"New York"` and the value slot then
+  offers `NYC`/`LA`.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the filter-autocomplete paragraph records the label
+  round-trip (header-first `resolve_column`, `colN`, quoted multi-word
+  names) and ranked value matching; unit counts updated (filter 27 → 28,
+  suggest 14 → 19) and UI regression count 75 → 76.
+
+### Issues / technical debt discovered
+
+- Quoting is applied to column suggestions containing whitespace or a
+  quote. A header beginning with `#` would still be read as an index
+  before the header check; `#`-prefixed header names remain an edge case.
+- Substring matching can surface a value whose match is mid-string rather
+  than at a boundary; ranking keeps prefixes on top.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, filter
+  chips, cache inferred profiles at open, view-scoped inspector stats,
+  richer type classes, cap/group large archives, lazy-extraction
+  cancellation, panel resize/reorder; plus the earlier autocomplete
+  follow-ups (background first-time value sample, refresh on caret
+  clicks).
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 hardening.
+
+## 2026-11-07 — Fix: `#`-prefixed column names resolve
+
+### Context
+
+The previous fix made `resolve_column` prefer an exact header match so a
+column named `42` or `col0` resolves to itself, but left the explicit
+`#N` index check first. A column literally named `#2` (or `#foo`) was
+therefore still read as an index (`#2` → column 2) or errored
+(`#foo` → "bad column index"), so its value suggestions never populated.
+
+### Implemented
+
+- **`src/query/filter.rs` — `resolve_column`**: the exact header match is
+  now checked first for *all* tokens, then `#N`/`colN`/numeric are the
+  fallbacks. So a header named `#2` resolves to itself, while `#N` still
+  means "index N" when no header matches (the common case).
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 357 passed (148 lib + 133 binary + 76
+  integration), 0 failed, 3 ignored.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+
+### Tests added / changed
+
+- Extended `resolve_column_round_trips_generated_and_numeric_labels`:
+  a header named `#2` resolves to that header; `#1` still resolves to
+  index 1 when no header matches; `#foo` errors.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the autocomplete paragraph now states the exact
+  header match wins for `42`, `col0`, and `#2`, with `#N` as the
+  fallback index.
+
+### Issues / technical debt discovered
+
+- None new. If a file has a header named `#2` *and* the user wants index
+  2, they must use the plain numeric form `2`; documented behaviour.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, filter
+  chips, view-scoped inspector stats, richer type classes, cap/group
+  large archives, lazy-extraction cancellation, panel resize/reorder,
+  and the autocomplete follow-ups (background first-time value sample,
+  refresh on caret clicks).
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 hardening.
+
+## 2026-11-08 — Search/filter bars switch directly with their shortcuts
+
+### Context
+
+The user wanted pressing Cmd/Ctrl+L while in Cmd/Ctrl+F (and vice versa)
+to switch cleanly, without closing the current bar first. Two problems
+blocked this: (1) the bar key handlers only ran while their own bar had
+focus, and the other bar's shortcut was a sibling handler that never
+fired, and (2) `Action::OpenSearch` / `Action::OpenFilter` would open the
+target bar but leave the other one open.
+
+### Implemented
+
+- **`src/ui/view.rs`**: added `switch_to_filter` / `switch_to_search`.
+  Each closes the other bar (clearing a stale `focus_grid_on_next_frame`
+  so the destination bar actually gets focus), then opens the target bar
+  or notifies if it is already open. `Action::OpenSearch` /
+  `Action::OpenFilter` now call these, so the switch also works when
+  focus is on the grid.
+- **`src/ui/view/search.rs`**: `on_search_key_down` recognises
+  Cmd/Ctrl+L and calls `switch_to_filter`.
+- **`src/ui/view/filter.rs`**: `on_filter_key_down` recognises
+  Cmd/Ctrl+F and calls `switch_to_search`.
+
+### Verified
+
+- `cargo build --release` — clean.
+- `cargo test --release` — 360 passed (148 lib + 136 binary + 76
+  integration), 0 failed, 3 ignored. Was 357.
+- `cargo clippy --release --all-targets` — clean; `cargo fmt --check` —
+  clean.
+- GUI launches and stays alive 5 s with no panic.
+
+### Tests added
+
+- `src/ui/view/tests.rs` (3): `cmd_l_switches_from_search_bar_to_filter`,
+  `cmd_f_switches_from_filter_bar_to_search`, and
+  `cmd_l_from_grid_switches_open_search_to_filter` (the grid action path).
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: the keyboard table gained a Cmd/Ctrl+L row and the
+  Cmd/Ctrl+F row now describes the switch; the search-bar section
+  documents `switch_to_search` / `switch_to_filter`; the UI regression
+  test list and count (76 → 79) were updated.
+
+### Issues / technical debt discovered
+
+- Opening a bar from the toolbar can still leave both bars visible; only
+  the keyboard shortcuts are guaranteed mutually exclusive. Not changed
+  here because the two views are composable (filter narrows, search
+  highlights) and the user asked specifically about the shortcuts.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, filter
+  chips, view-scoped inspector stats, richer type classes, cap/group
+  large archives, lazy-extraction cancellation, panel resize/reorder,
+  autocomplete follow-ups (background first-time value sample, refresh on
+  caret clicks).
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 hardening.
+
+## 2026-11-09: Remove em-dashes from source and guard against them
+
+### Context
+
+The user asked to remove em-dashes (U+2014) from the program and stop
+them reappearing. A scan found 32 in `.rs` files: mostly doc/line
+comments, plus six user-visible strings (filter placeholder, archive
+picker caption, loading/error status, header-warning status, and the
+empty-value placeholder used by the status bar and inspector).
+
+### Implemented
+
+- Replaced every em-dash in `src/**/*.rs` and `tests/**/*.rs` with a
+  plain hyphen, then tidied the user-visible strings to read naturally:
+  - filter placeholder: `column op value, e.g. country == US AND amount > 100`
+  - archive picker: `{}: every usable file already has a tab`
+  - status: `loading: {note}` / `error: {message}`
+  - diagnostics: `header-level warning: no row to jump to`
+  - empty values render as `-`
+- Added `tests/style.rs`, a repository style guard. It walks every `.rs`
+  file under `src/` and `tests/` (via `CARGO_MANIFEST_DIR`) and fails if
+  any line contains U+2014, naming the file and line. The guard uses the
+  `'\u{2014}'` escape so the guard file itself contains no em-dash.
+
+### Verified
+
+- `cargo build --release` clean.
+- `cargo test --release`: 361 passed (148 lib + 136 binary + 76 core
+  integration + 1 style), 0 failed, 3 ignored. Was 360.
+- `cargo clippy --release --all-targets` clean; `cargo fmt --check` clean.
+- Searching `src` and `tests` for U+2014 reports none.
+- Guard proven: a temporary probe file containing an em-dash made
+  `cargo test --test style` fail with the file and line; the probe was
+  deleted and the suite is green again.
+
+### Tests added
+
+- `tests/style.rs` (1): `source_contains_no_em_dashes`.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: repository tree gains `tests/style.rs`; the testing
+  section describes the em-dash guard.
+- `README.md`: test-count line now reads `76 data-side + 136 binary + 1 style guard`.
+
+### Issues / technical debt discovered
+
+- The guard covers `.rs` source only (the program). Markdown docs
+  (`README.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `AGENTS.md`,
+  `VISION.md`, `docs/agent-log.md`) still contain em-dashes, including
+  historical log entries. Cleaning the living documents is possible but
+  would touch a large volume of prose and rewrite history, so it was left
+  for a separate decision.
+
+### Open loops
+
+- Carried over: empty/duplicate-header navigation, saved filters, filter
+  chips, view-scoped inspector stats, richer type classes, cap/group
+  large archives, lazy-extraction cancellation, panel resize/reorder,
+  autocomplete follow-ups (background first-time value sample, refresh on
+  caret clicks).
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 hardening.
+
+## 2026-11-10: Performance pass
+
+### Context
+
+Adversarial review of the hot paths (indexing, cell decoding, search,
+filter, sort, stats, layout, grid rendering), with before/after
+measurement on the 1M-row fixture. Two optimizations landed, one
+experiment was a measured pessimization and reverted, and several
+remaining opportunities were recorded rather than churned.
+
+### Implemented
+
+- **Case-insensitive search** (`src/query.rs`): the fold path was a
+  naive O(cell x needle) sliding window with a per-position shift loop.
+  Replaced with a prebuilt `memchr::memmem::Finder` plus one reusable
+  scratch buffer; cells with no ASCII uppercase bytes are searched in
+  place. `ascii_contains_lower` is retained for the filter's `contains`
+  operator.
+- **`render_row`** (`src/ui/grid.rs`): decoded the record's visible
+  cells in one `Cells` pass instead of calling `doc.cell` per column
+  (which re-walked the record from its start, O(columns^2) per row), and
+  dropped the throwaway `String` + clone per cell (one `SharedString`
+  copy per cell now).
+- **`ColumnLayout::compute`** (`src/ui/grid.rs`): same single-pass
+  decode per sampled record instead of per column.
+- **Benchmarks**: added `measure_search_large_fixture` (tests/core.rs)
+  and `measure_wide_column_layout` (src/ui/grid.rs, ignored).
+- Documented the negative result inline in `indexing.rs`.
+
+### Measured before/after (Apple Silicon, release, same fixtures)
+
+- Case-insensitive whole-record search, 1M rows:
+  **288 ms -> 135 ms** (~2.1x).
+- `ColumnLayout::compute`, 500 columns x 300 rows:
+  **250 ms -> 2 ms** (~125x).
+- `render_row`: not frame-timed (no pixel harness); the change removes
+  a per-column re-decode and 1-2 allocations per visible cell by
+  construction.
+- Indexing (`measure_large_fixture`): ~247 ms, **669 MiB/s** (unchanged).
+- Filter `country == US`: ~74 ms. Numeric sort `amount`: ~235 ms.
+  (These are higher than the older doc figures; the doc now records the
+  current numbers rather than stale ones.)
+- Negative result: replacing the indexing byte loop with a
+  `memchr3` skip loop was **slower** (434 ms vs 250 ms) because the
+  fixture has a delimiter every few bytes, so there is nothing to skip
+  and per-call scanner setup dominates. Reverted.
+
+### Verified
+
+- `cargo test --release`: 361 passed (148 lib + 136 binary + 76 core +
+  1 style), 0 failed, 4 ignored. Clippy clean; fmt clean.
+- GUI launches and stays alive 6 s with no panic.
+
+### Remaining opportunities (not changed)
+
+- `find_ranges` allocates a case-folded copy per matched cell during
+  highlight; bounded to the visible range, could take a scratch buffer.
+- Text sort allocates one lowercased key `Vec<u8>` per row (1M
+  allocations on the fixture); an arena would remove it.
+- Indexing is a per-byte branch loop at ~670 MiB/s; the SIMD skip idea
+  is a pessimization on dense CSVs.
+- `encoding::scan` validates UTF-8 per cell and `column_stats` allocates
+  a `String` per distinct value; both are diagnostics-only and bounded,
+  left alone.
+- No frame-time harness for scrolling; `render_row` improvements are
+  argued from allocation/decode count rather than measured.
+
+### Docs
+
+- `ARCHITECTURE.md`: Performance Characteristics updated with the new
+  search/layout numbers, the render-row and layout changes, the
+  remaining bottlenecks, and the memchr3 negative result.
+- `README.md`: benchmark commands added; test count line already current.
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 (frame-time harness, LRU cell text, recent files, column
+resize, theme toggle).
+
+## 2026-11-11: Fix: value autocomplete missed late-appearing values
+
+### Context
+
+The user typed `Country == Madagascar`, saw no value suggestions once they
+reached the middle of the word, yet the filter itself returned the row.
+Root cause: `schema::stats::sample_distinct` (used for the value slot)
+scanned only the **first `max_rows` records** of the column. In a column
+sorted by country, `Madagascar` first appears far past row 5000, so it was
+never sampled. Earlier prefixes matched other `Ma*` values, which is why
+the list looked non-empty until the partial reached `Mad`.
+
+### Implemented
+
+- **`src/schema/stats.rs`**: `sample_distinct` now samples up to
+  `max_rows` records **spread evenly across the whole document** (a
+  stride of `total / max_rows`) instead of scanning the head. Earlier
+  values are still returned in first-seen order; empty values are still
+  skipped; `max_distinct` still caps the result.
+- **`src/ui/view/filter.rs`**: the value-slot cache now samples with a
+  budget of 50,000 rows / 1000 distinct values (was 5000 / 100),
+  which is a one-time cost per column, cached.
+
+### Verified
+
+- `cargo build --release` clean; `cargo test --release` 362 passed
+  (149 lib + 136 binary + 76 core + 1 style), 0 failed, 5 ignored;
+  clippy clean; fmt clean; GUI launches and stays alive.
+- New tests:
+  - `sample_distinct_spreads_across_the_whole_file`: 100 rows, row 50 is
+    `Madagascar`, budget 10; asserts the value is present. Fails against
+    the old head-only sampler.
+  - `sample_distinct_respects_the_row_budget` updated to the new spread
+    semantics (budget 2 over 5 rows visits rows 0 and 2).
+- Measured: the file-wide sampler takes **~16 ms** once per column on the
+  1M-row fixture (new `measure_sample_distinct_large_fixture`), cached
+  thereafter. The old head-only scan was ~1-2 ms but missed values.
+
+### Remaining work
+
+- The first value sample for a column still runs synchronously on the UI
+  thread (now ~16 ms); moving it to the background executor with a
+  generation guard is the noted follow-up.
+- Sampling is bounded, so a value occurring in very few rows can still be
+  missed; a per-prefix fallback scan is the guarantee option if needed.
+
+### Docs
+
+- `ARCHITECTURE.md`: autocomplete paragraph and testing row now describe
+  the file-wide sample and its cost.
+- `README.md`: benchmark list already includes the measure_* family.
+
+### Next recommended task
+
+Finish Milestone 4 with **empty/duplicate-header navigation**, then
+Milestone 5 (frame-time harness, background value sampling, LRU cell
+text, recent files, column resize, theme toggle).
+
+## 2026-11-12: Plan: natural-language Ask bar (ADR 0001)
+
+### Context
+
+The user asked whether natural-language filter construction was feasible,
+then approved a hybrid design: use rules (Tier 1) when they cleanly
+resolve, fall back to an optional local model (Tier 2) otherwise, with
+Tier 2 fully optional, bound to `Cmd/Ctrl+Shift+L`. No runtime code was
+changed in this iteration; this records the decision and the plan.
+
+### Implemented (planning only)
+
+- **`docs/adr/0001-natural-language-ask.md`** (new, first ADR): records
+  the decision, the Tier 1 clean-resolution contract, the optional
+  `NlBackend` requirements (feature-flagged, local-only, output always
+  re-validated by `parse_expr`, no auto-download), the rejected
+  alternatives, and the consequences.
+- **`ROADMAP.md`**: added Milestone 6 (Natural-language Ask, opt-in) with
+  prerequisites (`FilterExpr::Not`, column aliases), the Tier 1 rules
+  parser tasks, the Ask bar tasks, the Tier 2 backend tasks, dependencies,
+  and acceptance criteria.
+- **`ARCHITECTURE.md`**: added a Planned Architectural Evolution bullet
+  pointing at the ADR and stating that `FilterExpr` is the single output
+  contract.
+
+### Key decisions recorded
+
+- Escalation to Tier 2 happens only when Tier 1 fails any of: no
+  predicate produced, unmatched tokens, unresolved/ambiguous column,
+  unbindable value, or low confidence. Otherwise Tier 1's result is used.
+- The Ask bar previews; it never auto-applies and never silently guesses.
+- Tier 2 is off by default, runs locally, never downloads a model, and
+  its output is always re-parsed and schema-validated.
+
+### Verified
+
+- Documentation-only change. No source changed. `cargo test --release`
+  was not re-run for this iteration (no code change); the tree was green
+  at 362 tests before it.
+
+### Open loops
+
+- Prerequisites to implement next: `FilterExpr::Not` (data-side grammar
+  plus `parse_expr`, `apply_expr`, and filter-bar display) and the column
+  alias map.
+- Then the Tier 1 `query::nl` parser with a phrase-table test suite.
+- Then the Ask bar UI (`Cmd/Ctrl+Shift+L`).
+- Tier 2 remains demand-gated.
+
+### Next recommended task
+
+Implement the prerequisites for Milestone 6: `FilterExpr::Not` first
+(small, independently useful, and needed for "not"/"except" phrasing),
+then the column alias map, then the Tier 1 parser.
+
+## 2026-11-13: Milestone 6 Tier 1 natural-language parser
+
+### Context
+
+Following ADR 0001, implemented the deterministic rules-based front end
+that turns a phrase into a `FilterExpr`. Tier 2 (optional local model),
+the Ask bar, and `FilterExpr::Not` are deliberately not in this slice.
+
+### Implemented
+
+- **`src/query/nl.rs` (new, GPUI-free)**:
+  - `NlSchema` / `NlColumn` (name, `ColumnType`, alias table) and
+    `NlResult` (`expr`, `unmatched`, `clean`).
+  - `NlBackend` trait plus the `RuleBackend` Tier 1 implementation, and a
+    free `parse(phrase, schema, values)` function. Values are fetched
+    lazily per column through the callback.
+  - Tokenizer (whitespace, quoted spans, trailing commas become `and`).
+  - Operator lexicon, longest phrase first, with linking-word skipping
+    (`is`, `the`, ...), covering equality, negation, `contains`, prefix /
+    suffix, empty / non-empty, and the numeric comparisons.
+  - Column resolution by header, `colN`, alias, multi-word and quoted
+    names.
+  - Value binding: longest sampled distinct value first (so
+    `Trinidad and Tobago` is not split on `and`), then numeric literals,
+    then a raw fallback marked low confidence for equality (substring
+    operators stay confident).
+  - Conjunction handling for `and` / `or`; a bare value after a
+    conjunction reuses the previous column (`status is failed or
+    refunded`).
+  - `clean` is true only when at least one predicate was produced, no
+    tokens were left unmatched, every column resolved, and every value
+    bound confidently: this is the ADR escalation contract.
+- **`src/query.rs` / `src/lib.rs`**: module wiring and public re-exports
+  (`parse_nl`, `NlBackend`, `NlColumn`, `NlResult`, `NlSchema`,
+  `RuleBackend`).
+
+### Verified
+
+- `cargo build --release` clean; `cargo test --release` 377 passed
+  (164 lib + 136 binary + 76 core + 1 style), 0 failed, 5 ignored;
+  clippy clean; fmt clean.
+- 16 unit tests in `query/nl.rs`: explicit equality, symbolic and
+  worded numeric comparisons, negation, `contains` confidence,
+  low-confidence equality, `and` / `or` and comma conjunctions,
+  multi-word sampled values, multi-word column names, aliases, quoted
+  values, and unparseable input.
+
+### Issues discovered
+
+- Two bugs found and fixed during development: `value_only` returned a
+  word count where callers expected the next token index (leaving trailing
+  value tokens unmatched), and a quoted multi-word value needed a
+  single-token comparison before splitting a sample into words.
+- General `not` (`not (A or B)`) is not supported because `FilterExpr`
+  has no `Not`; only negating operators are handled. This is the recorded
+  `FilterExpr::Not` prerequisite.
+- The roadmap's original acceptance example ("US orders over 100") is
+  value-first with implied columns, which rules cannot resolve by design.
+  It was updated to "country is US and amount over 100"; value-first
+  phrasing is exactly the Tier 2 escalation case.
+
+### Docs
+
+- `ROADMAP.md`: Tier 1 tasks ticked; prerequisites annotated
+  (`Not` deferred, aliases programmatic only); acceptance example made
+  realistic.
+- `ARCHITECTURE.md`: module tree gains `query/nl.rs`; the Planned
+  Architectural Evolution bullet now says Tier 1 landed; unit-test count
+  added.
+
+### Next recommended task
+
+The Ask bar UI (`Cmd/Ctrl+Shift+L`) reusing `TextEdit` and the existing
+filter apply path, or `FilterExpr::Not` first if general negation is
+wanted. Tier 2 stays demand-gated.
+
+## 2026-11-14: Ask bar UI (Cmd/Ctrl+Shift+L)
+
+### Context
+
+The user reported Cmd+Shift+L not working. Two reasons: the Ask bar UI
+was not implemented yet (only the Tier 1 parser had landed), and
+`commands::action_for` mapped any Cmd/Ctrl+L to `Action::OpenFilter`
+without considering Shift, so the chord was swallowed by the plain
+filter.
+
+### Implemented
+
+- **`src/ui/commands.rs`**: added `Action::OpenAsk` and made the `l`
+  binding shift-aware (`Cmd/Ctrl+Shift+L` -> Ask, `Cmd/Ctrl+L` -> filter).
+- **`src/ui/view/ask.rs` (new)**: `open_ask` / `close_ask`,
+  `build_ask_schema` (names from `column_label`, types from
+  `schema::infer`), `refresh_ask` (Tier 1 parse on every edit, reusing
+  `filter_value_cache` via `RefCell`), `accept_ask` (format the
+  expression, switch to the filter bar, and run the existing apply path),
+  the key handler (Enter accepts, Esc closes, Cmd/Ctrl+F/L switch bars,
+  full caret editing), mouse caret/drag handlers, and `render_ask_bar`
+  plus `ask_status_text` (live preview of the parsed expression, or the
+  unmatched spans).
+- **`src/ui/view.rs`**: Ask state fields, `mod ask;`, `Action::OpenAsk`
+  dispatch, `switch_to_ask`, Ask closed by the other switches and by
+  `Action::Escape`, deferred focus, bar rendered above the grid, and the
+  schema/preview cleared in `load_active` on document change.
+- **`src/query/nl.rs`**: `describe(expr, headers)` renders a parsed
+  expression back to filter syntax with quoting for multi-word names and
+  values.
+
+### Verified
+
+- `cargo build --release` clean; `cargo test --release` 382 passed
+  (165 lib + 140 binary + 76 core + 1 style), 0 failed, 5 ignored;
+  clippy clean; fmt clean; GUI launches and stays alive 6 s.
+- New UI tests: `cmd_shift_l_opens_ask_bar`,
+  `ask_accepts_a_phrase_into_the_filter` (previews and applies
+  `country == US AND amount > 25`, rows `[2]`),
+  `ask_does_not_apply_an_unparseable_phrase`, `escape_closes_ask_bar`.
+  New unit test for `describe`.
+
+### Notes / limits
+
+- The preview is shown live as the user types, and Enter only accepts
+  when a predicate was produced; a failed parse keeps the bar open and
+  leaves the filter untouched. This is the ADR's preview/accept rule.
+- General `not` still needs `FilterExpr::Not`; Tier 2 (optional local
+  model) is still planned.
+
+### Docs
+
+- `ROADMAP.md`: Ask bar tasks ticked.
+- `ARCHITECTURE.md`: keyboard table gains Cmd/Ctrl+Shift+L; the planned
+  bullet says Tier 1 and the Ask bar landed; UI regression count 79 -> 83
+  and the new test bullets added.
+
+### Next recommended task
+
+Tier 2 (optional local model) behind the off-by-default feature, or
+`FilterExpr::Not` if general negation is wanted first.
+
+## 2026-11-15: Tier 1.5 extended rules; Tier 2 embedded model staged
+
+### Context
+
+The user approved doing both E (extended deterministic rules) and A (an
+embedded local model). An architecture review concluded that E is the
+only option that satisfies the constraints today (no pre-install, all
+platforms, lightweight, offline), with A reserved behind an opt-in
+feature. This iteration lands E fully and the dependency-free Tier 2
+plumbing, and records A's concrete plan.
+
+### Implemented (E, default Tier 2)
+
+- **`src/query/nl.rs`**:
+  - Filler normalization: leading question words ("show me", "list all",
+    "rows where", ...) are skipped while a column is expected, so
+    phrasings like "show me all the rows where country is US" parse
+    cleanly.
+  - Fuzzy column matching: a single-token edit-distance fallback
+    (`contry` -> `country`) that refuses an ambiguous tie.
+  - `between A and B` expands to `column >= A AND column <= B`.
+  - More operator synonyms: "no more than", "no less than",
+    "no greater than", "no fewer than", "at minimum", "at maximum",
+    "matches", "contain", "like".
+
+### Implemented (Tier 2 plumbing, dependency-free)
+
+- `NlBackend` trait, an external `ModelBackend` override, `model_prompt`
+  (only samples columns named in the phrase), and `interpret`, which
+  always re-parses and schema-validates the backend output through
+  `parse_expr`. `NlResult.from_model` records the source.
+
+### Staged, not built (A)
+
+- The embedded model is planned behind an off-by-default `nl-model`
+  feature: `candle-core` + `candle-transformers` + `tokenizers` +
+  `hf-hub`, one pinned quantized instruct model, downloaded once after
+  consent into the platform cache dir, checksum-pinned, offline
+  afterwards. It is not added to the default build because the
+  dependency tree is heavy, the compile is long, and inference cannot be
+  verified in this environment without a model download. This is a
+  dedicated next iteration.
+
+### Verified
+
+- `cargo build --release` clean; `cargo test --release` 390 passed
+  (172 lib + 141 binary + 76 core + 1 style), 0 failed, 5 ignored;
+  clippy clean; fmt clean.
+- New tests in `query/nl.rs` (24 total): filler + synonyms, fuzzy typo,
+  `between` range, plus the earlier model prompt / fence-strip /
+  subprocess / validation tests.
+
+### Docs
+
+- `ROADMAP.md`: Tier 1.5 tasks ticked; Tier 2 section now describes the
+  embedded `nl-model` plan and the download UX.
+- `docs/adr/0001-natural-language-ask.md`: added a refinement section
+  recording Tier 1.5 as the default and the embedded model as opt-in.
+- `ARCHITECTURE.md`: nl unit count 16 -> 24; the planned bullet updated.
+
+### Open loops
+
+- Relative dates ("last month", "this year") and a user synonym file
+  remain for Tier 1.5.
+- The embedded `nl-model` backend and its download/cache manager remain.
+- `FilterExpr::Not` remains.
+
+### Next recommended task
+
+The embedded `nl-model` iteration (dependency + model catalog + download
+UX + a MockBackend-driven validation test), or relative dates if that is
+preferred first.
+
+## 2026-11-16: Tier 2 embedded model backend (`nl-model`)
+
+### Context
+
+Following the approval of E and A, the previous entry landed Tier 1.5.
+This iteration adds A: the optional embedded local-model backend, behind
+an off-by-default cargo feature, wired into the Ask bar.
+
+### Implemented
+
+- **Cargo.toml**: optional `candle-core`, `candle-transformers`,
+  `tokenizers`, and `hf-hub`, exposed as one `nl-model` feature (off by
+  default). `hf-hub` is pinned to 0.3 to avoid the much heavier 1.x
+  `xet` stack. The default build pulls none of these crates.
+- **`src/nlmodel.rs` (new, feature-gated)**: downloads and caches the
+  model and tokenizer through `hf-hub`, loads a quantized
+  Llama-architecture GGUF with `candle-transformers`'s
+  `quantized_llama::ModelWeights`, generates greedily (bounded to 96
+  tokens, stopping at EOS), strips fences, and returns a candidate.
+  `interpret` validates the candidate with
+  `anvil_core::validate_nl_candidate`. Model repo/file and tokenizer
+  repo/file are overridable with `ANVIL_NL_MODEL_*` /
+  `ANVIL_NL_TOKENIZER_*`.
+- **`anvil_core::query::nl`**: added `validate_candidate` (shared by
+  every backend) and made `strip_fences` public.
+- **Ask bar (`ui/view/ask.rs`, `ui/view.rs`)**: `Ctrl/Cmd+Enter`
+  escalates an unresolved phrase to an injected `AskInterpreter`, run on
+  the background executor with a generation guard. `ask_loading` /
+  `ask_model_error` drive the status line, and the preview marks a
+  model-sourced expression `(local model)`. The production interpreter
+  is the embedded backend when the feature is on and `None` otherwise,
+  so tests can inject a mock.
+
+### Verified
+
+- Default build: `cargo build --release` clean; `cargo test --release`
+  391 passed (172 lib + 142 binary + 76 core + 1 style), 0 failed.
+- Feature build: `cargo build --release --features nl-model` clean
+  (about 2.5 minutes from a warm dep cache); `cargo test --release
+  --features nl-model` 391 passed.
+- `cargo clippy --release --all-targets` clean with and without the
+  feature; `cargo fmt --check` clean.
+- New UI test `ask_escalates_to_tier2_when_rules_are_unclean` injects a
+  mock interpreter, confirms Tier 1 leaves the phrase unresolved, and
+  asserts the validated mock expression becomes the preview. This runs in
+  the default build, so the escalation path is covered without the
+  feature.
+
+### Honest gaps
+
+- Inference was **not** exercised end to end: no model was downloaded in
+  this environment, so the candle load/generate path is compile-verified
+  only. The default model repo/file is a best guess and is overridable.
+- The download has no size/consent dialog, progress bar, cancel, or
+  explicit checksum pin (beyond `hf-hub`'s cache). The status shows a
+  generic "interpreting with the local model..." while it downloads.
+- Enabling `nl-model` adds a large dependency tree and roughly 2.5
+  minutes of compile time; the default build is unaffected.
+
+### Docs
+
+- `ROADMAP.md`: embedded backend ticked; download UX marked partial.
+- `docs/adr/0001-natural-language-ask.md`: implementation-status section.
+- `ARCHITECTURE.md`: the Ask bullet now covers Tier 1.5, the Ask bar,
+  and the `nl-model` embedded backend.
+- `README.md`: how to enable the feature and the model overrides.
+
+### Next recommended task
+
+Download UX for `nl-model` (size disclosure, progress, cancel, checksum),
+a real-model smoke test, then relative dates and `FilterExpr::Not`.
+
+## 2026-11-17: Fix model download ("relative URL without base")
+
+### Context
+
+Running the feature build, the user got:
+`model: could not fetch the tokenizer: request error: Bad URL: failed to
+parse URL: RelativeURLWithoutBase: relative URL without base`.
+
+### Root cause
+
+`hf-hub` 0.3.2's `Api::metadata` reads the Hub's redirect `Location`
+header and feeds the raw value straight back into the client
+(`self.client.get(response.header(LOCATION).unwrap())`) without resolving
+it. When the Hub returns a relative redirect, `ureq` cannot parse it and
+errors with `RelativeURLWithoutBase`. This is an hf-hub bug, not a bad
+repo or endpoint.
+
+### Fix
+
+- Dropped `hf-hub` from the `nl-model` feature and added `ureq` directly.
+- `src/nlmodel.rs` now downloads with `ureq::get(...).call()`, which
+  resolves redirects against the request URL correctly, and writes the
+  file into a cross-platform cache directory:
+  `ANVIL_NL_CACHE` if set, else `~/Library/Caches/anvil/models` (macOS),
+  `%LOCALAPPDATA%\anvil\models` (Windows), or
+  `$XDG_CACHE_HOME/anvil/models` / `~/.cache/anvil/models` (Linux).
+- Added `ANVIL_NL_ENDPOINT` (mirror) and `HF_TOKEN` (gated models)
+  support. `ANVIL_NL_MODEL_*` / `ANVIL_NL_TOKENIZER_*` overrides remain.
+
+### Verified
+
+- Default build: 391 tests pass; feature build: 391 pass; clippy clean
+  and fmt clean in both.
+- New ignored smoke test `downloads_the_default_tokenizer` fetches only
+  the small tokenizer file and passed; it landed 2.0 MB at
+  `~/Library/Caches/anvil/models/HuggingFaceTB__SmolLM2-360M-Instruct/tokenizer.json`,
+  proving the redirect path now works.
+- Confirmed the default model file exists and is 258 MB:
+  `bartowski/SmolLM2-360M-Instruct-GGUF/SmolLM2-360M-Instruct-Q4_K_M.gguf`.
+- Inference itself was still not run here (no model download in this
+  environment); the candle load/generate path remains compile-verified.
+
+### Docs
+
+- `README.md`: model size, cache locations, and the full override list.
+- `docs/adr/0001-natural-language-ask.md`: implementation-status note on
+  the `ureq` downloader.
+
+### Next recommended task
+
+A real-model smoke test once a machine can run the 258 MB download, plus
+the consent/progress/cancel download UX.
+
+## 2026-11-18: Better Tier 2 model output (chat template, extraction)
+
+### Context
+
+The user asked the Ask bar "Last names that start with C" and the local
+model path replied `model: backend returned an invalid expression: unknown
+operator 'last'`. The rules cannot resolve that phrase, the model was
+consulted, and its raw output was not a clean expression.
+
+### Root causes
+
+- The prompt was fed to the model as raw text, without the model's chat
+  template, so an instruct model did not see it as a proper user turn.
+- The candidate was only the last non-empty output line, then parsed
+  directly. Any prose or formatting around the expression made the parse
+  fail, and the error did not show what the model actually said.
+
+### Fix
+
+- **ChatML prompt** (`src/nlmodel.rs`): the instruction is now wrapped in
+  the SmolLM2 template (`<|im_start|>system ... <|im_start|>user ...
+  <|im_start|>assistant`) and encoded with `add_special_tokens = false`,
+  because the model's BOS is `<|im_start|>` and the template already
+  contains it.
+- **Stricter instruction + examples** (`anvil_core::model_prompt`): the
+  rules now say to use exact column names, reply with one line and no
+  prose or fences, and include three worked examples (including "last
+  names starting with C -> last_name startswith C").
+- **Robust extraction** (`src/nlmodel.rs::extract_expression`): tries the
+  whole output, the text after a label, and each line with common
+  list/label prefixes and trailing punctuation stripped. The first
+  candidate the real parser accepts wins, so surrounding prose no longer
+  breaks a valid expression.
+- **Honest errors**: when nothing validates, the error now includes the
+  raw model output (truncated) instead of only the parser's complaint.
+
+### Verified
+
+- Default and feature builds: all test binaries pass in both; clippy clean
+  and fmt clean.
+- Ignored tokenizer tests both pass: `downloads_the_default_tokenizer`
+  (2.0 MB cached) and the new `chatml_prompt_round_trips_through_the_tokenizer`,
+  which confirms the prompt encodes with the real `<|im_start|>` special
+  tokens and contains the question and the assistant turn.
+- The full generation path still was not run here (no 258 MB model
+  download in this environment).
+
+### Docs
+
+- `docs/agent-log.md`: this entry.
+
+### Next recommended task
+
+Re-test with the real model; if quality is still uneven, add a small
+few-shot retry (feed back the parse error and ask again) or pin a checksum.
+
+## 2026-11-19: Column-name normalisation, better prompt, stronger model
+
+### Context
+
+The user reported that the model produced `last_name startswith C` for a
+column actually headed `Last Name`, so validation failed. They also asked
+whether SmolLM2-360M was the right model and what to look for.
+
+### Fixes
+
+- **Normalised column resolution** (`src/query/filter.rs`): after an exact
+  header match, `#N`, and `colN`, `resolve_column` now falls back to a
+  unique normalised match where spaces, underscores, and hyphens are
+  equivalent. So `last_name`, `lastname`, and `Last Name` all resolve to
+  the `Last Name` column, while two headers that normalise the same stay
+  ambiguous and error instead of being guessed.
+- **Prompt quotes spaced names** (`anvil_core::model_prompt`): column names
+  that are not plain identifiers are listed quoted (`- "Last Name"
+  (text)`), and the rules say to keep quotes exactly.
+- **Architecture auto-detection** (`src/nlmodel.rs`): the GGUF
+  `general.architecture` metadata picks the loader, so Llama (SmolLM2) and
+  Qwen2 (Qwen2.5) models both work through one `Weights` enum.
+- **Default model upgraded** from SmolLM2-360M-Instruct to
+  Qwen2.5-Coder-1.5B-Instruct Q4_K_M (about 1.1 GB), which follows strict
+  output formats far better at a still-small size. The 0.5B variant
+  (about 470 MB) is documented as the lighter option.
+
+### Verified
+
+- Default build and feature build: all test binaries pass; clippy clean
+  and fmt clean in both.
+- New tests: `resolve_column_normalises_spaced_headers` (including the
+  real parser accepting `last_name startswith C`) and the ambiguity
+  guard; `model_prompt_quotes_spaced_column_names`.
+- The ignored `chatml_prompt_round_trips_through_the_tokenizer` passes
+  with the Qwen tokenizer, confirming the ChatML prompt uses the real
+  `<|im_start|>` special tokens.
+- The earlier SmolLM2 model (258 MB) had already downloaded successfully
+  through the new `ureq` downloader, so the download path was confirmed
+  with a real model; the remaining unverified piece is generation quality
+  with Qwen2.5, which needs the 1.1 GB download.
+
+### Model-selection notes (recorded for future work)
+
+Prefer instruct models that are code-tuned or tool/function-call tuned in
+the 0.5B-1.5B range, with: a GGUF Q4_K_M quant, a `tokenizer.json`, a
+ChatML-style template, candle architecture support (Llama, Qwen2), and an
+Apache-2.0/MIT licence. Qwen2.5-Coder is the current best fit. Avoid raw
+base models and models without a chat template.
+
+### Next recommended task
+
+Run the Ask bar against Qwen2.5-Coder-1.5B on the real fixture and tune
+the prompt if needed; then the consent/progress download UX.
+
+## 2026-11-20: Row-scope filter predicates (`any` / `all`) and GLiNER value binding
+
+### Context
+
+The user reported that general Ask questions were hard to parse ("Which
+users are from Canada?") and suspected the filter language itself lacked
+the operators needed to express coherent queries, giving the example
+"show entries where at least one column is blank".
+
+### Implemented
+
+- **GLiNER implicit-column binding** (`src/gliner.rs`, `src/ui/view.rs`,
+  `src/main.rs`): `Interpreter::interpret` now receives the per-column
+  sample callback instead of discarding it. Column labels are enriched
+  with type, aliases, and up to five sampled values plus a task prompt,
+  with a graceful fallback to raw-name labels when the enriched schema
+  would exceed the 512-token budget. `decode` binds an extracted value
+  to the unique column whose sampled values contain it (exact, trimmed,
+  case-insensitive); ambiguous values fail closed; low classifier
+  confidence is overridden only by an unambiguous match. Binding is
+  limited to `==` / `!=` so a fragment such as `C` in "starts with C"
+  cannot hijack the classifier's column.
+- **Row-scope filter predicates** (`src/query/filter.rs`,
+  `src/query/nl.rs`, `src/query/suggest.rs`): `FilterExpr::AnyColumn` /
+  `AllColumn` plus the `any` / `all` pseudo-columns, so `any empty`
+  matches a row with at least one blank cell and `all notempty` requires
+  every column (missing cells count as empty). Evaluation refactors
+  `Prepared::matches` into a per-cell `matches_cell` and loops columns
+  with short-circuiting. `describe` renders both forms and round-trips;
+  autocomplete offers `any` / `all` in the column slot.
+- Docs updated: README filter/Ask sections, ARCHITECTURE filter and
+  limitations sections, ROADMAP filter + GLiNER tasks.
+
+### Verified
+
+- `cargo fmt` clean.
+- `cargo test --release`: 183 lib tests plus all integration suites pass.
+- `cargo test --release --features nl-gliner`: 192 lib tests pass.
+- `cargo clippy --release` and `cargo clippy --release --features
+  nl-gliner`: clean (only the pre-existing `block` / `proc-macro-error2`
+  future-incompat notices).
+- The real 296 MB GLiNER checkpoint was **not** downloaded here, so the
+  end-to-end model path and the ignored `real_model_filter_smoke` remain
+  unverified.
+
+### Tests added / changed
+
+- Added in `src/query/filter.rs`: `any_empty_matches_a_row_with_a_blank_cell`,
+  `all_notempty_requires_every_column`,
+  `row_scope_any_contains_is_case_insensitive`,
+  `row_scope_any_ordering_skips_non_numeric_cells`,
+  `row_scope_parses_inside_boolean_expressions`,
+  `row_scope_rejects_missing_value_and_unknown_operator`.
+- Added in `src/query/nl.rs`: `describe_round_trips_row_scope_predicates`.
+- Added in `src/query/suggest.rs`:
+  `column_slot_offers_row_scope_pseudo_columns`,
+  `row_scope_pseudo_column_moves_to_the_operator_and_value_slots`.
+- Added in `src/gliner.rs`:
+  `a_unique_sampled_value_binds_the_column_without_classifier_confidence`,
+  `an_ambiguous_sampled_value_is_rejected`,
+  `an_unknown_value_falls_back_to_the_classifier`,
+  `the_operator_confidence_gate_still_applies`,
+  `column_descriptions_include_type_and_sampled_values`.
+- Updated UI tests for the new leading `any` / `all` suggestions:
+  `filter_suggestions_arrow_and_enter_accept`,
+  `filter_suggestion_mouse_click_fills_the_input`.
+
+### Roadmap changes
+
+- Filter: added a checked row-scope task; operators bullet updated.
+- Milestone 6: checked GLiNER value binding / label descriptions; added
+  an open task to map row-scope phrases into the rules parser and GLiNER
+  labels; `FilterExpr::Not` remains deferred.
+- `Verify the real model...` remains open.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: filter section documents `AnyColumn` / `AllColumn`
+  and the per-cell evaluation refactor; autocomplete lists `any` / `all`;
+  limitations note row scope exists but general `NOT` does not.
+
+### Issues / technical debt discovered
+
+- The row-scope forms are expressible in the filter bar but the
+  natural-language paths do not construct them yet, so "at least one
+  column is blank" still fails in Ask. That mapping is the next slice.
+- GLiNER now samples every column to build descriptions; on wide files
+  this is up to 32 bounded `sample_distinct` scans per interpretation. It
+  runs on the background executor and the UI caches samples per parse,
+  but it is a measurable cost worth profiling.
+- A column literally named `any` or `all` is unreachable by name; use
+  `#N`.
+
+### Next recommended task
+
+Map row-scope phrases to `AnyColumn` / `AllColumn` in Tier 1 and the
+GLiNER labels, then verify the real GLiNER model and UI regressions.
+
+## 2026-11-20 (later): Row-scope phrases in the NL paths
+
+### Context
+
+The previous slice made `any` / `all` expressible in the filter bar but
+Ask did not construct them, so "showing entries where at least 1 column
+is blank" still failed.
+
+### Implemented
+
+- **Tier 1 (`src/query/nl.rs`)**: `parse` now tries `parse_row_scope`
+  before the per-column loop. It skips leading filler (including
+  "showing"/"listing"), matches a scope prefix (`any`/`some`/`a`,
+  `at least [one|1]`, `all`/`every`, `no`) followed by a column word,
+  then matches the comparison to the end of the phrase. `no column is
+  empty` flips the inner operator (`Empty` -> `NonEmpty`), so it becomes
+  `all notempty`. Row-scope values never consult the per-column sample
+  callback. Anything that does not match falls through unchanged, so
+  `any amount over 100` still resolves `amount`.
+- **GLiNER (`src/gliner.rs`)**: added a third classification, `filter
+  scope` (`one column` / `any column` / `all columns`), appended after
+  the column and comparison specs. `decode` reads it leniently (missing
+  or unknown -> single column) and builds `AnyColumn` / `AllColumn`,
+  skipping `resolve_column` and per-column binding. The operator
+  confidence gate, exact-span validation, negation guard, numeric guard
+  (row scope needs a finite number but not a numeric column), and the
+  describe/validate round-trip all still apply.
+
+### Verified
+
+- `cargo fmt` clean.
+- `cargo test --release`: 186 lib tests plus all integration suites pass.
+- `cargo test --release --features nl-gliner`: 199 lib tests pass.
+- `cargo clippy --release` and `cargo clippy --release --features
+  nl-gliner`: clean.
+- The real GLiNER checkpoint still is not installed, so the end-to-end
+  model path remains unverified; `real_model_filter_smoke` stays ignored.
+
+### Tests added
+
+- `src/query/nl.rs`: `parses_row_scope_phrases` (includes the exact user
+  phrase), `row_scope_phrases_do_not_hijack_column_phrases`,
+  `rules_row_scope_round_trips_through_describe`.
+- `src/gliner.rs`: `row_scope_labels_decode_to_any_and_all_columns`,
+  `row_scope_with_a_value_extracts_and_validates_the_span`,
+  `a_missing_scope_defaults_to_a_single_column`,
+  `the_schema_offers_a_filter_scope_classification`.
+
+### Roadmap changes
+
+- Milestone 6: checked the row-scope NL mapping task.
+
+### Architecture changes
+
+- `ARCHITECTURE.md`: Ask section documents row-scope recognition in
+  Tier 1; limitations note general `NOT` is still outstanding.
+- `README.md`: notes the row-scope Ask phrases.
+
+### Issues / technical debt discovered
+
+- GLiNER negation of row scope is a model-quality risk: a phrase like
+  "no column is empty" may be labelled `all columns` + `is empty`, which
+  is the opposite. Tier 1 flips it correctly; the model path relies on
+  the mandatory preview.
+- Tier 1 row-scope matching is lexicon-based (`column`/`field`/`cell`
+  plus a fixed verb list); variants such as "no cells are populated" are
+  not all covered.
+
+### Next recommended task
+
+Verify the real GLiNER model with the new scope classification, then
+consider general `NOT` / set membership (`in`).
+
+## 2026-11-20 (row-first fix): "any row that has an empty column"
+
+### Context
+
+The user reported that "Any row that has an empty column" still fell
+through to GLiNER, which picked a specific column. The rules parser only
+recognized column-first row scope (`any column is empty`); the row-first
+form was unmatched, so the model was consulted.
+
+### Implemented
+
+- **Tier 1 (`src/query/nl.rs`)**: `parse_row_scope` now tries
+  `parse_column_scope` and then `parse_row_noun_scope`. The row-first
+  matcher starts at a row noun (`row(s)`, `record(s)`, `entry/entries`,
+  `line(s)`), an optional relative pronoun, a has/with/contain verb,
+  optional negation/article, and requires an `<empty-word> <column-word>`
+  ending. Negation (`no row ...`, `has no empty column`) maps to
+  `AllColumn` with the operator flipped. Leading filler uses two skips:
+  the column matcher may skip row nouns; the row matcher anchors on them.
+- **GLiNER (`src/gliner.rs`)**: the `filter scope` classification now
+  carries a task prompt and per-label descriptions, steering the model
+  away from `one column` for row-with-a-blank-column questions.
+
+### Verified
+
+- `cargo fmt` clean.
+- `cargo test --release`: 188 lib tests plus all integration suites pass.
+- `cargo test --release --features nl-gliner`: 201 lib tests pass.
+- `cargo clippy --release` (and feature): clean.
+- Real GLiNER checkpoint still not installed; model path unverified.
+
+### Tests added
+
+- `src/query/nl.rs`: `parses_row_has_column_phrases` (includes
+  "Any row that has an empty column"),
+  `row_has_phrases_do_not_hijack_column_filters`.
+- `src/gliner.rs`: extended
+  `the_schema_offers_a_filter_scope_classification` to assert the prompt
+  and the `any column` description.
+
+### Roadmap / architecture changes
+
+- ROADMAP milestone 6 task text updated; README and ARCHITECTURE document
+  both word orders.
+
+### Issues / technical debt discovered
+
+- `rows`/`entries`/`records` are both filler and row nouns; the two
+  filler skips encode that distinction. A phrase mixing an explicit row
+  quantifier with a column quantifier ("all rows have all columns
+  empty") is not handled.
+- GLiNER scope selection for row-with-blank-column phrasing is improved
+  by descriptions but still unverified against the real model.
+
+### Next recommended task
+
+Verify the real GLiNER model (scope + binding), then general `NOT` / `in`.
