@@ -128,6 +128,16 @@ a summary: delimiter, record and column counts, warnings, the BOM flag and
 invalid-encoding counts. It is useful for CI and for measuring large files
 without a GUI.
 
+### Platform notes
+
+- **macOS / Windows:** the GUI uses the native GPUI backend.
+- **Linux:** the release binary enables both the X11 and Wayland GPUI
+  backends, so it can start on either display server. It needs the usual
+  native packages (`libxkbcommon`, `libxkbcommon-x11`, `libwayland`,
+  `freetype`); see `.github/workflows/ci.yml`. The Linux window has not
+  been launched by the project's macOS-only verification host, so GUI
+  behaviour on Linux is still unverified.
+
 Generate the test fixture set on demand with:
 
 ```sh

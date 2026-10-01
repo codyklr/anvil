@@ -7301,3 +7301,90 @@ removed.
 
 Iteration 4: determine whether the Linux release build can open a GPUI
 window or document the open question without guessing.
+
+---
+
+## 2026-10-01 — Iteration 14: Linux GPUI window backend
+
+### Context
+
+The previous agent suspected that the release build compiled GPUI without
+the x11/wayland backends, so a Linux release binary could not open a
+window, while `cargo test` pulled them in through the dev-only
+`test-support` feature. This iteration confirmed that from the GPUI 0.2.2
+source, fixed it with a target-specific feature entry, and recorded that
+the window itself remains unlaunched here.
+
+### Confirmed (compile-time, no display needed)
+
+- `gpui 0.2.2`'s `test-support` feature enables both `wayland` and `x11`;
+  the project's release build used `default-features = false, features =
+  ["font-kit"]`.
+- On Linux, `gpui::platform::current_platform` returns
+  `HeadlessClient` unless one of those features is compiled in:
+  `guess_compositor()` hardcodes the wayland/x11 display probes to `None`
+  when the features are off, so it always returns "Headless". This is not
+  a "no display" condition; the backend simply was not compiled in, so
+  the old binary could not open a window on any display.
+- This host is macOS/arm64, so no Linux display exists to launch against.
+
+### Implemented
+
+- `Cargo.toml`: the Linux target table now also selects
+  `gpui = { default-features = false, features = ["font-kit", "x11",
+  "wayland"] }`, mirroring what `test-support` already enabled for
+  `cargo test`. Both backends are kept because a Linux desktop may run
+  either server (and a Wayland session would otherwise fall back to
+  headless). macOS/Windows resolution is untouched: the table is
+  Linux-only.
+- `.github/workflows/ci.yml`: the Linux package list already covers this
+  feature set (the same x11/wayland stack `cargo test` already built), so
+  only the explanatory comment was updated.
+
+### Verified
+
+- `cargo tree --target x86_64-unknown-linux-gnu -e normal,features -i
+  gpui` (release/normal edges only) shows `font-kit`, `x11` and `wayland`
+  for Linux; the same command for `aarch64-apple-darwin` shows only
+  `font-kit`, confirming macOS is unchanged.
+- `cargo fmt --check` — clean.
+- `cargo build --release` (macOS) — succeeds; `cargo test --release` —
+  **477 passed, 7 ignored**, unchanged.
+- `cargo clippy --release --all-targets` — clean.
+- **Not verified:** the Linux window was not launched. There is no Linux
+  display or container on this host, so the claim is limited to "the
+  backend is now compiled in and feature resolution is correct". Full
+  GUI behaviour on Linux still needs a Linux runner, which is why the
+  roadmap item stays `[~]`.
+
+### Tests added / changed
+
+None (a build/feature change). The existing suite is the regression guard
+for the macOS resolution.
+
+### Roadmap changes
+
+- Milestone 5 "Enable a real GPUI window backend on Linux" moved
+  `[ ] → [~]`: features added and cross-target resolution verified, but
+  the window is unlaunched.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the cross-platform build limitation and the `gpui`
+dependency row now document the Linux x11/wayland target features and
+that Linux GUI behaviour is unverified. `README.md` gained a short
+platform note with the Linux native-package requirement.
+
+### Issues / technical debt discovered
+
+- Enabling x11 + wayland adds `blade-graphics` (GPU) and its dependency
+  tree to the Linux release build. That is the cost of a real window;
+  it does not affect macOS/Windows. If the CI Linux leg is slow, this is
+  the reason, and build-time caching is the mitigation.
+- The `--probe` path still exercises GPUI's headless platform on every
+  OS, so it stays usable without a display.
+
+### Next recommended task
+
+Iteration 5 (optional): finish the `ui/view.rs` split (tab strip, file
+panel, grid/scrollbar rendering) as a behaviour-neutral refactor.

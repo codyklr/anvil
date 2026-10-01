@@ -674,13 +674,17 @@ make what exists feel finished.
   The workflow has only been validated for syntax; no real GitHub
   Actions run has executed yet, and the full Linux and Windows legs
   are unverified.
-- [ ] Enable a real GPUI window backend on Linux. The release build
-  uses `gpui` with `default-features = false, features = ["font-kit"]`,
-  so neither `x11` nor `wayland` is compiled and
-  `gpui::current_platform` always returns the headless client on
-  Linux: the binary builds and `--probe` works, but the GUI cannot
-  open. Add per-target backend features and the matching native
-  packages, then verify the window on a Linux runner.
+- [~] Enable a real GPUI window backend on Linux. The release build
+  used `gpui` with `default-features = false, features = ["font-kit"]`,
+  so neither `x11` nor `wayland` was compiled and
+  `gpui::current_platform` always returned the headless client on
+  Linux: the binary built and `--probe` worked, but the GUI could not
+  open on any display. `Cargo.toml` now has a Linux-only target entry
+  that enables `font-kit` + `x11` + `wayland` for the release binary
+  (cross-target feature resolution verified for
+  `x86_64-unknown-linux-gnu`), and the CI package list already covers
+  the native stack. The window has **not** been launched on a real
+  Linux display yet, so this stays open until a Linux runner opens it.
 - [ ] Exercise the native GUI on all three target OSes: open dialog,
   drag/drop, archive picker, grid scrolling, keyboard shortcuts,
   clipboard copy, and save/open paths where applicable.

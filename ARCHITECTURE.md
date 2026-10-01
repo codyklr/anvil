@@ -1856,7 +1856,7 @@ no-op / anchor-from-empty).
 
 | Dependency          | Version | Responsibility                                  | Why it is here                         | Architectural constraint                             |
 |---------------------|---------|-------------------------------------------------|----------------------------------------|------------------------------------------------------|
-| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core` |
+| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core`. Release builds enable only `font-kit`, except on Linux where a target entry adds the `x11` + `wayland` backends |
 | `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; sync API. On Linux a target-specific entry selects the pure-Rust `xdg-portal` backend so the build script does not panic |
 | `memchr`            | 2       | SIMD-accelerated `memchr` for byte scanning      | Indexer needs `\n` searches            | Used in `delimit.rs` and `indexing.rs`; tiny API     |
 | `memmap2`           | 0.9     | Memory-mapped file handle                        | Bounded memory + random access         | Wrapped in `MmapSource`; `unsafe` mmap is centralised |
@@ -1901,17 +1901,18 @@ GPUI 0.2.2 Linux dependency tree (`zed-font-kit` / `freetype-sys`,
 `xkbcommon` 0.8.0, `wayland-client`); fontconfig and Vulkan are
 dlopen'd and need no `-dev` package.
 
-The release `anvil` binary itself is built with
-`gpui` `default-features = false, features = ["font-kit"]`, so on
-Linux neither the `x11` nor the `wayland` feature is enabled and
-`gpui::current_platform` always resolves to the headless client. The
-binary compiles and `--probe` works, but the desktop window cannot
-open on Linux until the per-target GPUI backend features are enabled
-and the corresponding native packages are documented. This is
-tracked in `ROADMAP.md` (Milestone 5 cross-platform support) and the
-CI workflow was validated for syntax and for its individual commands
-on macOS only; a real GitHub Actions run on all three runners has not
-yet happened.
+The release `anvil` binary enables the `x11` and `wayland` GPUI
+backends on Linux through a Linux-only target entry in `Cargo.toml`, so
+`gpui::current_platform` can select a real backend instead of the
+headless client; the CI package list already covers the native
+libraries (`zed-font-kit` / `freetype-sys`, `xkbcommon`,
+`wayland-client`; fontconfig and Vulkan are dlopen'd). The binary
+builds and `--probe` works, but the window has **not** been launched on
+a Linux display from this macOS verification host, so Linux GUI
+behaviour is still unverified. This is tracked in `ROADMAP.md`
+(Milestone 5 cross-platform support); the CI workflow was validated
+for syntax and for its individual commands on macOS only, and a real
+GitHub Actions run on all three runners has not yet happened.
 
 Separately, the Linux release build failed at dependency build time.
 `rfd` was declared with `default-features = false` and no backend
