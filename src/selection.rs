@@ -3,13 +3,20 @@
 //! A `Selection` records the cursor cell and (optionally) an anchor cell
 //! so that click-and-drag and shift-click can build rectangular ranges
 //! from a starting point to the cursor. The model is independent of
-//! GPUI: it owns no pixels and no elements, only `(record, column)` pairs.
+//! GPUI: it owns no pixels and no elements, only `(row, column)` pairs.
 //! This lets the same selection logic be exercised by unit tests without
 //! a window.
 //!
+//! Rows are **display positions**, not record indexes: row `i` is the
+//! `i`-th row the user can see, after any active filter or sort. Without
+//! a filter or sort the two coincide. Keeping the selection in display
+//! space means a drag always highlights and copies the visible block,
+//! and the caller resolves positions to record indexes only when it
+//! reads or copies a cell.
+//!
 //! Invariants
 //! ----------
-//! * `cursor` and `anchor` are stored as `(record_index, column_index)`. A
+//! * `cursor` and `anchor` are stored as `(display_row, column_index)`. A
 //!   `None` selection means "nothing selected"; otherwise `cursor` is
 //!   always present.
 //! * `anchor` is `None` when there is no range; the moment the user
@@ -28,22 +35,19 @@
 
 use crate::parser::ColumnIndex;
 
-/// A logical grid coordinate. `(record_index, column_index)` with the
-/// same conventions used everywhere else in the data side
-/// (`record_index` is 0-based, `column_index` is 0-based, both
-/// saturating at `u64::MAX` / `usize::MAX`).
+/// A logical grid coordinate. `(display_row, column_index)` with
+/// `display_row` the 0-based position in the rendered view (so it walks
+/// the filtered/sorted order) and `column_index` 0-based. Both saturate
+/// at `u64::MAX` / `usize::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CellPos {
-    pub record_index: u64,
+    pub row: u64,
     pub column_index: usize,
 }
 
 impl CellPos {
-    pub const fn new(record_index: u64, column_index: usize) -> Self {
-        Self {
-            record_index,
-            column_index,
-        }
+    pub const fn new(row: u64, column_index: usize) -> Self {
+        Self { row, column_index }
     }
 }
 
@@ -86,22 +90,21 @@ impl Selection {
         self.anchor = Some(pos);
     }
 
-    /// Select the entire document: anchor at `(0, 0)`, cursor at
-    /// `(record_count - 1, column_count - 1)`. An empty document
-    /// clears the selection instead of leaving a dangling cursor.
+    /// Select the entire view: anchor at `(0, 0)`, cursor at
+    /// `(row_count - 1, column_count - 1)`. An empty view clears the
+    /// selection instead of leaving a dangling cursor.
     ///
-    /// The rectangle is expressed in *record-index* space, so an active
-    /// filter or sort is honoured by the callers: the grid only paints
-    /// visible rows and
-    /// [`copy_view_text_with`](Self::copy_view_text_with) only emits
-    /// rows present in the visible order.
-    pub fn select_all(&mut self, record_count: u64, column_count: usize) {
-        if record_count == 0 || column_count == 0 {
+    /// `row_count` is the number of rows the user can currently see:
+    /// the filtered/sorted view when one is active, otherwise every
+    /// record. Positions are display positions, so the rectangle covers
+    /// exactly the visible rows.
+    pub fn select_all(&mut self, row_count: u64, column_count: usize) {
+        if row_count == 0 || column_count == 0 {
             self.clear();
             return;
         }
         self.anchor = Some(CellPos::new(0, 0));
-        self.cursor = Some(CellPos::new(record_count - 1, column_count - 1));
+        self.cursor = Some(CellPos::new(row_count - 1, column_count - 1));
     }
 
     /// Clear the selection entirely. After this call `is_empty()` is
@@ -135,30 +138,26 @@ impl Selection {
     /// anchor. Saturating arithmetic: negative deltas that would
     /// underflow clamp at zero, not at `u64::MAX`.
     ///
-    /// The `record_count` parameter is the total number of data rows;
-    /// the resulting row index is clamped to `[0, record_count - 1]`.
-    /// The `column_count` parameter is the number of columns; the
-    /// resulting column is clamped to `[0, column_count - 1]`. Empty
-    /// documents (zero rows or columns) clamp to `(0, 0)` rather than
-    /// panicking.
+    /// The `row_count` parameter is the number of display rows in the
+    /// current view; the resulting row position is clamped to
+    /// `[0, row_count - 1]`. The `column_count` parameter is the number
+    /// of columns; the resulting column is clamped to
+    /// `[0, column_count - 1]`. Empty views (zero rows or columns) clamp
+    /// to `(0, 0)` rather than panicking.
     pub fn move_cursor(
         &mut self,
         row_delta: i64,
         col_delta: i64,
         column_count: usize,
-        record_count: u64,
+        row_count: u64,
         extend: bool,
     ) {
         let cur = self.cursor.unwrap_or(CellPos::new(0, 0));
-        let row_max = record_count.saturating_sub(1) as i64;
+        let row_max = row_count.saturating_sub(1) as i64;
         // `row_delta` / `col_delta` may be `i64::MIN` / `i64::MAX`
         // (Home / End, Cmd/Ctrl+Home / End). Saturating arithmetic
         // keeps those extremes well-defined instead of overflowing.
-        let row = clamp_signed(
-            (cur.record_index as i64).saturating_add(row_delta),
-            0,
-            row_max,
-        ) as u64;
+        let row = clamp_signed((cur.row as i64).saturating_add(row_delta), 0, row_max) as u64;
         let col_max = if column_count == 0 {
             0
         } else {
@@ -176,26 +175,20 @@ impl Selection {
     /// wrapping across row boundaries and around the document ends.
     /// `forward == true` is Tab; `false` is Shift-Tab.
     ///
-    /// Does nothing when the document has zero rows or columns. The
-    /// wrap stays inside the document because the total cell count is
-    /// `record_count * column_count`.
-    pub fn move_cell(
-        &mut self,
-        forward: bool,
-        column_count: usize,
-        record_count: u64,
-        extend: bool,
-    ) {
-        if column_count == 0 || record_count == 0 {
+    /// Does nothing when the view has zero rows or columns. The wrap
+    /// stays inside the view because the total cell count is
+    /// `row_count * column_count`.
+    pub fn move_cell(&mut self, forward: bool, column_count: usize, row_count: u64, extend: bool) {
+        if column_count == 0 || row_count == 0 {
             return;
         }
         let cols = column_count as u64;
-        let total = record_count.saturating_mul(cols);
+        let total = row_count.saturating_mul(cols);
         if total == 0 {
             return;
         }
         let cur = self.cursor.unwrap_or(CellPos::new(0, 0));
-        let clamped_row = cur.record_index.min(record_count - 1);
+        let clamped_row = cur.row.min(row_count - 1);
         let clamped_col = (cur.column_index as u64).min(cols - 1);
         let linear = clamped_row * cols + clamped_col;
         let next_linear = if forward {
@@ -228,23 +221,39 @@ impl Selection {
     pub fn normalize(&self) -> Option<(CellPos, CellPos)> {
         let cur = self.cursor?;
         let anc = self.anchor.unwrap_or(cur);
-        let top = cur.record_index.min(anc.record_index);
-        let bot = cur.record_index.max(anc.record_index);
+        let top = cur.row.min(anc.row);
+        let bot = cur.row.max(anc.row);
         let left = cur.column_index.min(anc.column_index);
         let right = cur.column_index.max(anc.column_index);
         Some((CellPos::new(top, left), CellPos::new(bot, right)))
     }
 
-    /// Is `(record_index, column_index)` strictly inside the normalized
-    /// rectangle?
-    pub fn contains(&self, record_index: u64, column_index: usize) -> bool {
+    /// Is `(row, column)` strictly inside the normalized rectangle?
+    pub fn contains(&self, row: u64, column_index: usize) -> bool {
         let Some((tl, br)) = self.normalize() else {
             return false;
         };
-        record_index >= tl.record_index
-            && record_index <= br.record_index
+        row >= tl.row
+            && row <= br.row
             && column_index >= tl.column_index
             && column_index <= br.column_index
+    }
+
+    /// Clamp the cursor and anchor into `[0, row_count - 1]`. A zero-row
+    /// view clears the selection. Called when a filter or sort changes
+    /// the visible row set so a stale position never exceeds the view.
+    pub fn clamp_to_rows(&mut self, row_count: u64) {
+        if row_count == 0 {
+            self.clear();
+            return;
+        }
+        let max = row_count - 1;
+        if let Some(c) = self.cursor {
+            self.cursor = Some(CellPos::new(c.row.min(max), c.column_index));
+        }
+        if let Some(a) = self.anchor {
+            self.anchor = Some(CellPos::new(a.row.min(max), a.column_index));
+        }
     }
 
     /// Convert a column index to a `ColumnIndex` for `ParsedDocument`.
@@ -267,7 +276,7 @@ impl Selection {
         let Some((tl, br)) = self.normalize() else {
             return 0;
         };
-        let rows = br.record_index - tl.record_index + 1;
+        let rows = br.row - tl.row + 1;
         let cols = br.column_index as u64 - tl.column_index as u64 + 1;
         rows * cols
     }
@@ -297,7 +306,7 @@ impl Selection {
         };
         let line_ending = if cfg!(windows) { "\r\n" } else { "\n" };
         let mut out = String::new();
-        for row in tl.record_index..=br.record_index {
+        for row in tl.row..=br.row {
             for col in tl.column_index..=br.column_index {
                 if col > tl.column_index {
                     out.push('\t');
@@ -310,15 +319,12 @@ impl Selection {
         out
     }
 
-    /// Render the selection as TSV, but only for rows present in
-    /// `view_rows` (the filtered/sorted display order). Rows are emitted
-    /// in `view_rows` order and the column range is the selection's
-    /// normalized column range. Records inside the selection rectangle
-    /// that are hidden by the active filter are skipped, so a select-all
-    /// under a filter copies exactly what the user can see.
-    ///
-    /// `view_rows` must be in ascending record-index order for the
-    /// binary search used to skip out-of-range records.
+    /// Render the selection as TSV for the current view. The selection's
+    /// rows are *display positions*; `view_rows` is the mapping from a
+    /// display position to a record index. Rows are emitted in view order
+    /// and the column range is the selection's normalized column range.
+    /// A position past the end of `view_rows` (a stale selection after
+    /// the view shrank) is skipped.
     pub fn copy_view_text_with<F>(&self, view_rows: &[u64], cell_at: F) -> String
     where
         F: Fn(u64, usize) -> Option<String>,
@@ -327,11 +333,18 @@ impl Selection {
             return String::new();
         };
         let line_ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        if view_rows.is_empty() {
+            return String::new();
+        }
+        let last = (br.row as usize).min(view_rows.len() - 1);
+        if (tl.row as usize) > last {
+            return String::new();
+        }
         let mut out = String::new();
-        for &row in view_rows {
-            if row < tl.record_index || row > br.record_index {
-                continue;
-            }
+        for position in (tl.row as usize)..=last {
+            let Some(&row) = view_rows.get(position) else {
+                break;
+            };
             for col in tl.column_index..=br.column_index {
                 if col > tl.column_index {
                     out.push('\t');
@@ -344,18 +357,24 @@ impl Selection {
         out
     }
 
-    /// Number of rows in the selection rectangle that also appear in
-    /// `view_rows`. Used for the "copied N cells" status message so it
-    /// matches what was actually written under a filter.
+    /// Number of cells the selection covers in the current view: the
+    /// normalized row range intersected with `view_rows`, times the
+    /// column range. Used for the "copied N cells" status message so it
+    /// matches what [`copy_view_text_with`](Self::copy_view_text_with)
+    /// writes.
     pub fn view_cell_count(&self, view_rows: &[u64]) -> u64 {
         let Some((tl, br)) = self.normalize() else {
             return 0;
         };
         let cols = br.column_index as u64 - tl.column_index as u64 + 1;
-        let rows = view_rows
-            .iter()
-            .filter(|&&row| row >= tl.record_index && row <= br.record_index)
-            .count() as u64;
+        if view_rows.is_empty() {
+            return 0;
+        }
+        let last = (br.row as usize).min(view_rows.len() - 1);
+        if (tl.row as usize) > last {
+            return 0;
+        }
+        let rows = (last - tl.row as usize + 1) as u64;
         rows * cols
     }
 }
@@ -450,8 +469,8 @@ mod tests {
         // Move off the top-left corner.
         s.move_cursor(-10, -10, 4, 100, false);
         assert_eq!(s.cursor(), Some(CellPos::new(0, 0)));
-        // Move past the bottom-right corner. The row index clamps to
-        // record_count - 1, the column to column_count - 1.
+        // Move past the bottom-right corner. The row position clamps
+        // to row_count - 1, the column to column_count - 1.
         s.move_cursor(1000, 1000, 4, 100, false);
         assert_eq!(s.cursor(), Some(CellPos::new(99, 3)));
     }
@@ -747,9 +766,9 @@ mod tests {
     }
 
     #[test]
-    fn copy_view_text_skips_hidden_rows() {
+    fn copy_view_text_skips_positions_past_a_shorter_view() {
         let mut s = Selection::empty();
-        s.select_all(5, 2);
+        s.select_all(3, 2);
         // View order: records 0, 2 and 4 are the only visible ones.
         let view = [0u64, 2, 4];
         let text = s.copy_view_text_with(&view, |r, c| Some(format!("r{r}c{c}")));
@@ -759,6 +778,45 @@ mod tests {
             format!("r0c0\tr0c1{ending}r2c0\tr2c1{ending}r4c0\tr4c1{ending}")
         );
         assert_eq!(s.view_cell_count(&view), 6);
+    }
+
+    #[test]
+    fn copy_view_uses_positions_not_record_indexes() {
+        // A sort permutation where display rows 0 and 1 are records 2
+        // and 0. The selection covers the two visible rows, so copy must
+        // emit exactly those two records, not the record rectangle
+        // 0..=2.
+        let mut s = Selection::empty();
+        s.set(CellPos::new(0, 0));
+        s.extend_to(CellPos::new(1, 1));
+        let view = [2u64, 0, 1];
+        let text = s.copy_view_text_with(&view, |r, c| Some(format!("r{r}c{c}")));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("r2c0\tr2c1{ending}r0c0\tr0c1{ending}"));
+        assert_eq!(s.view_cell_count(&view), 4);
+    }
+
+    #[test]
+    fn copy_view_clamps_a_stale_selection_to_the_view() {
+        let mut s = Selection::empty();
+        s.select_all(5, 1);
+        let view = [0u64, 2, 4];
+        let text = s.copy_view_text_with(&view, |r, _| Some(format!("r{r}")));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("r0{ending}r2{ending}r4{ending}"));
+        assert_eq!(s.view_cell_count(&view), 3);
+    }
+
+    #[test]
+    fn clamp_to_rows_clamps_cursor_and_anchor() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(8, 1));
+        s.extend_to(CellPos::new(3, 2));
+        s.clamp_to_rows(4);
+        assert_eq!(s.cursor(), Some(CellPos::new(3, 2)));
+        assert_eq!(s.anchor(), Some(CellPos::new(3, 1)));
+        s.clamp_to_rows(0);
+        assert!(s.is_empty());
     }
 
     #[test]

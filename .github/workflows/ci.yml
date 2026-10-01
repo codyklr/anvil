@@ -19,9 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # GPUI 0.2.2 needs native libraries on Linux. The project builds with
-      # `gpui` default features off, but the dev-only `test-support` feature
-      # used by `cargo test` turns on the x11 + wayland backends:
+      # GPUI 0.2.2 needs native libraries on Linux. `Cargo.toml` enables the
+      # x11 and wayland GPUI backends for Linux targets so the release
+      # binary can open a window; `cargo test` additionally enables the
+      # dev-only `test-support` feature. Both compile the same native
+      # stack:
       #   - zed-font-kit's unconditional freetype-sys probes `freetype2`
       #   - xkbcommon 0.8.0 links `xkbcommon` / `xkbcommon-x11`
       #   - wayland-client probes `wayland-client`

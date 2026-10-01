@@ -189,12 +189,12 @@ impl MainView {
             .or_else(|| self.first_match_column(row))
             .unwrap_or_else(|| self.selection.cursor().map(|c| c.column_index).unwrap_or(0));
         let col = col.min(model.doc.column_count().saturating_sub(1));
-        self.selection.set(CellPos::new(row, col));
-        // Bring the match on screen in both axes. The list may be filtered
-        // or sorted, so map the record index to its display position
-        // before scrolling; and the matching column may be far to the
-        // left or right of the current viewport.
+        // Bring the match on screen in both axes. The selection is in
+        // display space, so map the record index to its display position
+        // before moving the cursor and scrolling; the matching column may
+        // be far to the left or right of the current viewport.
         let position = self.display_position(row);
+        self.selection.set(CellPos::new(position as u64, col));
         self.v_scroll
             .scroll_to_item_strict(position, ScrollStrategy::Top);
         self.ensure_column_visible(col, cx);

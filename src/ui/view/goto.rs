@@ -3,8 +3,8 @@
 //! A small one-line bar that reuses the shared `TextEdit` buffer. Enter
 //! resolves the typed number as a 1-based *display* row (the order the
 //! grid currently shows, after any filter or sort), clamps it to the
-//! visible range, moves the cursor to that record and scrolls it to the
-//! top. Esc closes the bar without changing the selection.
+//! visible range, moves the cursor to that display position and scrolls
+//! it to the top. Esc closes the bar without changing the selection.
 
 use super::*;
 
@@ -32,17 +32,14 @@ impl MainView {
     /// Number of rows currently displayed: the filtered/sorted view when
     /// one is active, otherwise every record.
     fn displayed_row_count(&self) -> u64 {
-        match self.view_rows() {
-            Some(rows) => rows.len() as u64,
-            None => self.model.as_ref().map(|m| m.row_count()).unwrap_or(0),
-        }
+        self.view_row_count()
     }
 
-    /// Resolve a 1-based display row number to a raw record index.
-    /// Returns `None` for an empty or non-numeric entry. The number is
-    /// clamped to `[1, displayed_row_count]` so an out-of-range jump
-    /// lands on the nearest row instead of doing nothing.
-    fn record_for_display_row(&self, input: &str) -> Option<u64> {
+    /// Resolve a 1-based display row number to a 0-based **display
+    /// position**. Returns `None` for an empty or non-numeric entry. The
+    /// number is clamped to `[1, displayed_row_count]` so an out-of-range
+    /// jump lands on the nearest row instead of doing nothing.
+    fn display_row_for_input(&self, input: &str) -> Option<u64> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return None;
@@ -52,11 +49,7 @@ impl MainView {
         if total == 0 {
             return None;
         }
-        let display = (n.clamp(1, total) - 1) as usize;
-        Some(match self.view_rows() {
-            Some(rows) => rows[display],
-            None => display as u64,
-        })
+        Some(n.clamp(1, total) - 1)
     }
 
     /// Commit the input: jump to the requested display row, keeping the
@@ -64,7 +57,7 @@ impl MainView {
     /// inline error and leaves the selection untouched.
     pub(super) fn commit_goto(&mut self, cx: &mut Context<Self>) {
         let input = self.goto_input.text().to_string();
-        let Some(record) = self.record_for_display_row(&input) else {
+        let Some(display) = self.display_row_for_input(&input) else {
             self.goto_error = Some("enter a row number".to_string());
             cx.notify();
             return;
@@ -81,16 +74,11 @@ impl MainView {
             .cursor()
             .map(|c| c.column_index.min(cols - 1))
             .unwrap_or(0);
-        self.selection.set(CellPos::new(record, col));
-        // Scroll so the target is the top row of the viewport. Under a
-        // sort the record's display position (not its record index)
-        // drives the list offset.
-        let position = match self.view_rows() {
-            Some(rows) => rows.binary_search(&record).unwrap_or(0),
-            None => record as usize,
-        };
+        // The selection is in display space, so the resolved position is
+        // both the cursor row and the list offset.
+        self.selection.set(CellPos::new(display, col));
         self.v_scroll
-            .scroll_to_item_strict(position, ScrollStrategy::Top);
+            .scroll_to_item_strict(display as usize, ScrollStrategy::Top);
         self.ensure_column_visible(col, cx);
         self.kick_inspector(cx);
         self.goto_error = None;

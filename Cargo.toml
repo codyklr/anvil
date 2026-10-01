@@ -46,6 +46,24 @@ gliner-rs = { version = "=0.2.3", optional = true, default-features = false }
 serde_json = { version = "1", optional = true }
 gliner-tokenizers = { package = "tokenizers", version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 
+# rfd's build script requires one Linux dialog backend to be selected, or
+# it panics with "You need to choose at least one backend". The upstream
+# default is `xdg-portal` (a pure-Rust backend that needs no extra system
+# libraries), so select it explicitly on Linux while leaving macOS/Windows
+# resolution untouched. The generic `rfd` entry in [dependencies] above
+# still applies everywhere else.
+#
+# GPUI's Linux window backends are feature-gated. Without `x11` or
+# `wayland`, `gpui::current_platform` always resolves to the headless
+# client on Linux, so the release binary cannot open a window even when a
+# display is available. The dev-only `test-support` feature already pulls
+# both in for `cargo test`; mirror them for the release binary. The CI
+# Linux packages already cover this feature set. macOS/Windows are
+# unaffected because this table is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "x11", "wayland"] }
+
 [dev-dependencies]
 crc32fast = "1"
 # Enable GPUI's headless test harness only for tests. `test-support`

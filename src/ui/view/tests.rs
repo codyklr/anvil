@@ -333,6 +333,127 @@ async fn drag_select_builds_rectangle(cx: &mut TestAppContext) {
     );
 }
 
+/// Regression: under an active sort the selection must be a rectangle in
+/// *display* space, so a drag over two visible rows copies exactly those
+/// two rows. Before the fix the range was a record rectangle, which
+/// covered a different set of display rows.
+///
+/// `shuffled_document` ascending on `a` is records [2, 0, 1], i.e. the
+/// visible rows (10, z), (20, x), (30, y). Dragging display rows 0..1
+/// must copy the first two visible rows only.
+#[gpui::test]
+async fn drag_select_under_sort_copies_the_visible_block(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let written = inject_doc(cx, &view, shuffled_document());
+
+    cx.update_window_entity(&view, |view, _, cx| view.cycle_sort(0, cx));
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(
+            view.sort_rows.as_ref().map(|rows| rows.as_slice()),
+            Some(&[2u64, 0, 1][..]),
+            "ascending sort should reorder the view"
+        );
+    });
+
+    let start = cell_center(cx, &view, 0, 0);
+    let end = cell_center(cx, &view, 1, 1);
+    let modifiers = gpui::Modifiers::default();
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(
+            view.selection.normalize(),
+            Some((CellPos::new(0, 0), CellPos::new(1, 1))),
+            "selection must be a display-space rectangle"
+        );
+    });
+
+    let copy = if cfg!(target_os = "macos") {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    };
+    cx.simulate_keystrokes(copy);
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    let captured = written.lock().expect("clipboard recorder").clone();
+    assert_eq!(
+        captured,
+        vec![format!("10\tz{ending}20\tx{ending}")],
+        "copy must emit only the two visible rows"
+    );
+}
+
+/// Arrow keys move by display position under an active sort, and clamp
+/// at the last visible row rather than walking off the view.
+#[gpui::test]
+async fn arrow_keys_walk_the_sorted_view(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, shuffled_document());
+    cx.update_window_entity(&view, |view, _, cx| view.cycle_sort(0, cx));
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        view.selection.set(CellPos::new(0, 0));
+    });
+
+    cx.simulate_keystrokes("down");
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
+    });
+    cx.simulate_keystrokes("down");
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+    });
+    // One more down clamps at the last visible row (view len 3).
+    cx.simulate_keystrokes("down");
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+    });
+}
+
+/// Tab walks the visible cells under an active sort: from the last column
+/// of display row 0 it wraps to column 0 of display row 1.
+#[gpui::test]
+async fn tab_walks_the_sorted_view(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, shuffled_document());
+    cx.update_window_entity(&view, |view, _, cx| view.cycle_sort(0, cx));
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        view.selection.set(CellPos::new(0, 1));
+    });
+
+    cx.simulate_keystrokes("tab");
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
+    });
+}
+
+/// A filter that shrinks the visible set clamps a selection that now
+/// points past the end instead of leaving it dangling.
+#[gpui::test]
+async fn filter_change_clamps_selection(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, country_document());
+    cx.update_window_entity(&view, |view, _, _| {
+        view.selection.set(CellPos::new(2, 0));
+    });
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "country == UK".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        // The filtered view has one row, so position 2 clamps to 0.
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+    });
+}
+
 #[test]
 fn auto_scroll_direction_detects_edges() {
     let bounds = Bounds {
@@ -380,7 +501,7 @@ async fn drag_past_bottom_edge_starts_auto_scroll(cx: &mut TestAppContext) {
             .cursor()
             .expect("auto-scroll should extend the selection");
         assert!(
-            cursor.record_index > 0,
+            cursor.row > 0,
             "selection should extend past the first visible row, got {cursor:?}"
         );
         // The list actually scrolled (the deferred scroll from each
@@ -1922,11 +2043,11 @@ async fn diagnostics_navigation_moves_selection_to_warning_row(cx: &mut TestAppC
         view.selection.set(CellPos::new(0, 0));
 
         view.jump_to_warning(0, cx);
-        assert_eq!(view.selection.cursor().map(|c| c.record_index), Some(1));
+        assert_eq!(view.selection.cursor().map(|c| c.row), Some(1));
         assert!(view.status_message.is_none());
 
         view.jump_to_warning(1, cx);
-        assert_eq!(view.selection.cursor().map(|c| c.record_index), Some(2));
+        assert_eq!(view.selection.cursor().map(|c| c.row), Some(2));
     });
 }
 
@@ -1940,7 +2061,7 @@ async fn diagnostics_navigation_refuses_a_filtered_out_row(cx: &mut TestAppConte
         view.selection.set(CellPos::new(0, 0));
         view.filter_rows = Some(Arc::new(vec![0]));
         view.jump_to_warning(0, cx);
-        assert_eq!(view.selection.cursor().map(|c| c.record_index), Some(0));
+        assert_eq!(view.selection.cursor().map(|c| c.row), Some(0));
         let msg = view.status_message.clone().expect("status message");
         assert!(msg.contains("hidden"), "unexpected status: {msg}");
     });
@@ -2193,6 +2314,17 @@ async fn file_panel_navigation_uses_tab_lifecycle(cx: &mut TestAppContext) {
 }
 
 // ---- filter ------------------------------------------------------
+
+/// A three-row two-column fixture whose first column is out of order,
+/// so sorting ascending produces a display order (2, 0, 1) that is not
+/// the record order. Used by the sort/selection interaction tests.
+fn shuffled_document() -> anvil_core::ParsedDocument {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("shuffled.csv");
+    std::fs::write(&path, b"a,b\n20,x\n30,y\n10,z\n").expect("write");
+    let opened = anvil_core::source::local::open_local(&path).expect("open");
+    anvil_core::index_opened(opened)
+}
 
 /// A small two-column fixture with headers, used by the filter
 /// tests. Rows: (US,10), (UK,20), (US,30).
@@ -2636,9 +2768,10 @@ async fn clear_filter_restores_document(cx: &mut TestAppContext) {
     });
 }
 
-/// With a filter active, Down moves to the next *visible* record,
+/// With a filter active, Down moves to the next *visible* row,
 /// skipping hidden ones. Rows are (US,10), (UK,20), (US,30) and the
-/// filter keeps 0 and 2, so Down from record 0 lands on record 2.
+/// filter keeps 0 and 2, so the visible rows are display positions 0
+/// and 1.
 #[gpui::test]
 async fn filter_vertical_navigation_skips_hidden_rows(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
@@ -2660,7 +2793,7 @@ async fn filter_vertical_navigation_skips_hidden_rows(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("down");
     cx.update_window_entity(&view, |view, _, _| {
-        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
     });
 
     // Up from the last visible row goes back to the first.
@@ -2695,17 +2828,17 @@ async fn filter_tab_and_row_jumps_walk_visible_rows(cx: &mut TestAppContext) {
     } else {
         "ctrl-end"
     };
-    // Cmd/Ctrl+End jumps to the last visible record, not the last
-    // record in the file (which is filtered out).
+    // Cmd/Ctrl+End jumps to the last visible row, not the last record
+    // in the file (which is filtered out).
     cx.simulate_keystrokes(end);
     cx.update_window_entity(&view, |view, _, _| {
-        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
     });
 
     // Tab wraps from the last visible cell back to the first.
     cx.simulate_keystrokes("tab");
     cx.update_window_entity(&view, |view, _, _| {
-        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 1)));
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
     });
     cx.simulate_keystrokes("tab");
     cx.update_window_entity(&view, |view, _, _| {
@@ -2904,8 +3037,8 @@ async fn goto_maps_through_active_filter(cx: &mut TestAppContext) {
     });
 
     cx.update_window_entity(&view, |view, _, _| {
-        // Filtered view is [0, 2]; display row 2 maps to record 2.
-        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+        // Filtered view is [0, 2]; display row 2 is display position 1.
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 0)));
     });
 }
 
@@ -3201,6 +3334,46 @@ async fn inspector_scopes_to_the_filtered_view(cx: &mut TestAppContext) {
         assert_eq!(stats.min.as_deref(), Some("10"));
         assert_eq!(stats.max.as_deref(), Some("30"));
         assert!(view.view_rows().is_some());
+    });
+}
+
+/// The inspector's inferred type must also come from the scoped view,
+/// not the whole document: the `US` rows are numeric while the `UK` row
+/// is text, so the whole column is mixed but the filtered view is not.
+#[gpui::test]
+async fn inspector_infers_type_from_the_filtered_view(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let doc = {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scoped_type.csv");
+        std::fs::write(&path, b"country,amount\nUS,10\nUK,abc\nUS,20\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open local");
+        anvil_core::index_opened(opened)
+    };
+    inject_doc(cx, &view, doc);
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "country == US".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.close_filter(cx);
+        view.selection.set(CellPos::new(0, 1));
+        view.toggle_inspector(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        let stats = view.inspector_stats.as_ref().expect("inspector stats");
+        assert_eq!(stats.total_rows, 2);
+        assert_eq!(
+            stats.column_type,
+            anvil_core::ColumnType::Integer,
+            "the scoped view is numeric even though the whole column is text"
+        );
     });
 }
 

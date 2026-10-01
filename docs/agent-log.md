@@ -6183,7 +6183,8 @@ global (not per-tab) transient state, like `filter_open`.
   the copy path now walk the visible display order, but a *dragged*
   range under an active sort still spans a record-index interval that
   may not be contiguous on screen. Fixing that needs a display-space
-  selection model and is out of scope here.
+  selection model and is out of scope here. **(Resolved in Iteration
+  12, 2026-10-01: the selection model now stores display positions.)**
 - The delegated implementation worker hit its model-turn limit on the
   first CI slice (produced no files); work has continued locally with
   each slice verified by the test suite.
@@ -6907,6 +6908,8 @@ the UI scoping.
 - `infer_column` still samples the whole document, so a scoped view's
   inferred type can reflect values that are filtered out. That only
   selects numeric-vs-text comparison and is a separate follow-up.
+  **(Resolved in Iteration 13, 2026-10-01: `stats_rows` now infers
+  through `schema::infer_column_rows` over the same row set.)**
 
 ### Next recommended task
 
@@ -7049,3 +7052,402 @@ rendering are still in `view.rs`.
 
 Finish the `ui/view.rs` split (tabs, file panel, grid rendering) as a
 separate refactor-only iteration, then re-run the full suite.
+
+---
+
+## 2026-10-01 — Iteration 11: fix the Linux release build (rfd backend)
+
+### Context
+
+An independent review on x86-64 Linux reported that all 468 tests pass
+once the Linux native packages are installed, but that
+`cargo build --release` fails as shipped because `Cargo.toml` declared
+`rfd` with `default-features = false` and no backend. The prior work had
+only ever been verified on macOS, where the failure does not occur.
+
+### Implemented
+
+- Reproduced the root cause: `rfd` 0.17.2's `build.rs` panics with
+  `You need to choose at least one backend: gtk3 or xdg-portal features
+  for x86_64-linux` when neither backend feature is enabled and
+  `CARGO_CFG_TARGET_OS == "linux"`. macOS and Windows take a different
+  branch of the build script, so the earlier macOS-only verification
+  never hit it.
+- `Cargo.toml`: kept the generic
+  `rfd = { version = "0.17", default-features = false }` for
+  macOS/Windows and added a
+  `[target.'cfg(target_os = "linux")'.dependencies]` entry selecting
+  `features = ["xdg-portal"]`. `xdg-portal` is pure Rust and adds only
+  `pollster` (`pollster 0.4.0` is now in `Cargo.lock`), so no new
+  system packages are required. The sync `FileDialog::pick_file()`
+  used at `src/ui/view.rs:1371` is implemented by `rfd` via
+  `pollster::block_on`, so switching to `gtk3` was not necessary.
+- Re-read `.github/workflows/ci.yml`; the Linux package list is
+  sufficient once a backend is selected, so no CI change was made.
+
+### Verified
+
+- macOS build/test unchanged: `cargo build --release` succeeds;
+  `cargo test --release` — **468 passed, 7 ignored** (208 library, 173
+  binary with 1 ignored, 86 `tests/core.rs` with 6 ignored, 1 style
+  guard), identical to the pre-change count.
+- `cargo fmt --check` clean; `cargo clippy --release --all-targets`
+  clean.
+- `cargo run --release --bin gen_fixture -- fixtures 2000` and
+  `cargo run --release --bin anvil -- --probe fixtures/large.csv` run
+  (the 1M fixture was regenerated afterwards).
+- Focused Linux-target cross-check, since this host is macOS/arm64 and
+  has no Linux VM or running Docker: in a throwaway crate,
+  `cargo check --target x86_64-unknown-linux-gnu` with
+  `rfd default-features = false` panics exactly as reported, and with
+  the Linux target entry plus `features = ["xdg-portal"]` it finishes
+  successfully. `cargo tree --target x86_64-unknown-linux-gnu` confirms
+  `xdg-portal` + `pollster` are active for the target.
+
+### Not verified
+
+- The full Linux `cargo build --release`, `cargo test --release` and
+  `--probe` were **not** run: the verification host is macOS/arm64, the
+  Docker daemon is unavailable, and there is no Linux runner here.
+  GitHub Actions was not run. The Linux and Windows legs of the CI
+  matrix therefore remain unverified until a real runner executes them.
+  The Linux GUI backend remains an open item.
+
+### Tests added / changed
+
+None.
+
+### Roadmap changes
+
+- The `[~]` "Add a CI build/test matrix" item now records the missed
+  Linux-only `rfd` failure and its fix. It stays `[~]` because no real
+  CI run has happened.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the cross-platform build limitation now documents the
+`rfd` root cause and the fix, and the dependency table records the Linux
+`xdg-portal` target entry.
+
+### Issues / technical debt discovered
+
+- The `agent/iterative-improvements` branch ref no longer exists; it was
+  fast-forwarded into `master` (see reflog), so work continues on
+  `master` @ `ecba98b`.
+- Worker delegation tooling was unusable in this session (scope
+  validation errors on confirmed regular files; one trivial scout task
+  hit the model-turn limit), so this iteration was implemented locally
+  after explicit recovery routing.
+
+### Next recommended task
+
+Iteration 2: fix range selection under an active sort by keeping the
+selection in display-position space.
+
+---
+
+## 2026-10-01 — Iteration 12: display-position selection under an active sort
+
+### Context
+
+The previous agent recorded as technical debt that `Selection` was a
+rectangle in raw record-index space. The grid and the copy path already
+walked the visible display order, but a dragged or shift-clicked range
+under an active sort spanned a record-index interval whose records are
+not adjacent on screen: the highlight, the copy, and select-all
+disagreed with the visible block. This iteration fixes that by moving
+the model itself into display-position space.
+
+### Implemented
+
+- `CellPos` now stores `row` (a 0-based display position) instead of
+  `record_index`. `Selection::move_cursor`, `move_cell`, `select_all`,
+  `contains`, `cell_count` and the docs were updated to view-relative
+  semantics; `copy_view_text_with`/`view_cell_count` now index
+  `view_rows` by position rather than searching for records in a
+  record rectangle. Added `Selection::clamp_to_rows`.
+- `ui/grid.rs`: `render_row` takes the record index (for cell text,
+  search, warnings, gutter) and the display position (for selection
+  and copy-flash); the click/drag callbacks now report the display
+  position.
+- `ui/view.rs`: the selection is resolved against `view_row_count`
+  (a new helper next to `view_rows`) for navigation, Tab, select-all,
+  auto-scroll and reindex clamping. `move_selection` and
+  `move_cell_selection` dropped their record-space binary searches.
+- `ui/view/{sort,filter}.rs`: `clamp_selection_to_view` runs when a
+  sort or filter result lands, and when a sort is cleared. A
+  header-mode reindex still drops an out-of-range selection.
+- `ui/view/{goto,search,diagnostics,cell_detail}.rs`: go-to-row,
+  find-next and diagnostics land on the record's display position;
+  the full-cell panel resolves the position to a record before its
+  background read. Byte-faithful copy is unchanged (ADR 0003).
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **475 passed, 7 ignored** (211 library, 177
+  binary with 1 ignored, 86 `tests/core.rs` with 6 ignored, 1 style
+  guard), up from 468 passed / 7 ignored.
+- `cargo clippy --release --all-targets` — clean.
+- The new UI test was written first and confirmed to fail: the drag
+  produced `(0,0)-(2,1)` in the old record space, and now produces
+  `(0,0)-(1,1)`.
+- A full Linux build was still not run (macOS/arm64 host); see
+  Iteration 11.
+
+### Tests added / changed
+
+- `src/selection.rs`: `copy_view_uses_positions_not_record_indexes`,
+  `copy_view_clamps_a_stale_selection_to_the_view`,
+  `clamp_to_rows_clamps_cursor_and_anchor`; renamed the view-copy test
+  and updated the position-space expectations.
+- `src/ui/view/tests.rs`: `drag_select_under_sort_copies_the_visible_block`
+  (the reproduction and regression), `arrow_keys_walk_the_sorted_view`,
+  `tab_walks_the_sorted_view`, `filter_change_clamps_selection`.
+  Updated `goto_maps_through_active_filter`,
+  `filter_vertical_navigation_skips_hidden_rows`,
+  `filter_tab_and_row_jumps_walk_visible_rows` and the diagnostics
+  cursor assertions to display positions.
+
+### Roadmap changes
+
+- Milestone 2 Selection model: the `Selection` task now describes
+  display-position rows, and a completed sub-task records the
+  sort-alignment fix.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the `selection` module description, the selection
+model section (operations table, invariants, grid integration) and the
+clipboard section now document display positions, `clamp_to_rows`,
+`copy_view_text_with` and `view_cell_count`.
+
+### Issues / technical debt discovered
+
+- None new. The historical debt note in the Iteration 2 log entry is
+  annotated as resolved.
+
+### Next recommended task
+
+Iteration 13: make the column inspector's type inference sample the
+same filtered/sorted row set as its stats.
+
+---
+
+## 2026-10-01 — Iteration 13: scoped type inference for the column inspector
+
+### Context
+
+Iteration 8d scoped the inspector's statistics to the filtered/sorted
+view but left `stats_scan` calling `infer_column`, which samples records
+`0..2048` of the whole document. A view whose rows were all numeric could
+therefore be labelled `Text` (or vice versa) while the stats beside it
+described the visible rows. This iteration removes that disagreement.
+
+### Implemented
+
+- `schema.rs`: inference is now driven by an iterator of row indexes.
+  Added `infer_column_rows(doc, column, rows)`, which samples at most
+  `INFER_SAMPLE_ROWS` (2048) of the supplied rows in display order;
+  `infer` / `infer_column` keep the whole-document behaviour. The
+  numeric/boolean/empty decision logic is unchanged.
+- `schema/stats.rs`: `stats_scan` picks `infer_column_rows` when a row
+  set is supplied and `infer_column` otherwise, so `stats_rows` (the
+  UI's scoped path) infers over exactly the rows it measures. Inference
+  still runs on the background executor inside the existing inspector
+  task; the 2048-row bound is preserved.
+
+### Verified
+
+- The new unit test was written first and confirmed to fail against the
+  old one-line `infer_column` call (`left: Text, right: Integer`); it
+  passes with the scoped inference.
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **477 passed, 7 ignored** (212 library, 178
+  binary with 1 ignored, 86 `tests/core.rs` with 6 ignored, 1 style
+  guard), up from 475.
+- `cargo clippy --release --all-targets` — clean.
+- A full Linux build was still not run (macOS/arm64 host).
+
+### Tests added / changed
+
+- `src/schema/stats.rs`: `stats_rows_infers_type_from_the_scoped_view`
+  (numeric view of a mixed column, and a text view of a numeric column).
+- `src/ui/view/tests.rs`: `inspector_infers_type_from_the_filtered_view`
+  drives the real filter bar, scopes the inspector and asserts the
+  reported `ColumnType` is `Integer`.
+
+### Roadmap changes
+
+- Milestone 3 column inspector: added a completed "Scoped type
+  inference" sub-task and updated the stats-scoping entry.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the `schema::stats` description and the Milestone 3
+type-inference note now document `infer_column_rows` and scoped
+inference; the stale "scoping inspector stats ... outstanding" gap was
+removed.
+
+### Issues / technical debt discovered
+
+- The historical Iteration 8d debt note is annotated as resolved. The
+  broader "cache inferred profiles at open" follow-up still stands:
+  inference is recomputed by the sorter and the inspector.
+
+### Next recommended task
+
+Iteration 4: determine whether the Linux release build can open a GPUI
+window or document the open question without guessing.
+
+---
+
+## 2026-10-01 — Iteration 14: Linux GPUI window backend
+
+### Context
+
+The previous agent suspected that the release build compiled GPUI without
+the x11/wayland backends, so a Linux release binary could not open a
+window, while `cargo test` pulled them in through the dev-only
+`test-support` feature. This iteration confirmed that from the GPUI 0.2.2
+source, fixed it with a target-specific feature entry, and recorded that
+the window itself remains unlaunched here.
+
+### Confirmed (compile-time, no display needed)
+
+- `gpui 0.2.2`'s `test-support` feature enables both `wayland` and `x11`;
+  the project's release build used `default-features = false, features =
+  ["font-kit"]`.
+- On Linux, `gpui::platform::current_platform` returns
+  `HeadlessClient` unless one of those features is compiled in:
+  `guess_compositor()` hardcodes the wayland/x11 display probes to `None`
+  when the features are off, so it always returns "Headless". This is not
+  a "no display" condition; the backend simply was not compiled in, so
+  the old binary could not open a window on any display.
+- This host is macOS/arm64, so no Linux display exists to launch against.
+
+### Implemented
+
+- `Cargo.toml`: the Linux target table now also selects
+  `gpui = { default-features = false, features = ["font-kit", "x11",
+  "wayland"] }`, mirroring what `test-support` already enabled for
+  `cargo test`. Both backends are kept because a Linux desktop may run
+  either server (and a Wayland session would otherwise fall back to
+  headless). macOS/Windows resolution is untouched: the table is
+  Linux-only.
+- `.github/workflows/ci.yml`: the Linux package list already covers this
+  feature set (the same x11/wayland stack `cargo test` already built), so
+  only the explanatory comment was updated.
+
+### Verified
+
+- `cargo tree --target x86_64-unknown-linux-gnu -e normal,features -i
+  gpui` (release/normal edges only) shows `font-kit`, `x11` and `wayland`
+  for Linux; the same command for `aarch64-apple-darwin` shows only
+  `font-kit`, confirming macOS is unchanged.
+- `cargo fmt --check` — clean.
+- `cargo build --release` (macOS) — succeeds; `cargo test --release` —
+  **477 passed, 7 ignored**, unchanged.
+- `cargo clippy --release --all-targets` — clean.
+- **Not verified:** the Linux window was not launched. There is no Linux
+  display or container on this host, so the claim is limited to "the
+  backend is now compiled in and feature resolution is correct". Full
+  GUI behaviour on Linux still needs a Linux runner, which is why the
+  roadmap item stays `[~]`.
+
+### Tests added / changed
+
+None (a build/feature change). The existing suite is the regression guard
+for the macOS resolution.
+
+### Roadmap changes
+
+- Milestone 5 "Enable a real GPUI window backend on Linux" moved
+  `[ ] → [~]`: features added and cross-target resolution verified, but
+  the window is unlaunched.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the cross-platform build limitation and the `gpui`
+dependency row now document the Linux x11/wayland target features and
+that Linux GUI behaviour is unverified. `README.md` gained a short
+platform note with the Linux native-package requirement.
+
+### Issues / technical debt discovered
+
+- Enabling x11 + wayland adds `blade-graphics` (GPU) and its dependency
+  tree to the Linux release build. That is the cost of a real window;
+  it does not affect macOS/Windows. If the CI Linux leg is slow, this is
+  the reason, and build-time caching is the mitigation.
+- The `--probe` path still exercises GPUI's headless platform on every
+  OS, so it stays usable without a display.
+
+### Next recommended task
+
+Iteration 5 (optional): finish the `ui/view.rs` split (tab strip, file
+panel, grid/scrollbar rendering) as a behaviour-neutral refactor.
+
+---
+
+## 2026-10-01 — Iteration 15: finish the ui/view.rs split
+
+### Context
+
+The Iteration 10 refactor moved the inspector, full-cell panel and sort
+logic out of `view.rs` but left the tab strip, file panel, and
+grid/scrollbar rendering in place. This optional, behaviour-neutral
+iteration finishes that split following the existing `ui/view/*.rs`
+pattern.
+
+### Implemented
+
+- New `ui/view/tab_strip.rs`: `render_tab_bar`.
+- New `ui/view/file_panel.rs`: `render_file_panel`.
+- New `ui/view/grid_area.rs`: `render_grid`, `start_column_drag`,
+  `column_drag_move`, `end_column_drag`, `render_h_scrollbar`,
+  `on_grid_scroll`, `scroll_horizontal`, `ensure_column_visible`.
+- `view.rs` gained `mod tab_strip; mod file_panel; mod grid_area;` and
+  dropped from ~3,314 to ~2,629 lines. The methods were moved verbatim;
+  only their visibility changed (`pub(super)` so `view.rs` and sibling
+  modules can still call them). A small script matched whole inherent
+  items (doc comment through closing brace) so no method was duplicated
+  or lost; a name grep confirms each moved method is defined once.
+- The `view.rs` module doc lists the full submodule set.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **477 passed, 7 ignored**, exactly the
+  pre-refactor counts; no test file was edited (the suite is the
+  behaviour guard).
+- `cargo clippy --release --all-targets` — clean.
+- A full Linux build was still not run (macOS/arm64 host).
+
+### Tests added / changed
+
+None. This iteration is refactor-only.
+
+### Roadmap changes
+
+None (the split is not a roadmap checkbox).
+
+### Architecture changes
+
+`ARCHITECTURE.md`: module tree lists `tab_strip.rs`, `file_panel.rs` and
+`grid_area.rs`; the functional-gap and architectural-debt notes now say
+the tab strip / file panel / grid rendering are extracted.
+
+### Issues / technical debt discovered
+
+- None new. `view.rs` still owns `MainView` state, open orchestration,
+  the toolbar, status bar and centre/overlay composition; further
+  extraction is optional.
+
+### Next recommended task
+
+None outstanding from this run. The next agent could pick up the
+Milestone 5 cross-platform items (real Linux/Windows CI run and GUI
+exercise) or the richer type classes recorded in `ROADMAP.md`.

@@ -121,8 +121,14 @@ this may freeze the UI.
 
 #### Selection model
 
-- [x] Introduce `Selection` type storing `(record_index, column_index)`
-  with optional anchor + cursor for ranges.
+- [x] Introduce `Selection` type storing
+  `(display_row, column_index)` with optional anchor + cursor for
+  ranges. Rows are display positions (the filtered/sorted view order),
+  so a drag always covers the visible block.
+- [x] Range selection is display-position based: with an active sort a
+  click-and-drag highlights and copies exactly the visible rows, even
+  when their record indexes are not adjacent. A filter or sort change
+  clamps an out-of-range selection; a header-mode reindex drops it.
 - [x] Render selected cells with `theme::BG_SELECTED` background.
 - [x] Mouse-click selection on the grid canvas.
 - [x] Shift-click range selection.
@@ -147,21 +153,19 @@ this may freeze the UI.
   `cx.bind_keys` rebinding remains a possible later enhancement.
 - [x] Tab / Shift-Tab navigation between cells. `Selection::move_cell`
   advances in row-major order, wrapping across rows and around the
-  document ends; with a filter active the walk covers visible rows
+  view ends; with a filter or sort active the walk covers visible rows
   only.
 - [x] Cmd/Ctrl+G — go-to-row input box. `ui/view/goto.rs` adds a
   one-line bar over the shared `TextEdit`. Enter resolves a 1-based
-  display row, clamps it to `[1, visible rows]`, maps it through the
-  filtered/sorted view to a record index, moves the cursor there
-  (keeping the current column) and scrolls it to the top; Esc closes
-  the bar. Reuses the same deferred-focus and mouse caret patterns as
-  the search and filter bars.
+  display row, clamps it to `[1, visible rows]`, sets the cursor to
+  that display position (keeping the current column) and scrolls it to
+  the top; Esc closes the bar. Reuses the same deferred-focus and
+  mouse caret patterns as the search and filter bars.
 - [x] Cmd/Ctrl+A — select the whole view. `Selection::select_all`
-  anchors at `(0, 0)` and puts the cursor at the last row / last
-  column. Under an active filter or sort the copy path walks the
-  visible display order, so hidden records are neither highlighted nor
-  copied. The command does not reach the filter / search / Ask inputs,
-  which handle Cmd/Ctrl+A themselves.
+  anchors at `(0, 0)` and puts the cursor at the last visible row /
+  last column, using `MainView::view_row_count` so hidden records are
+  neither highlighted nor copied. The command does not reach the
+  filter / search / Ask inputs, which handle Cmd/Ctrl+A themselves.
 - [x] Cmd/Ctrl+O — open a file through the toolbar **Open…** path.
 - [x] Esc — clear selection / close overlays.
 - [x] Cmd/Ctrl+C — copy selection to clipboard.
@@ -420,6 +424,10 @@ column-level metadata.
   or sort is active (rescanning on a view change via
   `inspector_view_key`). The panel labels the scope
   ("scoped to current view (N of M rows)" / "whole document").
+- [x] Scoped type inference: `stats_rows` infers the column type with
+  `schema::infer_column_rows` over the same visible rows (bounded to
+  `INFER_SAMPLE_ROWS`), so the displayed type cannot disagree with the
+  scoped stats.
 
 #### Tests
 
@@ -658,16 +666,25 @@ make what exists feel finished.
   `cargo fmt --check`, `cargo build --release`, `cargo test --release`,
   and `anvil --probe fixtures/large.csv`. `.github/workflows/ci.yml`
   now defines the three-OS matrix and the Linux dependency install
-  step, and every one of its commands was run locally on macOS. The
-  workflow has only been validated for syntax; no real GitHub Actions
-  run has executed yet, and the Linux and Windows legs are unverified.
-- [ ] Enable a real GPUI window backend on Linux. The release build
-  uses `gpui` with `default-features = false, features = ["font-kit"]`,
-  so neither `x11` nor `wayland` is compiled and
-  `gpui::current_platform` always returns the headless client on
-  Linux: the binary builds and `--probe` works, but the GUI cannot
-  open. Add per-target backend features and the matching native
-  packages, then verify the window on a Linux runner.
+  step, and every one of its commands was run locally on macOS. A
+  missed Linux-only dependency failure was found and fixed: `rfd` had
+  no backend feature selected, so its build script panicked on Linux;
+  `Cargo.toml` now selects `xdg-portal` through a Linux target entry,
+  verified for `x86_64-unknown-linux-gnu` with a focused cross-check.
+  The workflow has only been validated for syntax; no real GitHub
+  Actions run has executed yet, and the full Linux and Windows legs
+  are unverified.
+- [~] Enable a real GPUI window backend on Linux. The release build
+  used `gpui` with `default-features = false, features = ["font-kit"]`,
+  so neither `x11` nor `wayland` was compiled and
+  `gpui::current_platform` always returned the headless client on
+  Linux: the binary built and `--probe` worked, but the GUI could not
+  open on any display. `Cargo.toml` now has a Linux-only target entry
+  that enables `font-kit` + `x11` + `wayland` for the release binary
+  (cross-target feature resolution verified for
+  `x86_64-unknown-linux-gnu`), and the CI package list already covers
+  the native stack. The window has **not** been launched on a real
+  Linux display yet, so this stays open until a Linux runner opens it.
 - [ ] Exercise the native GUI on all three target OSes: open dialog,
   drag/drop, archive picker, grid scrolling, keyboard shortcuts,
   clipboard copy, and save/open paths where applicable.

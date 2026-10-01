@@ -68,6 +68,8 @@ impl MainView {
                     return;
                 }
                 view.filter_rows = Some(Arc::new(rows));
+                // The visible row set changed under the selection.
+                view.clamp_selection_to_view();
                 if view.sort_spec.is_some() {
                     view.kick_sort(cx);
                 }

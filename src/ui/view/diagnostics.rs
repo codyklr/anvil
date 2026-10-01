@@ -224,10 +224,11 @@ impl MainView {
             }
         }
         // Keep the cursor's column so navigation feels like the arrow
-        // keys; warnings carry no column of their own.
+        // keys; warnings carry no column of their own. The selection is
+        // in display space, so land on the warning record's position.
         let col = self.selection.cursor().map(|c| c.column_index).unwrap_or(0);
-        self.selection.set(CellPos::new(record, col));
         let position = self.display_position(record);
+        self.selection.set(CellPos::new(position as u64, col));
         self.v_scroll
             .scroll_to_item_strict(position, ScrollStrategy::Top);
         self.ensure_column_visible(col, cx);

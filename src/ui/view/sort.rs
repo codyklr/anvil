@@ -13,6 +13,16 @@ impl MainView {
         self.sort_rows.clone().or_else(|| self.filter_rows.clone())
     }
 
+    /// Number of rows currently displayed: the filtered/sorted view when
+    /// one is active, otherwise every record. This is the row count the
+    /// selection and navigation operate in (display positions).
+    pub(super) fn view_row_count(&self) -> u64 {
+        match self.view_rows() {
+            Some(rows) => rows.len() as u64,
+            None => self.model.as_ref().map(|m| m.row_count()).unwrap_or(0),
+        }
+    }
+
     /// Cycle the active tab's sort for `column`: none -> ascending ->
     /// descending -> none. Sorting a different column restarts at
     /// ascending. The numeric/text comparison kind is resolved from
@@ -45,6 +55,7 @@ impl MainView {
             self.sort_rows = None;
             self.sort_generation = self.sort_generation.wrapping_add(1);
             self.sort_task = None;
+            self.clamp_selection_to_view();
             cx.notify();
             return;
         };
@@ -80,6 +91,9 @@ impl MainView {
                     return;
                 }
                 view.sort_rows = Some(Arc::new(sorted));
+                // The visible order changed under the selection, so any
+                // position past the new end must be clamped away.
+                view.clamp_selection_to_view();
                 // A scoped inspector must reflect the new visible set.
                 view.kick_inspector(cx);
                 cx.notify();

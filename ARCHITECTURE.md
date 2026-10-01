@@ -132,6 +132,9 @@ anvil/
 │   │   │   ├── inspector.rs    # column inspector: scan lifecycle + panel
 │   │   │   ├── cell_detail.rs  # full-cell panel: cursor cell lifecycle
 │   │   │   ├── sort.rs         # sort cycle, background permutation, label
+│   │   │   ├── tab_strip.rs    # document tab strip rendering
+│   │   │   ├── file_panel.rs   # left file-manager panel rendering
+│   │   │   ├── grid_area.rs    # grid render, column resize, h-scrollbar
 │   │   │   └── tests.rs        # `#[cfg(test)]` UI + unit suite
 │   │   ├── grid.rs             # virtualized layout, header + row renderers
 │   │   ├── input.rs            # shared editable-text render/hit-test
@@ -161,12 +164,15 @@ anvil/
 - `source::local` and `source::mod` — direct file mmap and dispatch.
 - `loader` — open orchestration, including archive auto-open vs.
   multi-entry choice.
-- `selection` — GPUI-free selection model: `(record, column)` cursor +
-  anchor + `CellPos` coordinate type. Selected cells are painted with
+- `selection` — GPUI-free selection model: `(display row, column)`
+  cursor + anchor + `CellPos` coordinate type. Rows are display
+  positions (the filtered/sorted view order), so a range always covers
+  the rows the user can see. Selected cells are painted with
   `theme::BG_SELECTED`; arrow / Page / Home / End /
   Cmd+Home / Cmd+End / Tab / Esc keys drive the cursor; click and
   shift-click on cells drive it too;
-  `Selection::copy_text_with` renders TSV for clipboard paste.
+  `Selection::copy_text_with` / `copy_view_text_with` render TSV for
+  clipboard paste.
 - `query::search` — streaming search over `ParsedDocument` that
   returns matching record indexes in record order. `SearchOptions`
   carries `case_sensitive`, `column`, and `max_matches`. Case
@@ -193,7 +199,11 @@ anvil/
   samples, and the top-N frequent values. `stats` scans the whole
   document; `stats_rows` scans only the supplied record indexes, which
   the UI uses to scope the inspector to the active filtered/sorted
-  view (and it reruns the scan when that view changes). Every
+  view (and it reruns the scan when that view changes). Type inference
+  is scoped the same way: `stats_rows` calls
+  `schema::infer_column_rows`, which samples the view's rows
+  (still bounded to `INFER_SAMPLE_ROWS`), so the displayed type agrees
+  with the stats beside it. Every
   displayed value is the
   exact cell value, padding included, and values that differ only in
   padding are counted as distinct (ADR 0003); `min`/`max` order text
@@ -631,7 +641,20 @@ the cell the user has most recently acted on; the anchor is the
 cell where the current range selection started. A range selection is
 identified by `cursor != anchor`. `Selection::normalize()` returns
 the top-left and bottom-right corners of the rectangle in row-major
-order; `Selection::contains(record, column)` does an inclusive test.
+order; `Selection::contains(row, column)` does an inclusive test.
+
+Rows are **display positions**, not raw record indexes: row `i` is the
+`i`-th row in the current view, after any active filter or sort
+(`MainView::view_rows`). Without a filter or sort the two coincide.
+This keeps a drag, the highlight, and the copy in agreement: a drag
+over two visible rows copies exactly those two rows, even when a sort
+makes their record indexes non-adjacent. The view resolves a position
+to a record through `view_rows` at the point a cell is read (grid
+render, copy, cell detail); navigation, go-to-row, find-next and
+diagnostics land on the record's display position. `clamp_to_rows`
+keeps the selection valid when a filter or sort changes the visible
+row count, and a header-mode reindex drops an out-of-range selection
+altogether.
 
 ### Operations
 
@@ -641,15 +664,18 @@ order; `Selection::contains(record, column)` does an inclusive test.
 | `Selection::single(pos)`        | One-cell selection, no range.                 |
 | `selection.set(pos)`            | Replace selection with a single cell.         |
 | `selection.extend_to(pos)`      | Move cursor to `pos`, keep anchor fixed.      |
-| `selection.move_cursor(dr, dc, columns, records, extend)` | Translate cursor by `(dr, dc)` with saturating arithmetic, clamp to document bounds; preserve anchor if `extend`. `i64::MIN` / `i64::MAX` deltas express the document edges. |
-| `selection.move_cell(forward, columns, records, extend)` | Move to the adjacent cell in row-major order (Tab / Shift-Tab), wrapping across rows and around the document ends. |
+| `selection.move_cursor(dr, dc, columns, rows, extend)` | Translate the cursor by `(dr, dc)` with saturating arithmetic, clamp to the visible rows / columns; preserve anchor if `extend`. `i64::MIN` / `i64::MAX` deltas express the view edges. |
+| `selection.move_cell(forward, columns, rows, extend)` | Move to the adjacent cell in row-major order (Tab / Shift-Tab), wrapping across rows and around the view ends. |
 | `selection.clear()`             | Empty the selection.                          |
 | `selection.cursor()`            | Current cursor cell (or `None`).              |
 | `selection.anchor()`            | Current anchor cell (or `None`).              |
 | `selection.normalize()`         | Top-left + bottom-right of the rectangle.     |
 | `selection.contains(r, c)`      | Is `(r, c)` inside the rectangle?             |
 | `selection.cell_count()`        | Number of data cells in the rectangle (0 if empty). |
-| `selection.copy_text_with(cell_at)` | Render the selection as TSV.            |
+| `selection.clamp_to_rows(n)`    | Clamp cursor and anchor into `[0, n - 1]`; `n == 0` clears. |
+| `selection.copy_text_with(cell_at)` | Render the selection as TSV in identity order. |
+| `selection.copy_view_text_with(view_rows, cell_at)` | Render the selection as TSV for the current view; `view_rows` maps display positions to record indexes. |
+| `selection.view_cell_count(view_rows)` | Cells the selection covers in the current view, for the status message. |
 
 ### Invariants
 
@@ -663,8 +689,10 @@ order; `Selection::contains(record, column)` does an inclusive test.
 ### Grid integration
 
 * `MainView.selection` is reset on every successful `OpenOutcome`.
-* `render_row` paints cells inside the rectangle with
-  `theme::BG_SELECTED` (see `ui/grid.rs::render_row`).
+* `render_row` receives both the record index (for cell text, search
+  and warnings) and the display position; the selection test uses the
+  display position, so the highlight matches the visible rows after a
+  sort.
 * Mouse click on a cell: `Selection::set(pos)`; shift-click:
   `Selection::extend_to(pos)`. Both go through the captured
   `Entity<MainView>` handle and call `cx.notify()` to re-render.
@@ -797,7 +825,13 @@ The output is RFC 4180-style quoted TSV:
 - An empty selection produces the empty string.
 
 `Selection::cell_count()` returns the rectangle's cell count and is
-used for the "copied N cells" status message.
+used for the "copied N cells" status message. When a filter or sort is
+active the copy path uses `copy_view_text_with(&view_rows, ..)` and
+`view_cell_count(&view_rows)` instead: the selection's rows are display
+positions, `view_rows` maps each position to a record index, and rows
+past the end of the view are skipped. Select-all uses the visible row
+count (`MainView::view_row_count`), so hidden records are never written
+to the clipboard.
 
 ### UI wiring
 
@@ -807,7 +841,8 @@ It:
 1. Returns early if there is no selection (`cell_count == 0`).
 2. Clones the `Arc<ParsedDocument>` and `Selection` so the closure
    does not borrow `MainView` mutably.
-3. Formats the selection via `Selection::copy_text_with`.
+3. Formats the selection via `Selection::copy_text_with`, or
+   `Selection::copy_view_text_with` when a filter/sort is active.
 4. Calls the injected `ClipboardWriter` (default `arboard`) with the
    text. On error, captures the message but does not panic.
 5. Stores either `copied N cells` or `copy failed: ...` in
@@ -1824,8 +1859,8 @@ no-op / anchor-from-empty).
 
 | Dependency          | Version | Responsibility                                  | Why it is here                         | Architectural constraint                             |
 |---------------------|---------|-------------------------------------------------|----------------------------------------|------------------------------------------------------|
-| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core` |
-| `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; no async          |
+| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core`. Release builds enable only `font-kit`, except on Linux where a target entry adds the `x11` + `wayland` backends |
+| `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; sync API. On Linux a target-specific entry selects the pure-Rust `xdg-portal` backend so the build script does not panic |
 | `memchr`            | 2       | SIMD-accelerated `memchr` for byte scanning      | Indexer needs `\n` searches            | Used in `delimit.rs` and `indexing.rs`; tiny API     |
 | `memmap2`           | 0.9     | Memory-mapped file handle                        | Bounded memory + random access         | Wrapped in `MmapSource`; `unsafe` mmap is centralised |
 | `zip`               | 2.4     | ZIP reading / writing                            | Required archive format                | `deflate` and `bzip2` features only; encryption not supported |
@@ -1869,17 +1904,33 @@ GPUI 0.2.2 Linux dependency tree (`zed-font-kit` / `freetype-sys`,
 `xkbcommon` 0.8.0, `wayland-client`); fontconfig and Vulkan are
 dlopen'd and need no `-dev` package.
 
-The release `anvil` binary itself is built with
-`gpui` `default-features = false, features = ["font-kit"]`, so on
-Linux neither the `x11` nor the `wayland` feature is enabled and
-`gpui::current_platform` always resolves to the headless client. The
-binary compiles and `--probe` works, but the desktop window cannot
-open on Linux until the per-target GPUI backend features are enabled
-and the corresponding native packages are documented. This is
-tracked in `ROADMAP.md` (Milestone 5 cross-platform support) and the
-CI workflow was validated for syntax and for its individual commands
-on macOS only; a real GitHub Actions run on all three runners has not
-yet happened.
+The release `anvil` binary enables the `x11` and `wayland` GPUI
+backends on Linux through a Linux-only target entry in `Cargo.toml`, so
+`gpui::current_platform` can select a real backend instead of the
+headless client; the CI package list already covers the native
+libraries (`zed-font-kit` / `freetype-sys`, `xkbcommon`,
+`wayland-client`; fontconfig and Vulkan are dlopen'd). The binary
+builds and `--probe` works, but the window has **not** been launched on
+a Linux display from this macOS verification host, so Linux GUI
+behaviour is still unverified. This is tracked in `ROADMAP.md`
+(Milestone 5 cross-platform support); the CI workflow was validated
+for syntax and for its individual commands on macOS only, and a real
+GitHub Actions run on all three runners has not yet happened.
+
+Separately, the Linux release build failed at dependency build time.
+`rfd` was declared with `default-features = false` and no backend
+feature, and `rfd`'s build script panics on Linux when neither `gtk3`
+nor `xdg-portal` is selected. macOS and Windows were unaffected
+because the build script's Linux branch is not compiled there, which
+is why the earlier macOS-only verification missed it. `Cargo.toml` now
+selects `xdg-portal` (a pure-Rust backend that adds only `pollster`)
+through a `[target.'cfg(target_os = "linux")'.dependencies]` entry,
+leaving the generic entry for macOS/Windows unchanged. The failure and
+the fix were reproduced and confirmed for the `x86_64-unknown-linux-gnu`
+target with a focused cross-check: the `rfd` build script panics
+without the feature and compiles with it. The full Linux
+build/test/probe could not be run on the macOS verification host and
+still needs a real Linux or GitHub Actions run.
 
 ### Native Ask model
 
@@ -1909,11 +1960,13 @@ takes precedence over the existing generative backend.
 
 ### Functional gaps
 
-- `ui/view.rs` is still the largest module (~3,360 lines). Iteration 10
-  moved the column inspector, full-cell panel, and sorting into
-  `ui/view/{inspector,cell_detail,sort}.rs`. The tab strip, file panel,
-  and grid/scrollbar rendering remain in `view.rs` and are the next
-  extraction candidates.
+- `ui/view.rs` is down to ~2,630 lines (from ~4,800 at its peak).
+  Iteration 10 moved the column inspector, full-cell panel and sorting
+  into `ui/view/{inspector,cell_detail,sort}.rs`; the follow-up moved
+  the tab strip, file panel, and grid/scrollbar rendering into
+  `ui/view/{tab_strip,file_panel,grid_area}.rs`. `view.rs` now owns the
+  `MainView` state, open orchestration, the toolbar, status bar and
+  centre/overlay composition. Further extraction is optional.
 
 - Selection (click / shift-click / click-and-drag with edge
   auto-scroll), keyboard navigation (arrow keys, Page Up/Down,
@@ -1957,8 +2010,8 @@ takes precedence over the existing generative backend.
   and does not remember recently-closed tabs.
 - Sort, basic type inference, and the column inspector (statistics +
   right-side panel) have landed. Richer type classes (date / datetime /
-  UUID / email / URL), caching inferred profiles at open, and scoping
-  inspector stats to the filtered/sorted view are outstanding.
+  UUID / email / URL) and caching inferred profiles at open are
+  outstanding.
 - The filter expression language supports `AND` / `OR` and parentheses
   with standard precedence (`FilterExpr` / `parse_expr`), plus the
   row-scope pseudo-columns `any` / `all` (`any empty`, `all notempty`).
@@ -1996,11 +2049,13 @@ takes precedence over the existing generative backend.
 
 ### Architectural debt
 
-- `ui::view.rs` was split in the 2026-10-18 iteration. It is down to
-  ~2,250 lines (from ~4,800) after extracting `ui::input`,
-  `view::search`, `view::filter`, and `view::tests`. It still owns the
-  `MainView` state, the multi-document tab list, open orchestration,
-  and the toolbar / tab-bar / file-panel / status / grid rendering;
+- `ui::view.rs` has been split in several behaviour-neutral
+  iterations. It is down to ~2,630 lines (from ~4,800) after
+  extracting `ui::input`, `view::search`, `view::filter`,
+  `view::sort`, `view::inspector`, `view::cell_detail`,
+  `view::tab_strip`, `view::file_panel`, `view::grid_area`, and
+  `view::tests`. It still owns the `MainView` state, open
+  orchestration, and the toolbar / status bar / centre composition;
   further extraction (`view::documents`, `view::chrome`) is optional
   and lower priority now.
 - `loader.rs::best_candidate` and `ArchiveSource::single_usable`
@@ -2280,7 +2335,9 @@ drift. Cmd/Ctrl+F opens the bar (the grid's
 - **Type inference and statistics (Milestone 3).**
   `anvil_core::schema::infer` samples each column (bounded to 2048
   rows) and returns `ColumnProfile { name, column_type, non_empty,
-  numeric_fraction, .. }`. `schema::stats` builds a full `ColumnStats`
+  numeric_fraction, .. }`; `schema::infer_column_rows` does the same
+  over an explicit filtered/sorted row set so the inspector's type is
+  scoped like its stats. `schema::stats` builds a full `ColumnStats`
   per column. Both currently run inside the tasks that need them (sort
   and inspector); caching the profiles on the document at open, and
   adding date/UUID/email/URL classification, remain optional
