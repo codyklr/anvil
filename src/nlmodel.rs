@@ -81,6 +81,17 @@ fn fetch(repo: &str, file: &str) -> Result<PathBuf, String> {
     if dest.exists() {
         return Ok(dest);
     }
+    // Reuse a download from the pre-portable cache rather than re-fetching
+    // it. New downloads always go to the portable path.
+    if let Some(legacy) = anvil_core::paths::legacy_data_dir() {
+        let previous = legacy
+            .join("models")
+            .join(repo.replace('/', "__"))
+            .join(file);
+        if previous.exists() {
+            return Ok(previous);
+        }
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|err| format!("cache dir: {err}"))?;
     }
@@ -107,33 +118,14 @@ fn fetch(repo: &str, file: &str) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// Cross-platform cache directory for downloaded models.
+/// Directory for downloaded models: the portable `<exe>/anvil-data/models`
+/// root, with `ANVIL_NL_CACHE` as an override and the OS temp dir as a
+/// last-resort fallback when no data directory can be created.
 fn cache_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("ANVIL_NL_CACHE") {
         return PathBuf::from(dir);
     }
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join("Library/Caches/anvil/models");
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            return PathBuf::from(local).join("anvil").join("models");
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(cache) = std::env::var_os("XDG_CACHE_HOME") {
-            return PathBuf::from(cache).join("anvil/models");
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(".cache/anvil/models");
-        }
-    }
-    std::env::temp_dir().join("anvil-models")
+    anvil_core::paths::model_root().unwrap_or_else(|_| std::env::temp_dir().join("anvil-models"))
 }
 
 /// Translate `phrase` with the embedded model and validate the result.

@@ -7568,3 +7568,75 @@ results.
   race on Linux (`src/query/nl.rs:1816`). It is out of scope
   (Milestone 6) and was left untouched, but it makes CI intermittently
   red.
+
+---
+
+## 2026-10-01 — Iteration 17: self-contained on-disk layout
+
+### Context
+
+The operator's design principle: everything the program installs or
+persists must live beside the `.exe`, in the same containing folder, so
+deleting that folder deletes the entire program. Previously the optional
+Ask backends wrote their downloaded models to the platform cache
+(`%LOCALAPPDATA%\anvil\models`, `~/Library/Caches/anvil/models`,
+`$XDG_CACHE_HOME/anvil/models` or `~/.cache/anvil/models`), which
+violated that principle.
+
+### Implemented
+
+- New `anvil_core::paths` module. `anvil_data_dir()` resolves, in order:
+  `ANVIL_DATA_DIR`; `<folder of the canonical executable>/anvil-data`
+  (created and write-probed); then the legacy per-user cache root as a
+  fallback for read-only installs, with a one-time stderr notice.
+  `model_root()` is `<data>/models`; `legacy_data_dir()` exposes the old
+  cache root for reading existing downloads in place.
+- `gliner::model_dir()` now builds `<data>/models/gliner2.5-small-v1-<rev>`
+  and falls back to a legacy download without copying it. `nlmodel`
+  `cache_dir()` uses the same root with `ANVIL_NL_CACHE` preserved as an
+  override; its `fetch` reuses a legacy file instead of re-downloading.
+- ZIP extraction deliberately stays in `tempfile::tempdir()` (transient
+  input staging, auto-deleted; not installed state).
+- Documented the principle in `VISION.md` (core principle), `AGENTS.md`
+  (scope rule), `ARCHITECTURE.md` (new "On-disk Layout" section),
+  `ROADMAP.md` (Milestone 6 prerequisite) and `README.md`.
+
+### Verified
+
+- `cargo fmt --check`, `cargo build --release`, `cargo clippy --release
+  --all-targets` are clean.
+- `cargo test --release` — **480 passed, 7 ignored** (215 library with 3
+  new `paths` unit tests, 178 binary with 1 ignored, 86 core with 6
+  ignored, 1 style guard), up from 477.
+- `cargo check --release --features nl-gliner` and `--features nl-model`
+  both succeed, so the rewired feature-gated modules compile.
+
+### Not verified
+
+- There is no runtime check on Windows or Linux of the new layout; CI
+  exercises the default feature set only. A read-only program folder
+  falls back to the legacy cache (and the portability guarantee then does
+  not hold); that path is covered by an override/failure unit test, not a
+  real read-only install.
+
+### Tests added / changed
+
+- `src/paths.rs`: `override_wins_and_is_created`,
+  `portable_dir_sits_beside_the_executable`,
+  `missing_executable_falls_back_or_errors`.
+
+### Roadmap changes
+
+- Milestone 6 prerequisites: added a completed self-contained on-disk
+  layout task.
+
+### Architecture changes
+
+`ARCHITECTURE.md` gained the "On-disk Layout" section, the module tree
+lists `paths.rs`, and the Ask-model section now documents the portable
+model location.
+
+### Issues / technical debt discovered
+
+- If future configuration (recent files, preferences) is added it must go
+  through `anvil_core::paths`, not `dirs`-style platform directories.

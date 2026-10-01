@@ -102,6 +102,7 @@ anvil/
 │   │   ├── mod.rs              # Cells iterator, Cell<'a>, ParsedDocument
 │   │   ├── delimit.rs          # delimiter / quote / header detection
 │   │   └── indexing.rs         # record byte-offset index + diagnostics
+│   ├── paths.rs                # portable beside-the-exe data/model dirs
 │   ├── selection.rs            # GPUI-free selection model
 │   ├── schema.rs               # heuristic per-column type inference
 │   ├── schema/
@@ -1855,6 +1856,33 @@ no-op / anchor-from-empty).
   highlighting remain.
 - Performance microbenchmarks (Milestone 5).
 
+## On-disk Layout
+
+Anvil is self-contained. All persistent state lives in an `anvil-data`
+folder beside the executable, so deleting the program's folder removes
+the program and everything it created. `src/paths.rs` is the single
+source of truth:
+
+- `anvil_data_dir()` resolves, in order, the `ANVIL_DATA_DIR` override,
+  `<folder of the canonical executable>/anvil-data` (after a write
+  probe), and finally the legacy per-user cache root if the program
+  folder is not writable. That last case is a fallback for read-only
+  installs and prints a one-time notice; the operator's portability
+  guarantee then does not hold, so `ANVIL_DATA_DIR` is the escape hatch.
+- `model_root()` is `<data>/models`. Both optional Ask backends
+  (`nl-gliner` model files, `nl-model` GGUF/tokenizer) download and read
+  from there instead of the platform cache.
+- `legacy_data_dir()` returns the old platform cache root
+  (`%LOCALAPPDATA%\anvil`, `~/Library/Caches/anvil`,
+  `$XDG_CACHE_HOME/anvil` or `~/.cache/anvil`) so a model downloaded
+  before this layout is read in place, not re-downloaded or copied.
+
+ZIP extraction is the one deliberate exception: extracted entries go to
+`tempfile::tempdir()` in the OS temp directory and are deleted when the
+`OpenedSource` drops. They are transient input staging, not installed
+state, and keeping them off a possibly small program volume (a USB
+stick) is the safer trade.
+
 ## Important Dependencies
 
 | Dependency          | Version | Responsibility                                  | Why it is here                         | Architectural constraint                             |
@@ -1953,7 +1981,8 @@ Edits invalidate pending results; tab changes and header reindexing clear
 Ask state. Enter refuses partial interpretations or lossy preview syntax.
 
 The `--setup-ask-model` command downloads four files from a pinned revision
-into a platform cache (or an explicit model directory). Downloads have
+into `<exe>/anvil-data/models` (see On-disk Layout; `ANVIL_GLINER_MODEL_DIR`
+or `ANVIL_NL_CACHE` can override it). Downloads have
 timeouts and size bounds and publish each file atomically. Normal inference
 makes no network calls. `--ask-probe <file> <question>` exercises the real
 backend without a window. See README and ADR 0002 for setup and limits.

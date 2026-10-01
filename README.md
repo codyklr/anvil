@@ -277,9 +277,11 @@ filter bar covers compound queries, aggregation, sorting and dates.
 The model stays loaded after first use and inference runs on a background
 executor. Only `--setup-ask-model` reaches the network, downloading from a
 pinned Hugging Face revision and reporting per-file progress in the
-terminal. Files live in the platform cache directory under a
-revision-specific GLiNER folder; `ANVIL_NL_CACHE` overrides the cache
-root, and `ANVIL_GLINER_MODEL_DIR` selects a checkpoint directory
+terminal. Files live in the program's `anvil-data/models` folder next to
+the executable, under a revision-specific GLiNER folder, so the install
+stays self-contained; `ANVIL_DATA_DIR` overrides the data root,
+`ANVIL_NL_CACHE` overrides the models root, and
+`ANVIL_GLINER_MODEL_DIR` selects a checkpoint directory
 containing `config.json`, `encoder_config/config.json`, `tokenizer.json`
 and `model.safetensors`.
 
@@ -310,10 +312,9 @@ cargo run --release --features nl-model --bin anvil
 ```
 
 `Ctrl/Cmd+Enter` in the Ask bar escalates an unresolved phrase to it.
-Model files are cached under the platform cache directory
-(`~/Library/Caches/anvil/models` on macOS,
-`%LOCALAPPDATA%\anvil\models` on Windows, `$XDG_CACHE_HOME/anvil/models`
-or `~/.cache/anvil/models` on Linux).
+Model files are cached under `<program folder>/anvil-data/models`, beside
+the executable (`ANVIL_DATA_DIR` / `ANVIL_NL_CACHE` override it), so
+removing the program folder removes the download too.
 
 Both Llama-architecture (SmolLM2) and Qwen2-architecture (Qwen2.5) GGUFs
 load; the family is read from the GGUF metadata. Code-tuned or strongly
