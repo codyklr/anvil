@@ -1416,6 +1416,11 @@ Measured on Apple Silicon (M-series) with the generated fixture set.
 | `multi.zip`        | 576 B          | 3 + 4    | 3 / 3  | 2 usable CSVs for the picker |
 | `malformed.csv`    | 68 B           | 4        | 2/3/4  | quote-not-closed, wrong width, etc. |
 
+None of these files are committed to the repository. Recreate the set
+with `cargo run --release --bin gen_fixture` (1,000,000 rows by
+default) before running the ignored performance tests or any of the
+`--probe` invocations listed below.
+
 ### File sizes
 
 - `large.csv` — 165 MiB / 173,427,532 bytes uncompressed.

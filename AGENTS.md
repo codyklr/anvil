@@ -365,10 +365,12 @@ verbose chain-of-thought.
 - Format with `cargo fmt` before committing.
 - Run `cargo clippy --release` if clippy is available in the
   toolchain (`rustup component add clippy`).
-- Do not commit `/target`, `/fixtures/large.csv`, `/fixtures/*.zip`,
-  or `**/.DS_Store`. The current `.gitignore` handles `/target` and
-  `.DS_Store`; large fixtures are committed at present for CI
-  convenience — revisit in Milestone 5.
+- Do not commit `/target`, generated fixtures, or `**/.DS_Store`.
+  `.gitignore` covers `/target`, `.DS_Store`, and everything under
+  `/fixtures/` except the hand-authored `fixtures/ask.csv`. The
+  generated fixtures (`large.csv`, `archive.zip`, `multi.zip`,
+  `malformed.csv`) are recreated with `gen_fixture` when they are
+  needed and are never checked in.
 - Keep commit messages in the imperative mood with a short subject
   and a body that explains *why*.
 
