@@ -6192,3 +6192,95 @@ global (not per-tab) transient state, like `filter_open`.
 
 Iteration 3: performance baseline (measure only) written to
 `docs/benchmarks.md` and referenced from `ARCHITECTURE.md`.
+
+---
+
+## 2026-09-30 — Iteration 3: performance baseline (measure only)
+
+### Context
+
+Third slice of the improvement run (branch
+`agent/iterative-improvements`). Milestone 5 had no recorded baseline,
+so the per-cell allocation change had nothing to compare against. This
+iteration measures only; no production code changed.
+
+### Implemented
+
+- Generated fixtures: `fixtures/` at 1,000,000 rows (165.4 MiB
+  `large.csv`, 49.1 MiB `archive.zip`, `multi.zip`,
+  `malformed.csv`) and `fixtures/big/` at 3,000,000 rows (498.3 MiB
+  `large.csv`). These live under the git-ignored `fixtures/` tree and
+  are not committed.
+- `docs/benchmarks.md` (new): reference machine, methodology, the
+  index-time / peak-RSS table, the index-only throughput, an
+  explanation of why peak RSS tracks the file-backed mmap rather than
+  the index, and a CPU-only grid-render proxy.
+- `tests/core.rs`: new ignored
+  `measure_viewport_cell_text` test. It runs 1,000 frames of a 40 x 20
+  visible window through the same single `Cells` pass and
+  `exact_string` + `to_string` allocation that `ui::grid::render_row`
+  performs, giving a stable before/after number for the Milestone 5
+  allocation change.
+- `ARCHITECTURE.md` references `docs/benchmarks.md` as the
+  authoritative baseline from the Performance Characteristics section.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **434 passed, 7 ignored** (the new
+  measurement test adds one ignored test).
+- `cargo clippy --release --all-targets` — clean apart from the
+  pre-existing `block` / `proc-macro-error2` future-incompat notice.
+- Measurements (Apple M4, 10 cores, 24 GiB RAM, macOS 26/arm64,
+  rustc 1.98.1), median of three `anvil --probe` runs:
+  - `fixtures/large.csv` (165.4 MiB, 1M rows): index 249 ms, peak RSS
+    182 MiB.
+  - `fixtures/big/large.csv` (498.3 MiB, 3M rows): index 747 ms, peak
+    RSS 530 MiB.
+  - `fixtures/archive.zip` (49.1 MiB compressed, 165.4 MiB entry):
+    ~1.0 s, peak RSS 182 MiB.
+  - `fixtures/ask.csv` / `fixtures/malformed.csv`: ~77 µs, 9 MiB.
+  - Index-only throughput (`measure_large_fixture`): 254 ms / 651
+    MiB/s on the 1M fixture.
+  - Grid render proxy (`measure_viewport_cell_text`): 800,000 cells in
+    35 ms, 44.4 ns/cell, 0.035 ms/frame, 5,689,466 bytes written.
+- **Not verified:** no GPU frame time or interactive scroll profile
+  was captured. The GUI cannot be driven from this environment, so the
+  scroll item remains partial and the proxy is labelled as a proxy.
+
+### Tests added / changed
+
+- `tests/core.rs`: `measure_viewport_cell_text` (`#[ignore]`,
+  measurement only).
+
+### Roadmap changes
+
+- Milestone 5 Performance: "Profile indexing on a multi-hundred-MiB
+  file" ticked; "Memory usage measured and reported per fixture"
+  ticked; "Profile scrolling" marked `[~]` with the proxy noted and the
+  real frame timer left open. The LRU-cache and allocation items stay
+  open for Iteration 4.
+
+### Architecture changes
+
+No module or state change. The `docs/` tree in `ARCHITECTURE.md` now
+lists `benchmarks.md`, and the Performance Characteristics section
+points at it.
+
+### Issues / technical debt discovered
+
+- Peak RSS is dominated by file-backed mmap pages touched while
+  indexing; it is a poor proxy for the durable memory cost. The durable
+  index is `record_count x 8` bytes (8 MiB per 1M rows). Anyone
+  reporting "Anvil uses 182 MiB for a 165 MiB file" should say that
+  those pages are reclaimable.
+- No frame timer exists. If scroll work is taken up later, a debug-only
+  frame-time recorder behind an env var would let a desktop run capture
+  real numbers without changing release behaviour.
+
+### Next recommended task
+
+Iteration 4: reduce the per-cell `SharedString::from(text.to_string())`
+allocation in `ui/grid.rs`, evaluate a bounded visible-range cache, and
+record before/after numbers against `docs/benchmarks.md`.

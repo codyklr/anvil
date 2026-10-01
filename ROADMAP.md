@@ -612,16 +612,26 @@ make what exists feel finished.
 
 #### Performance
 
-- [ ] Profile indexing on a multi-hundred-MiB file and capture a
-  baseline number in `ARCHITECTURE.md`.
-- [ ] Profile scrolling with `cargo bench` or by capturing frame
-  times.
+- [x] Profile indexing on a multi-hundred-MiB file and capture a
+  baseline number in `ARCHITECTURE.md`. Iteration 3 measured a 498.3
+  MiB / 3,000,000-row fixture at 747 ms (~667 MiB/s) and a 165.4 MiB /
+  1,000,000-row fixture at 249 ms, and recorded the full table in
+  `docs/benchmarks.md`, referenced from `ARCHITECTURE.md`.
+- [~] Profile scrolling with `cargo bench` or by capturing frame
+  times. No GPU frame time was captured because the GUI cannot be
+  driven in the headless reference environment. A CPU-only proxy for
+  the grid's per-cell text work (1,000 frames of 40x20 cells at
+  44.4 ns/cell) is recorded in `docs/benchmarks.md`; a real frame timer
+  on a desktop is still open.
 - [ ] Add an LRU cache for cell text in the visible range (measure
   before / after).
 - [ ] Reduce per-cell allocation in `render_row` by preferring the
   borrowed `Cell<'a>` path; only convert to `String` when
   unavoidable.
-- [ ] Memory usage measured and reported per fixture.
+- [x] Memory usage measured and reported per fixture.
+  `docs/benchmarks.md` reports peak RSS for every fixture, and notes
+  that the file-backed mmap pages dominate it while the durable index
+  is `record_count x 8` bytes.
 - [ ] Cancellation robustness: document the contract that
   generation-based cancellation is sufficient.
 

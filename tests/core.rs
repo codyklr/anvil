@@ -10,8 +10,8 @@ use anvil_core::source::local::open_local;
 use anvil_core::{
     apply_filter, exact_string, infer_schema, open_path, parse_filter, parse_opened,
     parse_opened_with, reindex, scan_encoding, search_records, sort_rows, ArchiveSource, CellPos,
-    ColumnIndex, HeaderMode, IndexOptions, LoadResult, OpenResult, OpenedSource, ParsedDocument,
-    SearchOptions, Selection, SortKind, SortOrder, SortSpec,
+    Cells, ColumnIndex, HeaderMode, IndexOptions, LoadResult, OpenResult, OpenedSource,
+    ParsedDocument, SearchOptions, Selection, SortKind, SortOrder, SortSpec,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -898,6 +898,66 @@ fn measure_large_fixture() {
     );
     assert_eq!(doc.record_count(), 1_000_000);
     assert_eq!(doc.column_count(), 20);
+}
+
+/// Proxy for the grid's per-frame visible-cell text work: extract and
+/// allocate the exact string for a viewport-sized window of cells
+/// (single `Cells` pass per row, matching `ui::grid::render_row`),
+/// repeatedly. This is not a GPU frame time because no window is
+/// created; it isolates the `exact_string` + `to_string` allocation the
+/// renderer performs for every visible cell, so the Milestone 5
+/// per-cell allocation change can be compared before/after.
+///
+/// Run with:
+///   cargo test --release --test core -- --ignored measure_viewport --nocapture
+#[test]
+#[ignore]
+fn measure_viewport_cell_text() {
+    let path = std::path::Path::new("fixtures/large.csv");
+    if !path.exists() {
+        eprintln!("fixtures/large.csv not present; run gen_fixture first");
+        return;
+    }
+    let opened = open_local(path).expect("open fixture");
+    let result = parse_opened(&opened);
+    let doc = ParsedDocument {
+        opened,
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    };
+    const VISIBLE_ROWS: u64 = 40;
+    const VISIBLE_COLS: usize = 20;
+    const FRAMES: u64 = 1000;
+
+    let mut written = 0usize;
+    let started = std::time::Instant::now();
+    for frame in 0..FRAMES {
+        let first = (frame * VISIBLE_ROWS) % (doc.record_count() - VISIBLE_ROWS);
+        for row in first..first + VISIBLE_ROWS {
+            let Some(record) = doc.record_bytes(row) else {
+                continue;
+            };
+            let mut cells = Cells::new(record, doc.meta.delimiter, doc.meta.quote);
+            for _ in 0..VISIBLE_COLS {
+                let cell = cells.next();
+                let bytes: &[u8] = match &cell {
+                    Some(cell) => cell.as_ref(),
+                    None => &[],
+                };
+                written += exact_string(bytes).to_string().len();
+            }
+        }
+    }
+    let elapsed = started.elapsed();
+    let cells = FRAMES * VISIBLE_ROWS * VISIBLE_COLS as u64;
+    eprintln!(
+        "viewport cell text: {} cells in {:.0?} ({:.1} ns/cell, {:.3} ms/frame), {} bytes",
+        cells,
+        elapsed,
+        elapsed.as_nanos() as f64 / cells as f64,
+        elapsed.as_secs_f64() * 1000.0 / FRAMES as f64,
+        written,
+    );
 }
 
 /// Throughput of a text filter over the generated 1M-row fixture.

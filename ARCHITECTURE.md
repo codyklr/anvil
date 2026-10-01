@@ -83,6 +83,7 @@ anvil/
 ├── AGENTS.md                   # agent operating manual
 ├── docs/
 │   ├── agent-log.md            # chronological handoff log
+│   ├── benchmarks.md           # reference-machine performance baseline
 │   ├── adr/                    # architectural decision records
 │   │   ├── 0001-natural-language-ask.md
 │   │   └── 0002-native-gliner-ask.md
@@ -1453,6 +1454,11 @@ the most severe kind per row.
 ## Performance Characteristics
 
 Measured on Apple Silicon (M-series) with the generated fixture set.
+The **current baseline** (Apple M4, 10 cores, 24 GiB RAM) lives in
+[`docs/benchmarks.md`](docs/benchmarks.md): index time and peak RSS for
+each fixture, and a CPU-only proxy for the grid's per-cell text work.
+That file is the authoritative "before" record for the Milestone 5
+performance work.
 
 ### Datasets tested
 
