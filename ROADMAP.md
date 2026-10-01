@@ -615,9 +615,20 @@ make what exists feel finished.
 
 #### Cross-platform support
 
-- [ ] Add a CI build/test matrix for macOS, Windows, and Linux:
+- [~] Add a CI build/test matrix for macOS, Windows, and Linux:
   `cargo fmt --check`, `cargo build --release`, `cargo test --release`,
-  and `anvil --probe fixtures/large.csv`.
+  and `anvil --probe fixtures/large.csv`. `.github/workflows/ci.yml`
+  now defines the three-OS matrix and the Linux dependency install
+  step, and every one of its commands was run locally on macOS. The
+  workflow has only been validated for syntax; no real GitHub Actions
+  run has executed yet, and the Linux and Windows legs are unverified.
+- [ ] Enable a real GPUI window backend on Linux. The release build
+  uses `gpui` with `default-features = false, features = ["font-kit"]`,
+  so neither `x11` nor `wayland` is compiled and
+  `gpui::current_platform` always returns the headless client on
+  Linux: the binary builds and `--probe` works, but the GUI cannot
+  open. Add per-target backend features and the matching native
+  packages, then verify the window on a Linux runner.
 - [ ] Exercise the native GUI on all three target OSes: open dialog,
   drag/drop, archive picker, grid scrolling, keyboard shortcuts,
   clipboard copy, and save/open paths where applicable.

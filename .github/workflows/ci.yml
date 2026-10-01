@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GPUI 0.2.2 needs native libraries on Linux. The project builds with
+      # `gpui` default features off, but the dev-only `test-support` feature
+      # used by `cargo test` turns on the x11 + wayland backends:
+      #   - zed-font-kit's unconditional freetype-sys probes `freetype2`
+      #   - xkbcommon 0.8.0 links `xkbcommon` / `xkbcommon-x11`
+      #   - wayland-client probes `wayland-client`
+      # Fontconfig and Vulkan (ash) are dlopen'd, so their -dev packages are
+      # not required to build.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libfreetype6-dev \
+            libwayland-dev \
+            pkg-config \
+            cmake \
+            clang
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Generate a small fixture
+        run: cargo run --release --bin gen_fixture -- fixtures 2000
+
+      - name: Probe the fixture
+        run: cargo run --release --bin anvil -- --probe fixtures/large.csv

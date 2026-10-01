@@ -1794,6 +1794,30 @@ Notes:
 
 ## Current Limitations / Technical Debt
 
+### Cross-platform build and Linux GUI backend
+
+`.github/workflows/ci.yml` builds, tests and probes on Linux, macOS
+and Windows. `cargo test` enables GPUI's dev-only `test-support`
+feature, which turns on GPUI's `x11` and `wayland` backends on Linux;
+CI therefore installs `libxkbcommon-dev`, `libxkbcommon-x11-dev`,
+`libfreetype6-dev`, `libwayland-dev`, `pkg-config`, `cmake` and
+`clang` on the Ubuntu runner. Those packages were derived from the
+GPUI 0.2.2 Linux dependency tree (`zed-font-kit` / `freetype-sys`,
+`xkbcommon` 0.8.0, `wayland-client`); fontconfig and Vulkan are
+dlopen'd and need no `-dev` package.
+
+The release `anvil` binary itself is built with
+`gpui` `default-features = false, features = ["font-kit"]`, so on
+Linux neither the `x11` nor the `wayland` feature is enabled and
+`gpui::current_platform` always resolves to the headless client. The
+binary compiles and `--probe` works, but the desktop window cannot
+open on Linux until the per-target GPUI backend features are enabled
+and the corresponding native packages are documented. This is
+tracked in `ROADMAP.md` (Milestone 5 cross-platform support) and the
+CI workflow was validated for syntax and for its individual commands
+on macOS only; a real GitHub Actions run on all three runners has not
+yet happened.
+
 ### Native Ask model
 
 `src/gliner.rs` is an optional library module behind `nl-gliner`. The Ask

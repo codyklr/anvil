@@ -5994,3 +5994,93 @@ where the code contradicted that.
 
 Work the new Milestone 5 Data fidelity items: exact-value comparison
 with a byte tiebreak, then the whitespace-only `empty` decision.
+
+---
+
+## 2026-09-30 — Iteration 1: CI build/test matrix
+
+### Context
+
+First slice of a staged improvement run (branch
+`agent/iterative-improvements`). The goal was a GitHub Actions workflow
+covering Linux, macOS and Windows with format, build, test, fixture
+generation and a headless probe. The Linux native dependencies had to be
+derived from GPUI's dependency tree rather than guessed.
+
+### Implemented
+
+- New `.github/workflows/ci.yml`: a `build-and-test` job with an
+  `ubuntu-latest` / `macos-latest` / `windows-latest` matrix, pinned to
+  `dtolnay/rust-toolchain@stable` (with the `rustfmt` component) and
+  `Swatinem/rust-cache@v2`. Steps: `cargo fmt --check`,
+  `cargo build --release`, `cargo test --release`,
+  `gen_fixture fixtures 2000`, then
+  `anvil --probe fixtures/large.csv`. `CARGO_TERM_COLOR: always` is set
+  workflow-wide and `fail-fast: false` keeps every OS running.
+- Linux-only apt step installing `libxkbcommon-dev`,
+  `libxkbcommon-x11-dev`, `libfreetype6-dev`, `libwayland-dev`,
+  `pkg-config`, `cmake`, `clang`. Derivation: the release build uses
+  `gpui` with `default-features = false, features = ["font-kit"]`, but
+  `cargo test` pulls the dev-only `test-support` feature, which turns on
+  GPUI's `x11` and `wayland` backends. In that tree `zed-font-kit`'s
+  unconditional `freetype-sys` probes `freetype2` via pkg-config,
+  `xkbcommon` 0.8.0 has `#[link(name = "xkbcommon")]` /
+  `#[link(name = "xkbcommon-x11")]`, and `wayland-client` probes
+  `wayland-client`. Fontconfig (`yeslogic-fontconfig-sys` with the
+  `dlopen` feature) and Vulkan (`ash` default `loaded` feature) are
+  dlopen'd and need no `-dev` packages.
+- Documentation corrections while reconciling: `AGENTS.md` Quick
+  reference test count changed from the stale "38 today, 1 ignored" to
+  the measured "415 passing, 6 ignored".
+
+### Verified
+
+- YAML parses (`ruby -ryaml YAML.load_file`): one job, three-OS matrix,
+  nine steps.
+- Every workflow command was run locally on macOS: `cargo fmt --check`
+  (clean), `cargo build --release` (succeeds),
+  `cargo test --release` (415 passed, 6 ignored, across the library,
+  binary, `tests/core.rs` and `tests/style.rs`),
+  `gen_fixture fixtures 2000` (writes `large.csv`, `archive.zip`,
+  `multi.zip`, `malformed.csv`), `anvil --probe fixtures/large.csv`
+  (2000 rows, 20 columns, 0 warnings, 1 ms).
+- **Not verified:** GitHub Actions itself did not run. The workflow is
+  syntax-checked only. The Linux and Windows legs, including the Linux
+  package list, are unverified until a real run happens.
+
+### Tests added / changed
+
+None. No Rust source changed in this iteration. The `AGENTS.md` test
+count was corrected to the measured value.
+
+### Roadmap changes
+
+- Milestone 5 cross-platform support: the CI matrix item moved from
+  `[ ]` to `[~]` with a note that only syntax and the local macOS
+  commands are verified.
+- Added an explicit Milestone 5 task to enable a real GPUI window
+  backend on Linux (see issues below).
+
+### Architecture changes
+
+New `### Cross-platform build and Linux GUI backend` subsection under
+`Current Limitations / Technical Debt`, recording the CI dependency
+derivation and the headless-only Linux release build.
+
+### Issues / technical debt discovered
+
+- The release `anvil` binary is built with `gpui`
+  `default-features = false, features = ["font-kit"]`. On Linux neither
+  `x11` nor `wayland` is compiled, so `gpui::current_platform` always
+  returns the headless client: the binary builds and `--probe` works,
+  but the desktop window cannot open on Linux. Fixing this needs
+  per-target GPUI backend features plus the matching native packages,
+  and cannot be verified on this macOS host.
+- `cargo test` enabling `test-support` (which turns on `x11`/`wayland`)
+  means the Linux test leg needs more native packages than the release
+  build does; the CI package list covers that, but it is untested.
+
+### Next recommended task
+
+Iteration 2: select-all (Cmd/Ctrl+A), go-to-row (Cmd/Ctrl+G) and open
+file (Cmd/Ctrl+O) in `ui/commands.rs` plus UI tests.
