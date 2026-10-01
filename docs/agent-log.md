@@ -6183,7 +6183,8 @@ global (not per-tab) transient state, like `filter_open`.
   the copy path now walk the visible display order, but a *dragged*
   range under an active sort still spans a record-index interval that
   may not be contiguous on screen. Fixing that needs a display-space
-  selection model and is out of scope here.
+  selection model and is out of scope here. **(Resolved in Iteration
+  12, 2026-10-01: the selection model now stores display positions.)**
 - The delegated implementation worker hit its model-turn limit on the
   first CI slice (produced no files); work has continued locally with
   each slice verified by the test suite.
@@ -7140,3 +7141,92 @@ None.
 
 Iteration 2: fix range selection under an active sort by keeping the
 selection in display-position space.
+
+---
+
+## 2026-10-01 — Iteration 12: display-position selection under an active sort
+
+### Context
+
+The previous agent recorded as technical debt that `Selection` was a
+rectangle in raw record-index space. The grid and the copy path already
+walked the visible display order, but a dragged or shift-clicked range
+under an active sort spanned a record-index interval whose records are
+not adjacent on screen: the highlight, the copy, and select-all
+disagreed with the visible block. This iteration fixes that by moving
+the model itself into display-position space.
+
+### Implemented
+
+- `CellPos` now stores `row` (a 0-based display position) instead of
+  `record_index`. `Selection::move_cursor`, `move_cell`, `select_all`,
+  `contains`, `cell_count` and the docs were updated to view-relative
+  semantics; `copy_view_text_with`/`view_cell_count` now index
+  `view_rows` by position rather than searching for records in a
+  record rectangle. Added `Selection::clamp_to_rows`.
+- `ui/grid.rs`: `render_row` takes the record index (for cell text,
+  search, warnings, gutter) and the display position (for selection
+  and copy-flash); the click/drag callbacks now report the display
+  position.
+- `ui/view.rs`: the selection is resolved against `view_row_count`
+  (a new helper next to `view_rows`) for navigation, Tab, select-all,
+  auto-scroll and reindex clamping. `move_selection` and
+  `move_cell_selection` dropped their record-space binary searches.
+- `ui/view/{sort,filter}.rs`: `clamp_selection_to_view` runs when a
+  sort or filter result lands, and when a sort is cleared. A
+  header-mode reindex still drops an out-of-range selection.
+- `ui/view/{goto,search,diagnostics,cell_detail}.rs`: go-to-row,
+  find-next and diagnostics land on the record's display position;
+  the full-cell panel resolves the position to a record before its
+  background read. Byte-faithful copy is unchanged (ADR 0003).
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **475 passed, 7 ignored** (211 library, 177
+  binary with 1 ignored, 86 `tests/core.rs` with 6 ignored, 1 style
+  guard), up from 468 passed / 7 ignored.
+- `cargo clippy --release --all-targets` — clean.
+- The new UI test was written first and confirmed to fail: the drag
+  produced `(0,0)-(2,1)` in the old record space, and now produces
+  `(0,0)-(1,1)`.
+- A full Linux build was still not run (macOS/arm64 host); see
+  Iteration 11.
+
+### Tests added / changed
+
+- `src/selection.rs`: `copy_view_uses_positions_not_record_indexes`,
+  `copy_view_clamps_a_stale_selection_to_the_view`,
+  `clamp_to_rows_clamps_cursor_and_anchor`; renamed the view-copy test
+  and updated the position-space expectations.
+- `src/ui/view/tests.rs`: `drag_select_under_sort_copies_the_visible_block`
+  (the reproduction and regression), `arrow_keys_walk_the_sorted_view`,
+  `tab_walks_the_sorted_view`, `filter_change_clamps_selection`.
+  Updated `goto_maps_through_active_filter`,
+  `filter_vertical_navigation_skips_hidden_rows`,
+  `filter_tab_and_row_jumps_walk_visible_rows` and the diagnostics
+  cursor assertions to display positions.
+
+### Roadmap changes
+
+- Milestone 2 Selection model: the `Selection` task now describes
+  display-position rows, and a completed sub-task records the
+  sort-alignment fix.
+
+### Architecture changes
+
+`ARCHITECTURE.md`: the `selection` module description, the selection
+model section (operations table, invariants, grid integration) and the
+clipboard section now document display positions, `clamp_to_rows`,
+`copy_view_text_with` and `view_cell_count`.
+
+### Issues / technical debt discovered
+
+- None new. The historical debt note in the Iteration 2 log entry is
+  annotated as resolved.
+
+### Next recommended task
+
+Iteration 13: make the column inspector's type inference sample the
+same filtered/sorted row set as its stats.

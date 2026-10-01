@@ -163,15 +163,12 @@ const SAMPLE_ROWS: u64 = 200;
 /// scrolling then re-populates it, and the cap keeps memory bounded.
 const CELL_TEXT_CACHE_CAP: usize = 4096;
 
-/// Is `(record, column)` inside the inclusive `(top-left, bottom-right)`
-/// rectangle? `None` is never inside.
-fn rect_contains(rect: Option<(CellPos, CellPos)>, record: u64, column: usize) -> bool {
+/// Is `(row, column)` inside the inclusive `(top-left, bottom-right)`
+/// rectangle? Rows are display positions. `None` is never inside.
+fn rect_contains(rect: Option<(CellPos, CellPos)>, row: u64, column: usize) -> bool {
     match rect {
         Some((tl, br)) => {
-            record >= tl.record_index
-                && record <= br.record_index
-                && column >= tl.column_index
-                && column <= br.column_index
+            row >= tl.row && row <= br.row && column >= tl.column_index && column <= br.column_index
         }
         None => false,
     }
@@ -475,6 +472,7 @@ fn should_highlight(options: &SearchOptions, column: usize) -> bool {
 pub fn render_row<F, G>(
     model: &GridModel,
     index: u64,
+    row_position: u64,
     ctx: &RowContext<'_>,
     mouse_down: F,
     mouse_move: G,
@@ -528,8 +526,8 @@ where
             Some(cell) => cell.as_ref(),
             None => &[],
         };
-        let is_selected = selection.contains(index, col);
-        let is_flashed = rect_contains(copy_flash, index, col);
+        let is_selected = selection.contains(row_position, col);
+        let is_flashed = rect_contains(copy_flash, row_position, col);
         let down_handler = mouse_down.clone();
         let move_handler = mouse_move.clone();
         let mut cell_div = div()
@@ -581,10 +579,10 @@ where
         // to the `MainView` and mutate `selection`.
         cell_div = cell_div
             .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
-                down_handler(ev, index, col, app_cx);
+                down_handler(ev, row_position, col, app_cx);
             })
             .on_mouse_move(move |ev, _window, app_cx| {
-                move_handler(ev, index, col, app_cx);
+                move_handler(ev, row_position, col, app_cx);
             });
         cells.push(cell_div);
     }
@@ -602,8 +600,8 @@ where
         .unwrap_or(false);
     let row_flashed = copy_flash
         .map(|(tl, br)| {
-            index >= tl.record_index
-                && index <= br.record_index
+            row_position >= tl.row
+                && row_position <= br.row
                 && tl.column_index == 0
                 && br.column_index >= model.layout.widths.len().saturating_sub(1)
         })
@@ -873,8 +871,8 @@ mod tests {
         // Row 0 is a match (it contains "needle" in column 0).
         // Row 1 is the active match (it contains "needle" in column 1,
         // followed by " bar"). Rendering either row must not panic.
-        let _elem0 = render_row(&model, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
-        let _elem1 = render_row(&model, 1, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem0 = render_row(&model, 0, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem1 = render_row(&model, 1, 1, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
     }
 
     /// A non-match row should not run the substring scan path.
@@ -902,7 +900,7 @@ mod tests {
             warning_rows: &[],
         };
 
-        let _elem = render_row(&model, 2, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem = render_row(&model, 2, 2, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
     }
 
     /// A column-scoped search option must still render a match row
@@ -935,8 +933,8 @@ mod tests {
 
         // Row 0's match is in the scoped column; row 1's match is in
         // column 1, so its column 1 cell is gated off.
-        let _elem0 = render_row(&model, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
-        let _elem1 = render_row(&model, 1, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem0 = render_row(&model, 0, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        let _elem1 = render_row(&model, 1, 1, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
     }
 
     /// Layout-throughput benchmark for a very wide file (500 columns x

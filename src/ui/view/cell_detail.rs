@@ -48,6 +48,14 @@ impl MainView {
         };
         // Fall back to the first cell when nothing is selected yet.
         let pos = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
+        // The selection is in display space; resolve the position to the
+        // record it points at before reading the cell on the background
+        // executor. A stale position past the view reads record 0.
+        let record = match self.view_rows() {
+            Some(rows) => rows.get(pos.row as usize).copied().unwrap_or(0),
+            None => pos.row,
+        };
+        let column = pos.column_index;
         self.cell_detail_generation = self.cell_detail_generation.wrapping_add(1);
         let generation = self.cell_detail_generation;
         let doc = model.doc.clone();
@@ -55,16 +63,16 @@ impl MainView {
         let task = cx.spawn(async move |this, cx| {
             let detail = executor
                 .spawn(async move {
-                    let cell = doc.cell(pos.record_index, ColumnIndex(pos.column_index));
+                    let cell = doc.cell(record, ColumnIndex(column));
                     let bytes: &[u8] = match &cell {
                         Some(cell) => cell.as_bytes(),
                         None => &[],
                     };
                     let (text, truncated) = anvil_core::exact_string_capped(bytes, CELL_DETAIL_CAP);
                     CellDetail {
-                        record: pos.record_index,
-                        column: pos.column_index,
-                        label: doc.meta.column_label(pos.column_index),
+                        record,
+                        column,
+                        label: doc.meta.column_label(column),
                         text: text.into_owned(),
                         total_bytes: bytes.len() as u64,
                         truncated,

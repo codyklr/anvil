@@ -161,12 +161,15 @@ anvil/
 - `source::local` and `source::mod` — direct file mmap and dispatch.
 - `loader` — open orchestration, including archive auto-open vs.
   multi-entry choice.
-- `selection` — GPUI-free selection model: `(record, column)` cursor +
-  anchor + `CellPos` coordinate type. Selected cells are painted with
+- `selection` — GPUI-free selection model: `(display row, column)`
+  cursor + anchor + `CellPos` coordinate type. Rows are display
+  positions (the filtered/sorted view order), so a range always covers
+  the rows the user can see. Selected cells are painted with
   `theme::BG_SELECTED`; arrow / Page / Home / End /
   Cmd+Home / Cmd+End / Tab / Esc keys drive the cursor; click and
   shift-click on cells drive it too;
-  `Selection::copy_text_with` renders TSV for clipboard paste.
+  `Selection::copy_text_with` / `copy_view_text_with` render TSV for
+  clipboard paste.
 - `query::search` — streaming search over `ParsedDocument` that
   returns matching record indexes in record order. `SearchOptions`
   carries `case_sensitive`, `column`, and `max_matches`. Case
@@ -631,7 +634,20 @@ the cell the user has most recently acted on; the anchor is the
 cell where the current range selection started. A range selection is
 identified by `cursor != anchor`. `Selection::normalize()` returns
 the top-left and bottom-right corners of the rectangle in row-major
-order; `Selection::contains(record, column)` does an inclusive test.
+order; `Selection::contains(row, column)` does an inclusive test.
+
+Rows are **display positions**, not raw record indexes: row `i` is the
+`i`-th row in the current view, after any active filter or sort
+(`MainView::view_rows`). Without a filter or sort the two coincide.
+This keeps a drag, the highlight, and the copy in agreement: a drag
+over two visible rows copies exactly those two rows, even when a sort
+makes their record indexes non-adjacent. The view resolves a position
+to a record through `view_rows` at the point a cell is read (grid
+render, copy, cell detail); navigation, go-to-row, find-next and
+diagnostics land on the record's display position. `clamp_to_rows`
+keeps the selection valid when a filter or sort changes the visible
+row count, and a header-mode reindex drops an out-of-range selection
+altogether.
 
 ### Operations
 
@@ -641,15 +657,18 @@ order; `Selection::contains(record, column)` does an inclusive test.
 | `Selection::single(pos)`        | One-cell selection, no range.                 |
 | `selection.set(pos)`            | Replace selection with a single cell.         |
 | `selection.extend_to(pos)`      | Move cursor to `pos`, keep anchor fixed.      |
-| `selection.move_cursor(dr, dc, columns, records, extend)` | Translate cursor by `(dr, dc)` with saturating arithmetic, clamp to document bounds; preserve anchor if `extend`. `i64::MIN` / `i64::MAX` deltas express the document edges. |
-| `selection.move_cell(forward, columns, records, extend)` | Move to the adjacent cell in row-major order (Tab / Shift-Tab), wrapping across rows and around the document ends. |
+| `selection.move_cursor(dr, dc, columns, rows, extend)` | Translate the cursor by `(dr, dc)` with saturating arithmetic, clamp to the visible rows / columns; preserve anchor if `extend`. `i64::MIN` / `i64::MAX` deltas express the view edges. |
+| `selection.move_cell(forward, columns, rows, extend)` | Move to the adjacent cell in row-major order (Tab / Shift-Tab), wrapping across rows and around the view ends. |
 | `selection.clear()`             | Empty the selection.                          |
 | `selection.cursor()`            | Current cursor cell (or `None`).              |
 | `selection.anchor()`            | Current anchor cell (or `None`).              |
 | `selection.normalize()`         | Top-left + bottom-right of the rectangle.     |
 | `selection.contains(r, c)`      | Is `(r, c)` inside the rectangle?             |
 | `selection.cell_count()`        | Number of data cells in the rectangle (0 if empty). |
-| `selection.copy_text_with(cell_at)` | Render the selection as TSV.            |
+| `selection.clamp_to_rows(n)`    | Clamp cursor and anchor into `[0, n - 1]`; `n == 0` clears. |
+| `selection.copy_text_with(cell_at)` | Render the selection as TSV in identity order. |
+| `selection.copy_view_text_with(view_rows, cell_at)` | Render the selection as TSV for the current view; `view_rows` maps display positions to record indexes. |
+| `selection.view_cell_count(view_rows)` | Cells the selection covers in the current view, for the status message. |
 
 ### Invariants
 
@@ -663,8 +682,10 @@ order; `Selection::contains(record, column)` does an inclusive test.
 ### Grid integration
 
 * `MainView.selection` is reset on every successful `OpenOutcome`.
-* `render_row` paints cells inside the rectangle with
-  `theme::BG_SELECTED` (see `ui/grid.rs::render_row`).
+* `render_row` receives both the record index (for cell text, search
+  and warnings) and the display position; the selection test uses the
+  display position, so the highlight matches the visible rows after a
+  sort.
 * Mouse click on a cell: `Selection::set(pos)`; shift-click:
   `Selection::extend_to(pos)`. Both go through the captured
   `Entity<MainView>` handle and call `cx.notify()` to re-render.
@@ -797,7 +818,13 @@ The output is RFC 4180-style quoted TSV:
 - An empty selection produces the empty string.
 
 `Selection::cell_count()` returns the rectangle's cell count and is
-used for the "copied N cells" status message.
+used for the "copied N cells" status message. When a filter or sort is
+active the copy path uses `copy_view_text_with(&view_rows, ..)` and
+`view_cell_count(&view_rows)` instead: the selection's rows are display
+positions, `view_rows` maps each position to a record index, and rows
+past the end of the view are skipped. Select-all uses the visible row
+count (`MainView::view_row_count`), so hidden records are never written
+to the clipboard.
 
 ### UI wiring
 
@@ -807,7 +834,8 @@ It:
 1. Returns early if there is no selection (`cell_count == 0`).
 2. Clones the `Arc<ParsedDocument>` and `Selection` so the closure
    does not borrow `MainView` mutably.
-3. Formats the selection via `Selection::copy_text_with`.
+3. Formats the selection via `Selection::copy_text_with`, or
+   `Selection::copy_view_text_with` when a filter/sort is active.
 4. Calls the injected `ClipboardWriter` (default `arboard`) with the
    text. On error, captures the message but does not panic.
 5. Stores either `copied N cells` or `copy failed: ...` in

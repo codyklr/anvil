@@ -2006,6 +2006,7 @@ impl MainView {
                         grid::render_row(
                             &model,
                             record_index,
+                            i as u64,
                             &row_ctx,
                             {
                                 let entity = entity_for_row.clone();
@@ -2582,9 +2583,12 @@ impl MainView {
         self.search_matches.clear();
         self.search_active = -1;
         self.search_generation = self.search_generation.wrapping_add(1);
+        // The document's row set changed entirely (a header-mode
+        // reindex), so a selection that no longer fits is dropped rather
+        // than reinterpreted against the new rows.
         if let Some(cursor) = self.selection.cursor() {
-            let records = self.model.as_ref().map(|m| m.row_count()).unwrap_or(0);
-            if cursor.record_index >= records {
+            let rows = self.view_row_count();
+            if rows == 0 || cursor.row >= rows {
                 self.selection.clear();
             }
         }
@@ -2708,116 +2712,67 @@ impl MainView {
         .detach();
     }
 
-    /// Move the selection cursor. With no filter this is a straight
-    /// record-index move (delegated to `Selection::move_cursor`). With
-    /// a filter active, vertical movement walks the *visible* rows so
-    /// the cursor never lands on a hidden record, and horizontal
-    /// movement is unchanged.
+    /// Move the selection cursor. Rows are display positions, so vertical
+    /// movement always walks the visible rows: the cursor never lands on
+    /// a record hidden by the active filter or outside the sorted view.
+    /// With no filter or sort the display position equals the record
+    /// index, so the same path covers every record.
     fn move_selection(&mut self, dr: i64, dc: i64, extend: bool, cx: &mut Context<Self>) {
         let Some(model) = &self.model else {
             return;
         };
         let cols = model.doc.column_count();
-        let rows = self.view_rows();
-        let Some(rows) = rows else {
-            let records = model.row_count();
-            // If there is no selection yet, start at (0, 0) so the
-            // first arrow key makes the cursor visible.
-            self.selection.move_cursor(dr, dc, cols, records, extend);
-            if let Some(cursor) = self.selection.cursor() {
-                self.ensure_column_visible(cursor.column_index, cx);
-            }
-            self.kick_inspector(cx);
-            cx.notify();
-            return;
-        };
-        if rows.is_empty() {
+        let rows = self.view_row_count();
+        if rows == 0 {
             return;
         }
-        let cursor = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
-        let col_max = cols.saturating_sub(1) as i64;
-        let col = (cursor.column_index as i64)
-            .saturating_add(dc)
-            .clamp(0, col_max) as usize;
-        // Locate the cursor's display position; if it is on a hidden
-        // record (e.g. the filter changed under it), fall back to the
-        // closest visible position at or before it.
-        let position = rows
-            .binary_search(&cursor.record_index)
-            .unwrap_or_else(|insert| insert.saturating_sub(1));
-        let next_position = (position as i64)
-            .saturating_add(dr)
-            .clamp(0, rows.len() as i64 - 1) as usize;
-        let next = CellPos::new(rows[next_position], col);
-        if extend {
-            self.selection.extend_to(next);
-        } else {
-            self.selection.set(next);
+        // If there is no selection yet the cursor starts at (0, 0), so
+        // the first arrow key makes it visible.
+        self.selection.move_cursor(dr, dc, cols, rows, extend);
+        if let Some(cursor) = self.selection.cursor() {
+            self.ensure_column_visible(cursor.column_index, cx);
         }
-        self.ensure_column_visible(next.column_index, cx);
         self.kick_inspector(cx);
         cx.notify();
     }
 
-    /// Select the whole view (Cmd/Ctrl+A). The rectangle is anchored at
-    /// `(0, 0)` and its cursor is the document's last row / last column;
-    /// an active filter or sort is honoured because the grid paints only
-    /// visible rows and the copy path
-    /// ([`copy_selection_to_clipboard`](Self::copy_selection_to_clipboard))
-    /// walks the visible display order, so hidden records are neither
-    /// highlighted nor copied.
+    /// Select the whole view (Cmd/Ctrl+A). `view_row_count` is the
+    /// filtered/sorted row count when a view is active, so the rectangle
+    /// covers exactly the visible rows and a hidden record is never
+    /// selected.
     fn select_all(&mut self, cx: &mut Context<Self>) {
         let Some(model) = &self.model else {
             return;
         };
-        let records = model.row_count();
+        let rows = self.view_row_count();
         let cols = model.doc.column_count();
-        self.selection.select_all(records, cols);
+        self.selection.select_all(rows, cols);
         self.kick_inspector(cx);
         cx.notify();
     }
 
+    /// Clamp the selection into the current view. Called when a filter or
+    /// sort changes the visible row set so a stale position never points
+    /// past the end (or at a row that no longer exists).
+    fn clamp_selection_to_view(&mut self) {
+        let rows = self.view_row_count();
+        self.selection.clamp_to_rows(rows);
+    }
+
     /// Move the selection cursor to the adjacent cell in row-major
-    /// order (Tab / Shift-Tab). Without a filter this delegates to
-    /// `Selection::move_cell`, which wraps across row boundaries and
-    /// around the document ends. With a filter active it walks the
-    /// *visible* cells so Tab never lands on a hidden record.
+    /// order (Tab / Shift-Tab), walking the *visible* cells so Tab never
+    /// lands on a hidden record. Rows are display positions, so this is
+    /// one linear step over `view_row_count * column_count`.
     fn move_cell_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(model) = &self.model else {
             return;
         };
         let cols = model.doc.column_count();
-        let Some(rows) = self.view_rows() else {
-            let records = model.row_count();
-            self.selection.move_cell(forward, cols, records, false);
-            if let Some(cursor) = self.selection.cursor() {
-                self.ensure_column_visible(cursor.column_index, cx);
-            }
-            self.kick_inspector(cx);
-            cx.notify();
-            return;
-        };
-        let total = rows.len() as u64 * cols as u64;
-        if total == 0 {
-            return;
+        let rows = self.view_row_count();
+        self.selection.move_cell(forward, cols, rows, false);
+        if let Some(cursor) = self.selection.cursor() {
+            self.ensure_column_visible(cursor.column_index, cx);
         }
-        let cursor = self.selection.cursor().unwrap_or(CellPos::new(0, 0));
-        let position = rows
-            .binary_search(&cursor.record_index)
-            .unwrap_or_else(|insert| insert.saturating_sub(1));
-        let col = cursor.column_index.min(cols.saturating_sub(1));
-        let linear = position as u64 * cols as u64 + col as u64;
-        let next_linear = if forward {
-            (linear + 1) % total
-        } else {
-            (linear + total - 1) % total
-        };
-        let next = CellPos::new(
-            rows[(next_linear / cols as u64) as usize],
-            (next_linear % cols as u64) as usize,
-        );
-        self.selection.set(next);
-        self.ensure_column_visible(next.column_index, cx);
         self.kick_inspector(cx);
         cx.notify();
     }
@@ -2862,11 +2817,8 @@ impl MainView {
         let (Some(bounds), Some(pointer)) = (self.grid_bounds, self.pointer_pos) else {
             return;
         };
-        let Some(model) = &self.model else {
-            return;
-        };
-        let records = model.row_count();
-        if records == 0 {
+        let row_count = self.view_row_count();
+        if row_count == 0 {
             return;
         }
         let Some(direction) = auto_scroll_direction(pointer.y, bounds) else {
@@ -2876,7 +2828,7 @@ impl MainView {
         let row_h = f32::from(theme::ROW_HEIGHT);
         let visible_rows = (f32::from(bounds.size.height) / row_h).floor().max(1.0) as u64;
         let first_visible = self.v_scroll.0.borrow().base_handle.top_item() as u64;
-        let last_visible = (first_visible + visible_rows - 1).min(records - 1);
+        let last_visible = (first_visible + visible_rows - 1).min(row_count - 1);
         let cursor_col = self.selection.cursor().map(|c| c.column_index).unwrap_or(0);
 
         // Extend to the row currently at the dragged edge, and pin the
@@ -2884,7 +2836,7 @@ impl MainView {
         let (target_row, scroll_to_first) = match direction {
             AutoScrollDirection::Up => (first_visible, first_visible.saturating_sub(1)),
             AutoScrollDirection::Down => {
-                let next = (first_visible + 1).min(records.saturating_sub(1));
+                let next = (first_visible + 1).min(row_count.saturating_sub(1));
                 (last_visible, next)
             }
         };
