@@ -132,6 +132,9 @@ anvil/
 │   │   │   ├── inspector.rs    # column inspector: scan lifecycle + panel
 │   │   │   ├── cell_detail.rs  # full-cell panel: cursor cell lifecycle
 │   │   │   ├── sort.rs         # sort cycle, background permutation, label
+│   │   │   ├── tab_strip.rs    # document tab strip rendering
+│   │   │   ├── file_panel.rs   # left file-manager panel rendering
+│   │   │   ├── grid_area.rs    # grid render, column resize, h-scrollbar
 │   │   │   └── tests.rs        # `#[cfg(test)]` UI + unit suite
 │   │   ├── grid.rs             # virtualized layout, header + row renderers
 │   │   ├── input.rs            # shared editable-text render/hit-test
@@ -1957,11 +1960,13 @@ takes precedence over the existing generative backend.
 
 ### Functional gaps
 
-- `ui/view.rs` is still the largest module (~3,360 lines). Iteration 10
-  moved the column inspector, full-cell panel, and sorting into
-  `ui/view/{inspector,cell_detail,sort}.rs`. The tab strip, file panel,
-  and grid/scrollbar rendering remain in `view.rs` and are the next
-  extraction candidates.
+- `ui/view.rs` is down to ~2,630 lines (from ~4,800 at its peak).
+  Iteration 10 moved the column inspector, full-cell panel and sorting
+  into `ui/view/{inspector,cell_detail,sort}.rs`; the follow-up moved
+  the tab strip, file panel, and grid/scrollbar rendering into
+  `ui/view/{tab_strip,file_panel,grid_area}.rs`. `view.rs` now owns the
+  `MainView` state, open orchestration, the toolbar, status bar and
+  centre/overlay composition. Further extraction is optional.
 
 - Selection (click / shift-click / click-and-drag with edge
   auto-scroll), keyboard navigation (arrow keys, Page Up/Down,
@@ -2044,11 +2049,13 @@ takes precedence over the existing generative backend.
 
 ### Architectural debt
 
-- `ui::view.rs` was split in the 2026-10-18 iteration. It is down to
-  ~2,250 lines (from ~4,800) after extracting `ui::input`,
-  `view::search`, `view::filter`, and `view::tests`. It still owns the
-  `MainView` state, the multi-document tab list, open orchestration,
-  and the toolbar / tab-bar / file-panel / status / grid rendering;
+- `ui::view.rs` has been split in several behaviour-neutral
+  iterations. It is down to ~2,630 lines (from ~4,800) after
+  extracting `ui::input`, `view::search`, `view::filter`,
+  `view::sort`, `view::inspector`, `view::cell_detail`,
+  `view::tab_strip`, `view::file_panel`, `view::grid_area`, and
+  `view::tests`. It still owns the `MainView` state, open
+  orchestration, and the toolbar / status bar / centre composition;
   further extraction (`view::documents`, `view::chrome`) is optional
   and lower priority now.
 - `loader.rs::best_candidate` and `ArchiveSource::single_usable`

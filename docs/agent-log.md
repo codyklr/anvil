@@ -7388,3 +7388,66 @@ platform note with the Linux native-package requirement.
 
 Iteration 5 (optional): finish the `ui/view.rs` split (tab strip, file
 panel, grid/scrollbar rendering) as a behaviour-neutral refactor.
+
+---
+
+## 2026-10-01 — Iteration 15: finish the ui/view.rs split
+
+### Context
+
+The Iteration 10 refactor moved the inspector, full-cell panel and sort
+logic out of `view.rs` but left the tab strip, file panel, and
+grid/scrollbar rendering in place. This optional, behaviour-neutral
+iteration finishes that split following the existing `ui/view/*.rs`
+pattern.
+
+### Implemented
+
+- New `ui/view/tab_strip.rs`: `render_tab_bar`.
+- New `ui/view/file_panel.rs`: `render_file_panel`.
+- New `ui/view/grid_area.rs`: `render_grid`, `start_column_drag`,
+  `column_drag_move`, `end_column_drag`, `render_h_scrollbar`,
+  `on_grid_scroll`, `scroll_horizontal`, `ensure_column_visible`.
+- `view.rs` gained `mod tab_strip; mod file_panel; mod grid_area;` and
+  dropped from ~3,314 to ~2,629 lines. The methods were moved verbatim;
+  only their visibility changed (`pub(super)` so `view.rs` and sibling
+  modules can still call them). A small script matched whole inherent
+  items (doc comment through closing brace) so no method was duplicated
+  or lost; a name grep confirms each moved method is defined once.
+- The `view.rs` module doc lists the full submodule set.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **477 passed, 7 ignored**, exactly the
+  pre-refactor counts; no test file was edited (the suite is the
+  behaviour guard).
+- `cargo clippy --release --all-targets` — clean.
+- A full Linux build was still not run (macOS/arm64 host).
+
+### Tests added / changed
+
+None. This iteration is refactor-only.
+
+### Roadmap changes
+
+None (the split is not a roadmap checkbox).
+
+### Architecture changes
+
+`ARCHITECTURE.md`: module tree lists `tab_strip.rs`, `file_panel.rs` and
+`grid_area.rs`; the functional-gap and architectural-debt notes now say
+the tab strip / file panel / grid rendering are extracted.
+
+### Issues / technical debt discovered
+
+- None new. `view.rs` still owns `MainView` state, open orchestration,
+  the toolbar, status bar and centre/overlay composition; further
+  extraction is optional.
+
+### Next recommended task
+
+None outstanding from this run. The next agent could pick up the
+Milestone 5 cross-platform items (real Linux/Windows CI run and GUI
+exercise) or the richer type classes recorded in `ROADMAP.md`.
