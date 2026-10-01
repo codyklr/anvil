@@ -545,7 +545,9 @@ column-level metadata.
   Boolean keywords are case-insensitive; a value that would collide with
   one can be quoted (`name contains "AND"`), and multi-word values still
   work unquoted (`city == New York AND amount > 100`).
-- [ ] Saved filters.
+- Saved filters / filter chips are tracked as a single item under
+  Milestone 2, which owns the filter UI. The predicate language in
+  this milestone is complete without them.
 - [x] Filter against inferred numeric type (so
   `amount > 1000.0` works as a real comparison). Ordering operators
   already parse each cell and the threshold as `f64`, skipping
@@ -639,8 +641,11 @@ make what exists feel finished.
 
 #### Diagnostics UI
 
-- [ ] Diagnostics panel (side panel or modal) listing every warning
-  with one-click navigation.
+- [x] Diagnostics panel (side panel or modal) listing every warning
+  with one-click navigation. Delivered in Milestone 4 (Cmd/Ctrl+D,
+  the toolbar **Diagnostics** button and `src/ui/view/diagnostics.rs`),
+  which carries the full description; this entry is kept as a
+  cross-reference so the item is not double-counted.
 - [ ] "Show all warnings" mode that highlights every offending cell
   in the visible range.
 

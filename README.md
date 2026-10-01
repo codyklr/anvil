@@ -1,35 +1,151 @@
 # Anvil
 
-A native, keyboard-friendly CSV/data-file viewer for inspecting large
-integration exports. Built in Rust with [GPUI](https://gpui.rs) (the UI
-framework behind Zed). No webview, no Electron.
+**A native desktop viewer for large delimited data.** Open a CSV, TSV or
+ZIP export of any size, get to first data instantly, and investigate what
+is actually inside it from the keyboard.
 
-## Status: Milestone 1
+Anvil is built in Rust on [GPUI](https://gpui.rs), the UI framework
+behind Zed. It is a single native binary with no runtime to install.
 
-Anvil currently opens a CSV/TSV/PSV/delimited text file or a ZIP archive,
-indexes it incrementally on a background thread, and renders a virtualized
-grid with sticky headers and horizontal/vertical scrolling.
+## What Anvil does
 
-## Running
+Anvil is made for the workflow of *"a customer sent me a 200 MiB export
+and something is wrong with it."* You drag the file in, and within a few
+hundred milliseconds you are looking at a virtualized grid you can
+search, filter, sort and inspect down to the byte.
+
+The design that makes that possible:
+
+- **Memory-mapped, index-only opening.** Anvil maps the file and records
+  one byte offset per record. It keeps about 8 MB of index for a 165 MiB
+  file and reads cell text only for the rows on screen.
+- **Zip-first thinking.** A ZIP is not something you unpack first. Anvil
+  reads the central directory, ranks the usable entries, and gives each
+  one a tab that extracts and indexes lazily on first view.
+- **Keyboard-complete.** Selection, copy, search, filter, sort,
+  the column inspector and the diagnostics panel are all one keystroke
+  away.
+- **Diagnostics as a first-class feature.** Malformed quoting,
+  inconsistent row widths, very long records, empty and duplicate
+  headers, encoding problems, suspicious archive entries: each one is
+  counted, listed, and clickable so you can jump straight to the row.
+
+## Features
+
+### Open and navigate
+
+| Capability | Detail |
+|---|---|
+| Formats | CSV, TSV, PSV, and other delimiter-separated text; ZIP archives |
+| Opening | Drag and drop, the native file dialog, or the toolbar |
+| Grid | Virtualized rows and columns, sticky headers, horizontal and vertical scrollbars |
+| Tabs | One per document; every usable ZIP entry becomes a tab |
+| File panel | Groups every open document and archive entry in one list (`Cmd/Ctrl+B`) |
+| Selection | Cell and range selection with shift-click and drag-select |
+| Copy | Selection to the clipboard as TSV (`Cmd/Ctrl+C`) |
+| Headers | Auto / On / Off, switchable per tab; forcing a mode re-indexes from the mapped source |
+
+### Find and reshape
+
+- **Search** (`Cmd/Ctrl+F`) streams over the document on a background
+  thread, highlights every matched substring inside its cell, and jumps
+  between matches with `F3` / `Shift+F3`. Scope it to one column when
+  needed.
+- **Filter** (`Cmd/Ctrl+L`) takes a real predicate language: `country ==
+  US`, `amount > 100`, `name contains "and"`, compound expressions with
+  `AND`, `OR` and parentheses, and row-scope predicates such as `any
+  empty` (a row with a blank cell) or `all notempty`.
+- **Autocomplete** suggests columns, operators and values from the
+  document as you type.
+- **Sort** by clicking a column header; numeric, boolean and text
+  columns compare appropriately based on inferred type, and sorting
+  composes with the active filter.
+
+### Understand the data
+
+- **Column inspector** (`Cmd/Ctrl+I`) infers each column's type and
+  reports counts, distinct cardinality (exact, or a HyperLogLog estimate
+  for high-cardinality columns), min/max, longest/shortest and most
+  frequent values.
+- **Diagnostics panel** (`Cmd/Ctrl+D`) lists every parse warning with its
+  kind and row, plus a UTF-8 encoding scan reporting the BOM and any
+  columns with invalid byte sequences. Clicking a row warning moves the
+  grid there; offending rows carry a `⚠` marker in the row-number gutter.
+- **Status bar** reports the active delimiter, row and column counts,
+  filter and sort state, and the result of the last clipboard copy.
+
+### Ask in plain language
+
+`Cmd/Ctrl+Shift+L` opens the **Ask** bar. Type
+`country is US and amount over 100` and Anvil previews the equivalent
+filter expression; `Enter` hands it to the filter bar, where it stays
+editable.
+
+A deterministic rules parser handles the common shapes with no extra
+install, download or dependency. Row-scope questions work in both word
+orders, so `at least one column is blank`, `any row that has an empty
+column` and `no column is empty` all preview correctly.
+
+When the rules cannot resolve a phrase, optional local model backends can
+interpret it (`Ctrl/Cmd+Enter` to interpret, then review and `Enter` to
+apply). See [Optional natural-language backends](#optional-natural-language-backends).
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Cmd/Ctrl+C` | Copy the selection as TSV |
+| `Cmd/Ctrl+F` | Search bar |
+| `Cmd/Ctrl+L` | Filter bar |
+| `Cmd/Ctrl+Shift+L` | Ask bar |
+| `Cmd/Ctrl+I` | Column inspector |
+| `Cmd/Ctrl+D` | Diagnostics panel |
+| `Cmd/Ctrl+B` | File panel |
+| `F3` / `Shift+F3` | Next / previous search match |
+| `Cmd/Ctrl+Home` / `Cmd/Ctrl+End` | First / last row |
+| `Home` / `End` | First / last column |
+| `PageUp` / `PageDown` | Move 20 rows |
+| Arrows | Move the selection; hold `Shift` to extend it |
+| `Tab` / `Shift+Tab` | Next / previous cell, wrapping across rows |
+| `Escape` | Clear the selection, or close the open overlay |
+
+## Build and run
 
 ```sh
-cargo run --release --bin anvil          # launch the GUI
-cargo run --release --bin gen_fixture fixtures 1000000   # make test data
-./target/release/anvil --probe fixtures/large.csv        # headless check
+cargo run --release --bin anvil                     # launch the GUI
+cargo run --release --bin anvil -- --probe FILE     # headless open/index summary
 ```
 
-`--probe <path>` runs the exact same open/index path the UI uses and prints
-a summary. It is useful for CI and for measuring large fixtures without a GUI.
+`--probe <path>` runs the exact open-and-index path the UI uses and prints
+a summary: delimiter, record and column counts, warnings, the BOM flag and
+invalid-encoding counts. It is useful for CI and for measuring large files
+without a GUI.
+
+Generate the test fixture set on demand with:
+
+```sh
+cargo run --release --bin gen_fixture fixtures 1000000
+```
+
+That writes `fixtures/large.csv` (1,000,000 rows × 20 columns, ~165 MiB),
+`fixtures/archive.zip` (the same data deflated, with `__MACOSX`,
+`.DS_Store` and `README.txt` noise), `fixtures/multi.zip` (two usable CSVs
+plus noise) and `fixtures/malformed.csv`. The only hand-authored fixture is
+`fixtures/ask.csv`, a five-row sample for trying the Ask bar.
 
 ## Architecture
 
-The crate is split so that data logic never depends on GPUI:
+The package produces one library and two binaries. Data logic lives in
+`anvil_core`, which has no GPUI dependency and is exercised headlessly by
+the integration tests and by `--probe`; the `anvil` binary owns all GPUI
+presentation.
 
 ```
 src/
-  lib.rs            anvil_core: data-side public API (no GPUI)
+  lib.rs            anvil_core: data-side public API
   error.rs          typed errors
   loader.rs         open orchestration: path -> browsable document
+  encoding.rs       UTF-8 validity / BOM scan
   source/           logical data-source abstraction
     mod.rs            DataSource, OpenedSource, MmapSource, ArchiveCandidate
     local.rs          direct filesystem files
@@ -42,13 +158,19 @@ src/
   schema.rs         heuristic per-column type inference
   schema/stats.rs   column statistics for the inspector
   query.rs          search + match-range helpers (GPUI-free)
-  query/filter.rs   predicate filter
+  query/filter.rs   predicate filter: parse + apply
   query/sort.rs     column sort (keyed permutation)
+  query/suggest.rs  filter autocomplete from slot context
+  query/nl.rs       Tier 1 deterministic natural language -> FilterExpr
+  gliner.rs         Tier 2 GLiNER extraction backend (optional feature)
+  nlmodel.rs        Tier 2 generative model backend (optional feature)
   ui/               GPUI presentation (binary only)
     app.rs            window lifecycle
-    view.rs           toolbar + tabs + file panel + grid + status
+    view.rs           toolbar + tabs + panels + grid + status
     view/search.rs     search bar (state, render, editing)
     view/filter.rs     filter bar (apply, render, editing)
+    view/ask.rs        Ask bar (preview, interpretation, apply)
+    view/diagnostics.rs warnings panel + click-to-navigate
     view/tests.rs      headless UI + unit test suite
     input.rs          shared editable-text rendering / hit-testing
     text_edit.rs      GPUI-free single-line edit buffer
@@ -56,94 +178,70 @@ src/
     grid.rs           column layout + row rendering helpers
     archive_picker.rs archive presentation helpers
     theme.rs          palette + metrics
-  main.rs           binary entry: GUI, or `--probe`
+  main.rs           binary entry: GUI, `--probe`, `--ask-probe`, `--setup-ask-model`
   bin/gen_fixture.rs synthetic CSV + ZIP generator
 ```
 
-## Data representation
+### Data representation
 
-Anvil never materialises a `Vec<Vec<String>>` of the file.
+Opening a file keeps exactly one thing in memory: the record index.
 
 - The source file is memory-mapped (`memmap2`).
 - Indexing walks the bytes once and records the **start byte offset of
   every record** in a `Vec<u64>` (the last entry is the file length, so
   every record has an exclusive end). Quotes are tracked with an explicit
-  `at_field_start` flag so delimiters and newlines inside quoted fields are
-  not misread.
+  `at_field_start` flag, so delimiters and newlines inside quoted fields
+  are handled correctly.
 - The grid asks for a specific `(row, column)`. The document slices the
-  mmap for that record's byte range and runs a small state machine over it,
-  returning a borrowed `Cow` for the cell. Nothing is retained per row.
+  mmap for that record's byte range, runs a small state machine over it,
+  and returns a borrowed `Cow` for the cell, so no per-row storage is
+  retained.
 
-For a 165 MiB file this index costs about **8 MB** of `u64`s and roughly
-**250–340 ms** (≈470 MiB/s), on top of a page-cache-warm mmap.
+For the 165 MiB fixture that index costs about **8 MB** of `u64`s and
+roughly **250-340 ms** (≈470 MiB/s) on a page-cache-warm mmap.
 
-## ZIP handling
+### ZIP handling
 
-`open_path` sniffs the first four bytes (without reading the whole file).
-A ZIP becomes an `ArchiveSource` which:
+`open_path` sniffs the first four bytes without reading the whole file. A
+ZIP becomes an `ArchiveSource` which:
 
 1. lists entries and classifies each one,
-2. rejects directories, `__MACOSX`, `.DS_Store`, hidden files, `..` paths,
-   encrypted entries, unsupported compression methods, and oversized or
-   zip-bomb-ratio entries,
+2. rejects directories, `__MACOSX`, `.DS_Store`, hidden files, `..`
+   paths, encrypted entries, unsupported compression methods, and
+   oversized or zip-bomb-ratio entries, recording a reason for each,
 3. ranks usable entries by extension (`csv`/`tsv` > `dat` > `txt`),
 4. auto-opens the single best-ranked entry when there is a clear
-   favourite, otherwise reports that the choice is ambiguous.
+   favourite, and otherwise presents the choice.
 
-In the GUI, every usable entry becomes its own tab immediately (the
-central directory already lists names and sizes). The entry the loader
-pre-opened is ready; the others are extracted and indexed lazily when
-their tab is first activated. Each entry is decompressed to a
-`tempfile`, then memory-mapped and indexed through the *same* path as a
-normal file. The temp directory is kept alive by an `Arc<TempDir>`
-inside `OpenedSource` and removed on drop.
+Skipped entries appear in the **Archive…** overlay with their reasons. In
+the GUI every usable entry becomes its own tab immediately (the central
+directory already lists names and sizes). The entry the loader pre-opened
+is ready; the others extract and index lazily when their tab is first
+activated. Each entry is decompressed to a `tempfile`, then memory-mapped
+and indexed through the *same* path as a normal file. The temp directory
+is kept alive by an `Arc<TempDir>` inside `OpenedSource` and removed on
+drop.
 
-## Threading
+### Threading and cancellation
 
-Opening, extraction, and indexing run on GPUI's background executor. Each
-open bumps a generation counter; a result whose generation is stale is
-dropped, so dropping a new file while a large archive is still being indexed
-is safe. The UI thread only ever renders the already-built index.
+Opening, extraction, indexing, search, sort, the inspector scan and the
+encoding scan all run on GPUI's background executor. Each of them carries
+a generation counter, and a result whose generation is stale is dropped,
+so opening a new file while a large archive is still indexing is safe and
+never publishes outdated state. The UI thread renders the finished index
+and never performs a large scan.
 
-## Tests
+## Optional natural-language backends
 
-```sh
-cargo test        # 76 data-side + 136 binary (UI / command / geometry) + 1 style guard
+Both backends are opt-in Cargo features. The default build is unchanged
+by them. Every model result is re-validated by the filter parser before it
+can become a query, and the Ask bar shows the preview first.
 
-# Throughput benchmarks (need fixtures/large.csv):
-cargo test --release --test core -- --ignored measure_large   # indexing
-cargo test --release --test core -- --ignored measure_search  # case-insensitive search
-cargo test --release --test core -- --ignored measure_filter  # predicate filter
-cargo test --release --test core -- --ignored measure_sort    # numeric sort
-cargo test --release --bin anvil measure_wide_column_layout -- --ignored --nocapture
-```
+### GLiNER extraction (`nl-gliner`)
 
-Coverage includes normal/quoted/TSV/semicolon/pipe input, embedded newlines,
-escaped quotes, missing and empty values, duplicate/empty headers,
-inconsistent rows, extremely wide files, extremely long cells, headerless and
-newline-less files, a 100k-row synthetic dataset, single/multi-file ZIPs,
-nested paths, `__MACOSX`, corrupted ZIPs, path traversal, duplicate entry
-names, a large compressed CSV, compound filter expressions
-(`AND` / `OR` / parentheses) with context-aware autocomplete, and
-row-scope `any` / `all` predicates such as `any empty` (a row with a
-blank cell) and `all notempty`.
-
-## Natural-language Ask
-
-`Cmd/Ctrl+Shift+L` opens an **Ask** bar. Type a phrase such as
-`country is US and amount over 100`; a deterministic parser previews the
-equivalent filter, and Enter hands it to the normal filter bar (where it
-can still be edited). This works with no extra install, download, or
-dependency. Row-scope questions work too: `at least one column is blank`
-previews as `any empty`, `every column is filled` as `all notempty`, and
-`no column is empty` as `all notempty`. Both word orders work, so
-`any row that has an empty column` also previews as `any empty`.
-
-### Native GLiNER extraction (optional)
-
-GLiNER2.5 Small runs locally inside Anvil through Candle. It requires no
-Python, PyTorch installation, server, or ONNX runtime. Install its roughly
-296 MB weights plus tokenizer once, then launch the enabled build:
+[GLiNER2.5 Small](docs/adr/0002-native-gliner-ask.md) runs locally inside
+Anvil through Candle. Install its roughly 296 MB weights plus tokenizer
+once, then launch the enabled build:
 
 ```sh
 cargo run --release --features nl-gliner --bin anvil -- --setup-ask-model
@@ -151,31 +249,27 @@ cargo run --release --features nl-gliner --bin anvil
 ```
 
 Open Ask with `Cmd/Ctrl+Shift+L`. When the rules cannot resolve a phrase,
-press `Ctrl/Cmd+Enter` to interpret it, review the preview, then press
-Enter to apply. Partial interpretations cannot be accepted. This first
-backend supports **one condition**, such as `Last names that start with C`.
-It also resolves indirect columns by sampled value: a question that never
-names the column, such as `Which users are from Canada?`, binds `Canada`
-to the column whose sampled values uniquely contain it (`country == Canada`),
-and asks rather than guesses when two columns contain the value.
-Use the filter bar for compound queries, aggregation, sorting, and dates.
-Model predictions can be wrong; always review the preview.
+`Ctrl/Cmd+Enter` interprets it, and `Enter` applies it once the preview
+looks right. This backend resolves one condition per question, such as
+`Last names that start with C`, and it resolves indirect columns by
+sampled value: `Which users are from Canada?` binds `Canada` to the column
+whose sampled values uniquely contain it, producing `country == Canada`.
+When two columns contain the value, it asks instead of guessing. The
+filter bar covers compound queries, aggregation, sorting and dates.
 
-The model stays loaded after first use. Inference runs on a background
-executor and does not send questions or dataset contents over the network.
-Only `--setup-ask-model` downloads files, from a pinned Hugging Face
-revision. It reports file progress in the terminal; in-app download progress
-and cancellation remain future work. Files use the platform cache directory
-listed below, under a revision-specific GLiNER folder. `ANVIL_NL_CACHE`
-overrides the cache root; `ANVIL_GLINER_MODEL_DIR` selects a checkpoint
-directory containing `config.json`, `encoder_config/config.json`,
-`tokenizer.json`, and `model.safetensors`.
+The model stays loaded after first use and inference runs on a background
+executor. Only `--setup-ask-model` reaches the network, downloading from a
+pinned Hugging Face revision and reporting per-file progress in the
+terminal. Files live in the platform cache directory under a
+revision-specific GLiNER folder; `ANVIL_NL_CACHE` overrides the cache
+root, and `ANVIL_GLINER_MODEL_DIR` selects a checkpoint directory
+containing `config.json`, `encoder_config/config.json`, `tokenizer.json`
+and `model.safetensors`.
 
-Limits: 512 bytes per question, 32 columns, 1024 bytes of column names,
-and 512 encoded tokens including the extraction schema. Oversized requests
-are rejected without truncation. Low-confidence or invalid outputs report
-an error. The single-condition checks are conservative, not a complete
-English grammar; some valid requests need rephrasing.
+Requests are bounded: 512 bytes per question, 32 columns, 1024 bytes of
+column names, and 512 encoded tokens including the extraction schema.
+Oversized requests fail fast with the limit named. Low-confidence or
+invalid outputs report an error rather than applying a query.
 
 For a repeatable real-model check (after setup):
 
@@ -184,60 +278,62 @@ cargo test --release --features nl-gliner real_model_filter_smoke -- --ignored -
 cargo run --release --features nl-gliner --bin anvil -- --ask-probe fixtures/large.csv "amount exceeds 100"
 ```
 
-`nl-gliner` takes precedence when both model features are enabled.
-The community `gliner-rs` dependency is pinned to 0.2.3. It shares Candle
-0.11 with the existing backend, but currently also compiles upstream CLI
-dependencies; it is optional rather than dependency-free.
+`nl-gliner` takes precedence when both model features are enabled. The
+community `gliner-rs` dependency is pinned to 0.2.3 and shares Candle 0.11
+with the generative backend below.
 
-### Generative model (existing alternative)
+### Generative model (`nl-model`)
 
-The existing optional embedded generative model remains available:
+The alternative backend downloads a small local instruct model (default
+`Qwen2.5-Coder-1.5B-Instruct` Q4_K_M, about 1.1 GB) on first use and then
+runs entirely on CPU:
 
 ```sh
 cargo run --release --features nl-model --bin anvil
 ```
 
-With that feature, `Ctrl/Cmd+Enter` in the Ask bar escalates an
-unresolved phrase to a small local instruct model (default
-Qwen2.5-Coder-1.5B-Instruct Q4_K_M, about 1.1 GB). The model is
-downloaded once from the Hugging Face Hub on first use into the platform
-cache directory (`~/Library/Caches/anvil/models` on macOS,
+`Ctrl/Cmd+Enter` in the Ask bar escalates an unresolved phrase to it.
+Model files are cached under the platform cache directory
+(`~/Library/Caches/anvil/models` on macOS,
 `%LOCALAPPDATA%\anvil\models` on Windows, `$XDG_CACHE_HOME/anvil/models`
-or `~/.cache/anvil/models` on Linux), then runs entirely on CPU. Every
-model result is re-validated by the filter parser before it can become a
-query.
+or `~/.cache/anvil/models` on Linux).
 
 Both Llama-architecture (SmolLM2) and Qwen2-architecture (Qwen2.5) GGUFs
-load: the family is read from the GGUF metadata. Prefer code-tuned or
-strongly instruction-tuned instruct models in the 0.5B-1.5B range; keep
+load; the family is read from the GGUF metadata. Code-tuned or strongly
+instruction-tuned instruct models in the 0.5B-1.5B range work best with
 the standard ChatML prompt.
 
 Overrides: `ANVIL_NL_MODEL_REPO` / `ANVIL_NL_MODEL_FILE`,
 `ANVIL_NL_TOKENIZER_REPO` / `ANVIL_NL_TOKENIZER_FILE`, `ANVIL_NL_ENDPOINT`
 (a mirror), `ANVIL_NL_CACHE` (cache location), and `HF_TOKEN` (for gated
-models). For a lighter download, use Qwen2.5-Coder-0.5B-Instruct
-(about 470 MB):
+models). For a lighter download, swap in Qwen2.5-Coder-0.5B-Instruct
+(about 470 MB) by pointing those variables at its GGUF.
+
+## Testing
 
 ```sh
-ANVIL_NL_MODEL_REPO=Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF \
-ANVIL_NL_MODEL_FILE=qwen2.5-coder-0.5b-instruct-q4_k_m.gguf \
-ANVIL_NL_TOKENIZER_REPO=Qwen/Qwen2.5-Coder-0.5B-Instruct \
-  cargo run --release --features nl-model --bin anvil
+cargo test       # data-side, UI and style suites
+cargo clippy --release
 ```
 
-The default build has none of these crates.
+The performance tests are `#[ignore]`d and need a generated fixture:
 
-## Not yet done (Milestones 4–5)
+```sh
+cargo test --release --test core -- --ignored measure_large   # indexing
+cargo test --release --test core -- --ignored measure_search  # case-insensitive search
+cargo test --release --test core -- --ignored measure_filter  # predicate filter
+cargo test --release --test core -- --ignored measure_sort    # numeric sort
+cargo test --release --bin anvil measure_wide_column_layout -- --ignored --nocapture
+```
 
-Richer diagnostics (the panel lists parse warnings and encoding
-findings, and the archive picker now lists skipped entries with their
-reasons, including encrypted, unsupported-compression, and
-high-compression-ratio entries; empty/duplicate-header navigation and
-saved filters remain, and the filter language has no general `NOT` yet,
-though row-scope `any` / `all` predicates (for example `any empty`) have
-landed),
-performance profiling, cross-platform hardening, and UX polish. See
-`ROADMAP.md` for the planned work and acceptance criteria.
+Coverage includes normal, quoted, TSV, semicolon and pipe input, embedded
+newlines, escaped quotes, missing and empty values, duplicate and empty
+headers, inconsistent rows, extremely wide files, extremely long cells,
+headerless and newline-less files, a 100k-row synthetic dataset,
+single- and multi-file ZIPs, nested paths, `__MACOSX`, corrupted ZIPs,
+path traversal, duplicate entry names, a large compressed CSV, compound
+filter expressions with context-aware autocomplete, and row-scope
+`any` / `all` predicates.
 
 ## Documentation
 
@@ -247,5 +343,17 @@ performance profiling, cross-platform hardening, and UX polish. See
 - `ARCHITECTURE.md` — current technical architecture.
 - `AGENTS.md` — operating manual for coding agents working in this
   repository.
+- `docs/adr/` — architectural decision records.
 - `docs/agent-log.md` — chronological handoff log.
 - `docs/prompts/initial-anvil-prompt.md` — historical product brief.
+
+## Status
+
+Milestones 1-3 are implemented, with a few conveniences still open:
+go-to-row, tab reordering, recently-closed tabs, saved filters, and
+letting the inspector scan the filtered view instead of the whole
+document. Milestone 4 (diagnostics and data quality) is complete apart
+from click-to-navigate for header-level warnings. Milestone 5
+(performance and UX hardening) and Milestone 6 (natural-language Ask,
+opt-in) are in progress. `ROADMAP.md` holds the authoritative list, with
+acceptance criteria and the evidence behind each checked box.

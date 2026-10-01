@@ -5814,3 +5814,104 @@ form was unmatched, so the model was consulted.
 ### Next recommended task
 
 Verify the real GLiNER model (scope + binding), then general `NOT` / `in`.
+
+---
+
+## 2026-09-30 — Repository publication, fixture policy, and documentation refresh
+
+### Context
+
+The project had never been published, and the working tree had drifted
+far ahead of the documentation. This iteration created the private
+GitHub repository `codyklr/anvil`, then reconciled the docs with the
+code.
+
+Note on dates: the machine clock and the git history read 2026-09-30,
+while the entries above carry later dates. This entry is dated to the
+actual working date and is therefore out of chronological order with
+respect to them.
+
+### Implemented
+
+- **Published** the repository privately as `codyklr/anvil`. Pushing
+  required rewriting history: the initial commit contained
+  `fixtures/large.csv` (173,427,532 B) and `fixtures/archive.zip`
+  (51,525,287 B), and a 165 MiB blob exceeds GitHub's 100 MiB per-blob
+  limit. `git filter-branch` dropped both across all 21 commits
+  (hashes changed, content otherwise identical); the pre-rewrite refs
+  were then discarded, so both blobs are gone from the local object
+  database as well (`.git` 122 MB -> 552 KB).
+- **Committed the previously uncommitted working tree**: the natural
+  language Ask bar, `schema` / `schema::stats`, `query::sort`,
+  `query::suggest`, `encoding`, `gliner` / `nlmodel`, the text-editing
+  widgets, `docs/adr/0001`-`0002`, and roughly 3.5k lines of agent-log
+  entries.
+- **Fixture policy**: no generated fixture is committed any more.
+  `.gitignore` ignores `/fixtures/*` with `!/fixtures/ask.csv` as the
+  only exception, because `gen_fixture` recreates `large.csv`,
+  `archive.zip`, `multi.zip` and `malformed.csv`, while `ask.csv` is
+  hand-authored.
+- **README.md rewritten**: leads with what Anvil is and what it does,
+  keeps the technical sections (data representation, ZIP handling,
+  threading, opt-in backends), and replaces positioning-by-negation
+  with positive statements. Added a keyboard-shortcut table grounded
+  in `src/ui/commands.rs` and an updated module map.
+- **ROADMAP.md reconciled**: the Milestone 5 `Diagnostics panel` item
+  duplicated the Milestone 4 item that is already delivered
+  (`src/ui/view/diagnostics.rs`, Cmd/Ctrl+D), so it is now marked as
+  delivered with a cross-reference instead of being double-counted;
+  `Saved filters` now has a single owner (Milestone 2), and the
+  Milestone 4 duplicate became a cross-reference note.
+- **ARCHITECTURE.md updated**: module tree now lists `gliner.rs`,
+  `nlmodel.rs`, `ui/view/ask.rs` and the two existing ADRs; the
+  current-vs-planned list covers `query::filter`, `query::suggest`,
+  `query::nl`, the Tier 2 backends, the text-edit widgets and the Ask
+  and filter bars; the `ui::commands` action list is complete; the
+  dependency table documents the optional `nl-model` / `nl-gliner`
+  crates; and the test counts were re-derived from a real run.
+
+### Verified
+
+- `cargo check --all-targets` clean on the committed tree.
+- `cargo test`: 416 tests, 410 pass, 6 ignored (188 library, 146
+  binary, 81 `tests/core.rs` of which 5 ignored, 1 style guard).
+- No test depends on a removed fixture: only the five `#[ignore]`d
+  performance tests read `fixtures/large.csv`, and they self-skip.
+  The archive tests build their own ZIPs in temp directories.
+- Remote tree is 53 files with no `target/` path and no large fixture;
+  `gh repo view` reports `"visibility":"PRIVATE"` on branch `master`.
+
+### Tests added / changed
+
+- None. This iteration changed documentation and repository state only;
+  no source file was modified. The corrected test counts in
+  `ARCHITECTURE.md` were measured, not estimated.
+
+### Roadmap changes
+
+- Milestone 5 `Diagnostics UI`: the panel item is now checked with a
+  cross-reference to the Milestone 4 delivery.
+- `Saved filters` de-duplicated (Milestone 2 owns it).
+- Nothing else moved: the remaining 31 unchecked items were each
+  checked against `src/` and are genuinely open (go-to-row, tab
+  reordering, recently-closed tabs, light theme, column resize, recent
+  files, loading progress, CI matrix and packaging among them).
+
+### Architecture changes
+
+No architectural change. `ARCHITECTURE.md` was corrected to describe
+what already exists.
+
+### Issues / technical debt discovered
+
+- The agent log's entry dates run ahead of the machine clock and of
+  git, which makes the "newest at the bottom" convention unreliable.
+- Repeated per-module test counts in `ARCHITECTURE.md` rot easily; the
+  new totals paragraph should be the authoritative summary.
+- `fixtures/ask.csv` is the only fixture that cannot be regenerated, so
+  it is the one file to preserve carefully if fixture cleanup continues.
+
+### Next recommended task
+
+Unchanged: verify the real GLiNER model (scope + binding), then add
+`FilterExpr::Not` and `NOT` / `set membership`.
