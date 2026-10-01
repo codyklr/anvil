@@ -6382,3 +6382,100 @@ the three-form before/after table.
 Iteration 5: loading progress during ZIP extraction and indexing,
 staying on the background executor with the generation counter
 discarding obsolete updates.
+
+---
+
+## 2026-09-30 — Iteration 5: loading progress
+
+### Context
+
+Fifth slice of the improvement run (branch
+`agent/iterative-improvements`). Long ZIP extractions and large index
+builds showed only a generic `Loading…` label. The roadmap wanted
+bytes-processed-over-total where known, an indeterminate indicator
+otherwise, background-only work, and obsolete updates discarded by the
+generation counter.
+
+### Implemented
+
+- `src/progress.rs` (new): `LoadPhase` (`Reading` / `Extracting` /
+  `Indexing`), `LoadProgress { phase, bytes_done, bytes_total }` with
+  `fraction()`, and the `ProgressSink` callback type. `LoadPhase`
+  carries `as_u8` / `from_u8` for lock-free atomic transport.
+- `parser/indexing.rs`: `build_with_progress` / `parse_with_progress`
+  report the index walk's byte position against the mmap length. The
+  per-byte check lives in `build_impl<const REPORT: bool>` so the
+  no-sink path compiles it out (a runtime check regressed the 1M scan
+  from 254 ms to 622 ms; the const version restores 251 ms).
+- `source/archive.rs`: `extract_into_temp_with_progress` reports bytes
+  copied against the central directory's uncompressed size.
+- `loader.rs`: `load_with_progress`, `load_entry_with_progress`,
+  `index_opened_with_progress`; the old entry points delegate with
+  `None`.
+- `ui/view.rs`: an atomic `ProgressTracker` shared with the background
+  task, a 50 ms `start_progress_tracking` poller that stops on a
+  `finished` flag or a `progress_generation` bump, `progress_text()`
+  and `render_progress_bar()` (determinate bar with byte counts,
+  indeterminate stub otherwise), wired into both the no-document
+  `Loading` state and the pending-ZIP-tab placeholder. `apply` and
+  `apply_lazy_result` clear the indicator.
+- `lib.rs`: re-exports `progress`, the new loader functions and the
+  progress-aware indexing functions.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **443 passed, 7 ignored** (196 library, 164
+  binary, 82 `tests/core.rs` of which 6 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean apart from the
+  pre-existing future-incompat notice.
+- Data-side tests prove monotonic, determinate reporting for indexing
+  and ZIP extraction (a ~2.5 MiB fixture yields intermediate 1 MiB
+  samples) and that the final sample reaches the source length.
+- UI tests prove the indicator appears with byte counts, appears as an
+  indeterminate stub when the total is unknown, and clears.
+- Indexing throughput after the change: 251 ms / 659 MiB/s on the 1M
+  fixture (baseline 254 ms / 651 MiB/s), recorded in
+  `docs/benchmarks.md`.
+- **Not verified:** no manual GUI run; the bar is exercised by the
+  headless UI tests only.
+
+### Tests added / changed
+
+- `tests/core.rs`: `indexing_reports_monotonic_progress`,
+  `zip_extraction_reports_progress`, `load_without_progress_still_succeeds`.
+- `progress.rs`: `fraction_is_none_when_the_total_is_unknown`,
+  `fraction_clamps_and_handles_zero`.
+- `ui/view/tests.rs`: `loading_progress_indicator_appears_and_clears`,
+  `loading_progress_without_total_is_indeterminate`.
+
+### Roadmap changes
+
+- Milestone 5 UX: "Loading progress UI for extraction and indexing"
+  ticked.
+- Milestone 1 known gaps: removed "No progress UI during long
+  extractions".
+
+### Architecture changes
+
+`ARCHITECTURE.md` module tree, the archive known-limitations note, and
+a new "Loading progress" section document the sink / tracker / poller
+design and the const-generic no-report path. `docs/benchmarks.md` gains
+a progress-overhead subsection.
+
+### Issues / technical debt discovered
+
+- The poller is a foreground timer task; it stops via the tracker's
+  `finished` flag, so a panic in the data side would leave it running
+  until the next load bumps the epoch. Acceptable, but a stronger
+  contract (RAII finish guard) would be tidier.
+- Progress is global rather than per tab: switching to a different tab
+  while a lazy ZIP entry extracts keeps showing that extraction's
+  progress. Reasonable for now; per-tab progress would need the tracker
+  on `DocumentSnapshot`.
+
+### Next recommended task
+
+Iteration 6: column resize by dragging the header boundary, with a
+width model test and one UI drag test.

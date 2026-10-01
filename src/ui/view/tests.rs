@@ -2988,3 +2988,56 @@ async fn cmd_a_in_filter_field_selects_text_not_grid(cx: &mut TestAppContext) {
         assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
     });
 }
+
+/// The loading indicator reflects the shared progress tracker: a
+/// determinate bar with byte counts while a load is in flight, and
+/// nothing once the load finishes.
+#[gpui::test]
+async fn loading_progress_indicator_appears_and_clears(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        let (tracker, _generation) = view.start_progress_tracking(cx);
+        tracker.store(anvil_core::LoadProgress {
+            phase: anvil_core::LoadPhase::Indexing,
+            bytes_done: 5 * 1024 * 1024,
+            bytes_total: Some(10 * 1024 * 1024),
+        });
+        view.refresh_progress();
+        let text = view.progress_text().expect("progress label");
+        assert!(text.contains("indexing"), "label was {text:?}");
+        assert!(text.contains("5.0 MiB"), "label was {text:?}");
+        assert!(text.contains("10.0 MiB"), "label was {text:?}");
+        assert!(view.render_progress_bar().is_some());
+    });
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.clear_progress(cx);
+        assert!(view.progress_text().is_none());
+        assert!(view.render_progress_bar().is_none());
+    });
+    cx.run_until_parked();
+}
+
+/// An unknown total shows the indeterminate form (a phase plus an
+/// ellipsis) rather than a misleading percentage.
+#[gpui::test]
+async fn loading_progress_without_total_is_indeterminate(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        let (tracker, _generation) = view.start_progress_tracking(cx);
+        tracker.store(anvil_core::LoadProgress {
+            phase: anvil_core::LoadPhase::Extracting,
+            bytes_done: 1234,
+            bytes_total: None,
+        });
+        view.refresh_progress();
+        assert_eq!(view.progress_text().as_deref(), Some("extracting…"));
+        // The indeterminate bar still renders.
+        assert!(view.render_progress_bar().is_some());
+        view.clear_progress(cx);
+    });
+}

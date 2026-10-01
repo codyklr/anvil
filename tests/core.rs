@@ -1546,3 +1546,101 @@ fn filter_text_operators_are_case_insensitive() {
     let f = parse_filter("name contains ali", &doc.meta.headers, doc.column_count()).unwrap();
     assert_eq!(apply_filter(&doc, &[f]), vec![0]);
 }
+
+// ---- load progress ------------------------------------------------------
+
+/// Indexing reports monotonic, determinate progress and a final sample
+/// that reaches the source length. The fixture is ~2.5 MiB so at least
+/// one intermediate report (the step is 1 MiB) proves reporting happens
+/// mid-scan rather than only at the ends.
+#[test]
+fn indexing_reports_monotonic_progress() {
+    use std::sync::Mutex;
+
+    let mut csv = String::from("a,b\n");
+    for i in 0..300_000u32 {
+        csv.push_str(&format!("{i},value-{i}\n"));
+    }
+    let (_dir, path) = write_temp("progress.csv", csv.as_bytes());
+    let opened = open_local(&path).expect("open");
+
+    let samples: Mutex<Vec<anvil_core::LoadProgress>> = Mutex::new(Vec::new());
+    let sink = |p: anvil_core::LoadProgress| samples.lock().expect("lock").push(p);
+    let doc = anvil_core::index_opened_with_progress(opened, Some(&sink));
+    let samples = samples.into_inner().expect("lock");
+
+    assert!(!samples.is_empty(), "indexing emitted no progress samples");
+    assert!(samples
+        .iter()
+        .all(|s| s.phase == anvil_core::LoadPhase::Indexing));
+    assert!(samples
+        .iter()
+        .all(|s| s.bytes_total == Some(doc.opened.len())));
+    assert!(samples
+        .windows(2)
+        .all(|w| w[0].bytes_done <= w[1].bytes_done));
+    let last = samples.last().expect("a sample");
+    assert_eq!(last.bytes_done, doc.opened.len());
+    assert!(
+        samples.len() >= 2,
+        "expected intermediate reports, got {}",
+        samples.len()
+    );
+}
+
+/// ZIP extraction reports monotonic determinate progress using the
+/// central directory's uncompressed size, and the loader reports the
+/// indexing phase afterwards. The entry is ~2.5 MiB so extraction emits
+/// intermediate samples.
+#[test]
+fn zip_extraction_reports_progress() {
+    use std::sync::Mutex;
+
+    let mut csv = String::from("a,b\n");
+    for i in 0..300_000u32 {
+        csv.push_str(&format!("{i},value-{i}\n"));
+    }
+    let (_dir, path) = make_zip("progress.zip", &[("data.csv", csv.as_bytes())]);
+
+    let samples: Mutex<Vec<anvil_core::LoadProgress>> = Mutex::new(Vec::new());
+    let sink = |p: anvil_core::LoadProgress| samples.lock().expect("lock").push(p);
+    let loaded = match anvil_core::load_with_progress(&path, Some(&sink)).expect("load") {
+        LoadResult::Ready(loaded) => loaded,
+        LoadResult::NeedArchiveChoice(_) => panic!("a single CSV should auto-open"),
+    };
+    let samples = samples.into_inner().expect("lock");
+
+    let extracting: Vec<_> = samples
+        .iter()
+        .filter(|s| s.phase == anvil_core::LoadPhase::Extracting)
+        .collect();
+    assert!(
+        extracting.len() >= 2,
+        "expected intermediate extraction reports, got {}",
+        extracting.len()
+    );
+    assert!(extracting
+        .iter()
+        .all(|s| s.bytes_total == Some(loaded.document.opened.len())));
+    assert!(extracting
+        .windows(2)
+        .all(|w| w[0].bytes_done <= w[1].bytes_done));
+    assert_eq!(
+        extracting.last().expect("a sample").bytes_done,
+        loaded.document.opened.len()
+    );
+    // The indexing phase is reported after extraction.
+    assert!(samples
+        .iter()
+        .any(|s| s.phase == anvil_core::LoadPhase::Indexing));
+}
+
+/// No sink means no reporting cost and identical results.
+#[test]
+fn load_without_progress_still_succeeds() {
+    let (_dir, path) = write_temp("noprogress.csv", b"a,b\n1,2\n");
+    match anvil_core::load_with_progress(&path, None).expect("load") {
+        LoadResult::Ready(loaded) => assert_eq!(loaded.document.record_count(), 1),
+        LoadResult::NeedArchiveChoice(_) => panic!("direct file should be ready"),
+    }
+}

@@ -7,6 +7,7 @@ pub mod encoding;
 pub mod error;
 pub mod loader;
 pub mod parser;
+pub mod progress;
 pub mod query;
 pub mod schema;
 pub mod selection;
@@ -14,15 +15,20 @@ pub mod source;
 
 pub use encoding::{scan as scan_encoding, ColumnEncoding, EncodingReport};
 pub use error::{AnvilError, Result};
-pub use loader::{index_opened, load, load_entry, reindex, LoadResult, LoadedDocument};
+pub use loader::{
+    index_opened, index_opened_with_progress, load, load_entry, load_entry_with_progress,
+    load_with_progress, reindex, LoadResult, LoadedDocument,
+};
 pub use parser::indexing::{
-    build as build_index, parse as parse_opened, parse_with as parse_opened_with, IndexOptions,
-    IndexResult, DEFAULT_MAX_RECORD_BYTES,
+    build as build_index, build_with_progress as build_index_with_progress, parse as parse_opened,
+    parse_with as parse_opened_with, parse_with_progress as parse_opened_with_progress,
+    IndexOptions, IndexResult, DEFAULT_MAX_RECORD_BYTES,
 };
 pub use parser::{
     column_label, exact_string, Cell, Cells, ColumnIndex, HeaderMode, ParseMeta, ParseWarning,
     ParsedDocument, WarningKind,
 };
+pub use progress::{LoadPhase, LoadProgress, ProgressSink};
 pub use query::filter::{
     apply as apply_filter, apply_expr as apply_filter_expr, parse as parse_filter,
     parse_expr as parse_filter_expr, Filter, FilterExpr, FilterOp,

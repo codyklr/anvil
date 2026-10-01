@@ -105,7 +105,6 @@ and react appropriately when the archive has multiple data files.
 
 ### Known gaps carried forward into Milestone 2
 
-- No progress UI during long extractions.
 - ZIP extraction always writes the full entry to a temp file; no
   streaming.
 - Window cannot be closed gracefully from inside the app other than
@@ -677,7 +676,18 @@ make what exists feel finished.
 #### UX
 
 - [ ] Recent files list (persisted to `$XDG_CONFIG_HOME/anvil/`).
-- [ ] Loading progress UI for extraction and indexing.
+- [x] Loading progress UI for extraction and indexing. `anvil_core`
+  reports determinate `LoadProgress` (phase + bytes done/total) through
+  an optional `ProgressSink` from both ZIP decompression and the index
+  walk; extraction knows the uncompressed size from the central
+  directory and the index knows the mmap length, so both bars are
+  determinate. The UI stores samples in an atomic `ProgressTracker`
+  written by the background task and polled on a 50 ms timer; the
+  poller stops when the tracker is marked finished or a newer load
+  bumps the progress epoch, so obsolete updates are discarded. An
+  unknown total falls back to an indeterminate stub. The indexer's
+  per-byte check is behind a const generic, so the no-progress path is
+  unchanged (251 ms on the 1M fixture).
 - [ ] Column resize: drag column boundary in the header.
 - [ ] Keyboard shortcut cheatsheet (Cmd/Ctrl+?).
 - [ ] Theme toggle (light mode).

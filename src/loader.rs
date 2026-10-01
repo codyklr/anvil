@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::error::{AnvilError, Result};
 use crate::parser::indexing::{self, IndexOptions};
 use crate::parser::ParsedDocument;
+use crate::progress::ProgressSink;
 use crate::source::archive::ArchiveSource;
 use crate::source::{open_path, OpenResult, OpenedSource};
 
@@ -32,7 +33,15 @@ pub enum LoadResult {
 
 /// Index an already-opened source into a `ParsedDocument`.
 pub fn index_opened(opened: OpenedSource) -> ParsedDocument {
-    let result = indexing::parse(&opened);
+    index_opened_with_progress(opened, None)
+}
+
+/// [`index_opened`] that reports indexing progress.
+pub fn index_opened_with_progress(
+    opened: OpenedSource,
+    progress: Option<ProgressSink<'_>>,
+) -> ParsedDocument {
+    let result = indexing::parse_with_progress(&opened, IndexOptions::default(), progress);
     ParsedDocument {
         opened,
         meta: result.meta,
@@ -57,9 +66,14 @@ pub fn reindex(doc: &ParsedDocument, options: IndexOptions) -> ParsedDocument {
 /// Open a path. Direct files resolve immediately; a ZIP with exactly one
 /// usable entry opens transparently; a ZIP with several prompts the caller.
 pub fn load(path: &Path) -> Result<LoadResult> {
+    load_with_progress(path, None)
+}
+
+/// [`load`] that reports extraction and indexing progress.
+pub fn load_with_progress(path: &Path, progress: Option<ProgressSink<'_>>) -> Result<LoadResult> {
     match open_path(path)? {
         OpenResult::Direct(opened) => Ok(LoadResult::Ready(Box::new(LoadedDocument {
-            document: index_opened(opened),
+            document: index_opened_with_progress(opened, progress),
             archive: None,
             entry: None,
         }))),
@@ -77,9 +91,8 @@ pub fn load(path: &Path) -> Result<LoadResult> {
             // Auto-open when there is exactly one clear favourite. Two
             // equally-rankable files (e.g. two CSVs) require a choice.
             match best_candidate(&source) {
-                Some(entry) => {
-                    load_entry(&source, &entry).map(|doc| LoadResult::Ready(Box::new(doc)))
-                }
+                Some(entry) => load_entry_with_progress(&source, &entry, progress)
+                    .map(|doc| LoadResult::Ready(Box::new(doc))),
                 None => Ok(LoadResult::NeedArchiveChoice(source)),
             }
         }
@@ -105,9 +118,18 @@ fn best_candidate(source: &ArchiveSource) -> Option<String> {
 
 /// Extract and index a specific entry from an open archive.
 pub fn load_entry(source: &Arc<ArchiveSource>, entry: &str) -> Result<LoadedDocument> {
-    let opened = source.extract_into_temp(entry)?;
+    load_entry_with_progress(source, entry, None)
+}
+
+/// [`load_entry`] that reports decompression and indexing progress.
+pub fn load_entry_with_progress(
+    source: &Arc<ArchiveSource>,
+    entry: &str,
+    progress: Option<ProgressSink<'_>>,
+) -> Result<LoadedDocument> {
+    let opened = source.extract_into_temp_with_progress(entry, progress)?;
     Ok(LoadedDocument {
-        document: index_opened(opened),
+        document: index_opened_with_progress(opened, progress),
         archive: Some(source.clone()),
         entry: Some(entry.to_string()),
     })

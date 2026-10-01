@@ -95,6 +95,16 @@ growing; for the common case (fewer than ~100 visible columns) it never
 fills. The text depends only on the document, so a new `GridModel`
 (open / reindex) is a complete invalidation - no staleness window.
 
+## Progress-reporting overhead
+
+Iteration 5 added optional progress reporting to the index walk. A
+naive per-byte check regressed the 1M-row scan from **254 ms to 622 ms**
+(266 MiB/s), so the check is compiled out for the common no-sink path
+with a const generic (`build_impl::<REPORT>`). Re-measured after the
+fix: **251 ms / 659 MiB/s**, i.e. within noise of the baseline. The
+`measure_large_fixture` test and `anvil --probe fixtures/large.csv`
+both report the restored throughput.
+
 ## What is not measured
 
 - **GPU scroll frame time.** The GUI was not launched in this

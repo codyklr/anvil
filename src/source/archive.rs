@@ -20,7 +20,11 @@ use zip::read::ZipFile;
 use zip::{CompressionMethod, ZipArchive};
 
 use crate::error::{AnvilError, Result};
+use crate::progress::{LoadPhase, LoadProgress, ProgressSink};
 use crate::source::{ArchiveCandidate, DataSource, MmapSource, OpenedSource, SourceKind};
+
+/// How many decompressed bytes between extraction progress reports.
+const PROGRESS_STEP: u64 = 1 << 20;
 
 /// Safety limits for archives. These are deliberately generous but
 /// bounded to prevent trivial zip-bombs from exhausting memory or disk.
@@ -117,6 +121,17 @@ impl ArchiveSource {
     /// when the `OpenedSource` is dropped via the `MmapSource`'s reference
     /// to its underlying path.
     pub fn extract_into_temp(&self, entry_name: &str) -> Result<OpenedSource> {
+        self.extract_into_temp_with_progress(entry_name, None)
+    }
+
+    /// [`extract_into_temp`](Self::extract_into_temp) that reports
+    /// decompression progress. The entry's uncompressed size is known
+    /// from the central directory, so the bar is determinate.
+    pub fn extract_into_temp_with_progress(
+        &self,
+        entry_name: &str,
+        progress: Option<ProgressSink<'_>>,
+    ) -> Result<OpenedSource> {
         let mut zip = ZipArchive::new(self.archive_file.try_clone()?)?;
         let mut entry = zip
             .by_name(entry_name)
@@ -147,6 +162,7 @@ impl ArchiveSource {
         let mut out = File::create(&out_path)?;
         let mut copied: u64 = 0;
         let mut buf = vec![0u8; 1 << 20]; // 1 MiB copy buffer
+        let mut next_report: u64 = 0;
 
         loop {
             let n = entry.read(&mut buf)?;
@@ -154,6 +170,16 @@ impl ArchiveSource {
                 break;
             }
             copied += n as u64;
+            if let Some(sink) = progress {
+                if copied >= next_report {
+                    sink(LoadProgress {
+                        phase: LoadPhase::Extracting,
+                        bytes_done: copied,
+                        bytes_total: Some(uncompressed_size),
+                    });
+                    next_report = copied.saturating_add(PROGRESS_STEP);
+                }
+            }
             let c = entry.compressed_size();
             if c > 0 && copied > c.saturating_mul(MAX_COMPRESSION_RATIO) {
                 return Err(AnvilError::DecompressedTooLarge {
@@ -163,6 +189,13 @@ impl ArchiveSource {
                 });
             }
             std::io::Write::write_all(&mut out, &buf[..n])?;
+        }
+        if let Some(sink) = progress {
+            sink(LoadProgress {
+                phase: LoadPhase::Extracting,
+                bytes_done: copied,
+                bytes_total: Some(uncompressed_size),
+            });
         }
         out.sync_all()?;
         drop(out);

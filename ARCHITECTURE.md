@@ -95,6 +95,7 @@ anvil/
 │   ├── encoding.rs             # UTF-8 validity / BOM scan
 │   ├── error.rs                # AnvilError + Result
 │   ├── loader.rs               # open orchestration (load, load_entry)
+│   ├── progress.rs             # LoadPhase / LoadProgress + ProgressSink
 │   ├── gliner.rs               # Tier 2 GLiNER extraction backend (feature `nl-gliner`)
 │   ├── nlmodel.rs              # Tier 2 generative model backend (feature `nl-model`)
 │   ├── parser/
@@ -1071,8 +1072,10 @@ Implemented guards:
   Architectural Evolution").
 - No support for other archive formats (`gz`, `tar.gz`, `7z`).
 - Encryption is rejected outright; there is no password prompt.
-- No progress signal during extraction. The UI shows a generic
-  `Loading…` label.
+- Progress is reported during extraction and indexing. `anvil_core`
+  emits `LoadProgress` samples through an optional `ProgressSink`; the
+  UI polls a shared atomic tracker (see the Loading progress section),
+  so the status is no longer just a generic `Loading…` label.
 - `ZipArchive::new` consumes a `File`; the archive source keeps a
   `try_clone` and re-opens the file for each entry. For huge archives
   with many entries this could be slow; not currently a bottleneck.
@@ -1393,8 +1396,25 @@ takes over.
   it. For very large ZIPs this is observable. A real cancellation
   token would require `zip::ZipArchive` to expose cancellation hooks,
   which it currently does not. Out of scope for Milestone 1.
-- There is no progress UI for extraction / indexing. The status bar
-  shows a generic `loading — <name>` message.
+- Extraction and indexing report progress (see "Loading progress"
+  below); the in-flight work itself is still not cancellable.
+
+### Loading progress
+
+`progress.rs` defines `LoadPhase` (`Reading` / `Extracting` /
+`Indexing`) and `LoadProgress { phase, bytes_done, bytes_total }`.
+The loader, archive extractor and index walk accept an optional
+`ProgressSink` (a `Send + Sync` closure). Extraction's total comes from
+the ZIP central directory and indexing's from the mmap length, so both
+are determinate; a sink that is absent costs nothing (the indexer's
+per-byte check is behind a const generic, `build_impl::<REPORT>`).
+
+`MainView` owns an atomic `ProgressTracker` shared with the background
+task and polls it every 50 ms while a load runs. The poller stops when
+the tracker is marked finished or a newer load bumps
+`progress_generation`, so stale updates cannot replace a newer load's
+state. The render shows a determinate bar with byte counts, or an
+indeterminate stub when the total is unknown.
 
 ## Error Handling / Diagnostics
 

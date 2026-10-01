@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,9 +28,9 @@ use anvil_core::{
     apply_filter_expr, column_stats, describe_nl, find_ranges, infer_schema, parse_filter_expr,
     parse_nl, reindex, sample_distinct, scan_encoding, search_records, sort_rows,
     suggest_candidates, suggest_context, ArchiveSource, CellPos, ColumnIndex, ColumnStats,
-    DistinctCount, EncodingReport, FilterExpr, HeaderMode, IndexOptions, LoadResult,
-    LoadedDocument, NlColumn, NlResult, NlSchema, ParsedDocument, SearchOptions, Selection, Slot,
-    SortKind, SortOrder, SortSpec, StatsOptions,
+    DistinctCount, EncodingReport, FilterExpr, HeaderMode, IndexOptions, LoadPhase, LoadProgress,
+    LoadResult, LoadedDocument, NlColumn, NlResult, NlSchema, ParsedDocument, SearchOptions,
+    Selection, Slot, SortKind, SortOrder, SortSpec, StatsOptions,
 };
 
 use super::archive_picker;
@@ -49,6 +50,10 @@ mod search;
 /// fades back to the normal selection colour.
 const COPY_FLASH_DURATION: Duration = Duration::from_millis(450);
 
+/// How often the UI samples the shared progress tracker while a load is
+/// running. Fast enough to feel live, slow enough to be free.
+const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// How often the drag auto-scroll task advances the view while the
 /// pointer is held outside the grid's top or bottom edge.
 const AUTO_SCROLL_TICK: Duration = Duration::from_millis(30);
@@ -58,6 +63,45 @@ const AUTO_SCROLL_TICK: Duration = Duration::from_millis(30);
 /// clobbering the real clipboard.
 #[allow(clippy::type_complexity)]
 type ClipboardWriter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// Shared, wait-free progress state for one background open. The data
+/// task stores samples through a [`ProgressSink`]; the UI polls this on
+/// a short timer. Atomics keep it `Send + Sync` and free of any GPUI
+/// dependency, so the background executor can write it directly.
+#[derive(Default)]
+struct ProgressTracker {
+    phase: AtomicU8,
+    done: AtomicU64,
+    /// `0` means "total unknown" (indeterminate).
+    total: AtomicU64,
+    finished: AtomicBool,
+}
+
+impl ProgressTracker {
+    fn store(&self, progress: LoadProgress) {
+        self.phase.store(progress.phase.as_u8(), Ordering::Relaxed);
+        self.done.store(progress.bytes_done, Ordering::Relaxed);
+        self.total
+            .store(progress.bytes_total.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LoadProgress {
+        let total = self.total.load(Ordering::Relaxed);
+        LoadProgress {
+            phase: LoadPhase::from_u8(self.phase.load(Ordering::Relaxed)),
+            bytes_done: self.done.load(Ordering::Relaxed),
+            bytes_total: (total > 0).then_some(total),
+        }
+    }
+
+    fn mark_finished(&self) {
+        self.finished.store(true, Ordering::Relaxed);
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Relaxed)
+    }
+}
 
 /// Per-document state captured when a tab is no longer active and
 /// restored when the user switches back to it. The fields mirror
@@ -560,6 +604,17 @@ pub struct MainView {
     goto_text_bounds: Option<Bounds<Pixels>>,
     /// True between a mouse-down and mouse-up in the go-to-row input.
     goto_dragging: bool,
+
+    /// Shared progress state for the background open currently tracked,
+    /// or `None` when nothing is loading. `progress_snapshot` is the
+    /// polled value the renderer draws.
+    loading_progress: Option<Arc<ProgressTracker>>,
+    progress_snapshot: Option<LoadProgress>,
+    /// Epoch of the tracked load. A poller stops when a newer load has
+    /// bumped it, which discards obsolete updates.
+    progress_generation: u64,
+    /// Outstanding progress poller.
+    progress_task: Option<Task<()>>,
 }
 
 /// A Tier 2 interpreter: phrase + schema + value source to an expression.
@@ -697,6 +752,10 @@ impl MainView {
             focus_goto_on_next_frame: false,
             goto_text_bounds: None,
             goto_dragging: false,
+            loading_progress: None,
+            progress_snapshot: None,
+            progress_generation: 0,
+            progress_task: None,
         }
     }
 
@@ -878,16 +937,144 @@ impl MainView {
 
     // ---- opening ---------------------------------------------------------
 
+    /// Begin tracking progress for a new background load. Returns the
+    /// shared tracker (the background task writes samples into it) and
+    /// its epoch. An older poller stops on its next tick because its
+    /// epoch no longer matches `progress_generation`, so obsolete
+    /// updates are discarded.
+    fn start_progress_tracking(&mut self, cx: &mut Context<Self>) -> (Arc<ProgressTracker>, u64) {
+        self.progress_generation = self.progress_generation.wrapping_add(1);
+        let generation = self.progress_generation;
+        let tracker = Arc::new(ProgressTracker::default());
+        self.loading_progress = Some(tracker.clone());
+        self.progress_snapshot = Some(LoadProgress {
+            phase: LoadPhase::Reading,
+            bytes_done: 0,
+            bytes_total: None,
+        });
+
+        let poller = tracker.clone();
+        let task = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(PROGRESS_POLL_INTERVAL).await;
+            let keep_going = this
+                .update(cx, |view, cx| {
+                    if view.progress_generation != generation {
+                        return false;
+                    }
+                    if poller.is_finished() {
+                        view.loading_progress = None;
+                        view.progress_snapshot = None;
+                        view.progress_task = None;
+                        cx.notify();
+                        return false;
+                    }
+                    view.refresh_progress();
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !keep_going {
+                break;
+            }
+        });
+        self.progress_task = Some(task);
+        (tracker, generation)
+    }
+
+    /// Drop the tracked progress and stop its poller. Called when a load
+    /// completes (success or error).
+    fn clear_progress(&mut self, cx: &mut Context<Self>) {
+        if let Some(tracker) = self.loading_progress.take() {
+            tracker.mark_finished();
+        }
+        self.progress_snapshot = None;
+        cx.notify();
+    }
+
+    /// Read the shared tracker into the render snapshot. Used by tests
+    /// and by the poller.
+    fn refresh_progress(&mut self) {
+        self.progress_snapshot = self.loading_progress.as_ref().map(|t| t.snapshot());
+    }
+
+    /// Human-readable progress label, or `None` when nothing is loading.
+    /// A known total shows bytes done over total; otherwise the phase is
+    /// suffixed with an ellipsis (indeterminate).
+    fn progress_text(&self) -> Option<String> {
+        let progress = self.progress_snapshot?;
+        let verb = match progress.phase {
+            LoadPhase::Reading => "reading",
+            LoadPhase::Extracting => "extracting",
+            LoadPhase::Indexing => "indexing",
+        };
+        Some(match progress.bytes_total {
+            Some(total) if total > 0 => format!(
+                "{verb}  {} / {}",
+                archive_picker::format_size(progress.bytes_done),
+                archive_picker::format_size(total)
+            ),
+            _ => format!("{verb}…"),
+        })
+    }
+
+    /// A small progress bar: determinate when the total is known, an
+    /// indeterminate stub otherwise. `None` when nothing is loading.
+    fn render_progress_bar(&self) -> Option<AnyElement> {
+        const BAR_WIDTH: f32 = 280.0;
+        const BAR_HEIGHT: f32 = 6.0;
+        let progress = self.progress_snapshot?;
+        let label = self.progress_text().unwrap_or_default();
+        let mut bar = div()
+            .w(px(BAR_WIDTH))
+            .h(px(BAR_HEIGHT))
+            .rounded_sm()
+            .bg(theme::BORDER_STRONG);
+        bar = match progress.fraction() {
+            Some(fraction) => bar.child(
+                div()
+                    .w(px(BAR_WIDTH * fraction))
+                    .h(px(BAR_HEIGHT))
+                    .rounded_sm()
+                    .bg(theme::ACCENT),
+            ),
+            None => bar.child(
+                div()
+                    .w(px(72.0))
+                    .h(px(BAR_HEIGHT))
+                    .rounded_sm()
+                    .bg(theme::ACCENT),
+            ),
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .child(div().text_xs().text_color(theme::TEXT_DIM).child(label))
+                .child(bar)
+                .into_any_element(),
+        )
+    }
+
     fn begin_open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
+        let (tracker, _) = self.start_progress_tracking(cx);
         self.state = ViewState::Loading(format!("reading {}", display_path(&path)));
         self.show_picker = false;
         cx.notify();
 
         let executor = cx.background_executor().clone();
         let task = cx.spawn(async move |this, cx| {
-            let outcome = executor.spawn(async move { load_and_index(&path) }).await;
+            let sink_tracker = tracker.clone();
+            let outcome = executor
+                .spawn(async move {
+                    let sink = move |progress: LoadProgress| sink_tracker.store(progress);
+                    load_and_index_with_progress(&path, &sink)
+                })
+                .await;
+            tracker.mark_finished();
             this.update(cx, |view, cx| {
                 if view.generation != generation {
                     return;
@@ -900,6 +1087,7 @@ impl MainView {
     }
 
     fn apply(&mut self, outcome: OpenOutcome, cx: &mut Context<Self>) {
+        self.clear_progress(cx);
         match outcome {
             OpenOutcome::Ready(loaded) => {
                 let LoadedDocument {
@@ -1049,10 +1237,16 @@ impl MainView {
         }
 
         let executor = cx.background_executor().clone();
+        let (tracker, _) = self.start_progress_tracking(cx);
         cx.spawn(async move |this, cx| {
+            let sink_tracker = tracker.clone();
             let outcome = executor
-                .spawn(async move { extract_and_index(&archive, &entry) })
+                .spawn(async move {
+                    let sink = move |progress: LoadProgress| sink_tracker.store(progress);
+                    extract_and_index_with_progress(&archive, &entry, &sink)
+                })
                 .await;
+            tracker.mark_finished();
             this.update(cx, |view, cx| view.apply_lazy_result(id, outcome, cx))
                 .ok();
         })
@@ -1063,6 +1257,7 @@ impl MainView {
     /// to. The tab may have been closed while the extraction was in
     /// flight, in which case the result is discarded.
     fn apply_lazy_result(&mut self, id: u64, outcome: OpenOutcome, cx: &mut Context<Self>) {
+        self.clear_progress(cx);
         let Some(index) = self.documents.iter().position(|d| d.id == id) else {
             return;
         };
@@ -2972,6 +3167,7 @@ impl MainView {
                             .text_color(theme::TEXT_DIM)
                             .child(self.selected_entry.clone().unwrap_or_default()),
                     )
+                    .children(self.render_progress_bar())
                     .into_any_element(),
             };
         }
@@ -3006,6 +3202,7 @@ impl MainView {
                 .bg(theme::BG)
                 .child(div().text_color(theme::TEXT_STRONG).child("Loading…"))
                 .child(div().text_color(theme::TEXT_DIM).child(note.clone()))
+                .children(self.render_progress_bar())
                 .into_any_element(),
             ViewState::Error(message) => div()
                 .flex()
@@ -3160,16 +3357,23 @@ impl Render for MainView {
 
 // ---- background helpers -------------------------------------------------
 
-fn load_and_index(path: &std::path::Path) -> OpenOutcome {
-    match anvil_core::load(path) {
+fn load_and_index_with_progress(
+    path: &std::path::Path,
+    progress: anvil_core::ProgressSink<'_>,
+) -> OpenOutcome {
+    match anvil_core::load_with_progress(path, Some(progress)) {
         Ok(LoadResult::Ready(document)) => OpenOutcome::Ready(document),
         Ok(LoadResult::NeedArchiveChoice(source)) => OpenOutcome::NeedArchiveChoice(source),
         Err(err) => OpenOutcome::Error(err.to_string()),
     }
 }
 
-fn extract_and_index(source: &Arc<ArchiveSource>, entry: &str) -> OpenOutcome {
-    match anvil_core::load_entry(source, entry) {
+fn extract_and_index_with_progress(
+    source: &Arc<ArchiveSource>,
+    entry: &str,
+    progress: anvil_core::ProgressSink<'_>,
+) -> OpenOutcome {
+    match anvil_core::load_entry_with_progress(source, entry, Some(progress)) {
         Ok(document) => OpenOutcome::Ready(Box::new(document)),
         Err(err) => OpenOutcome::Error(err.to_string()),
     }
