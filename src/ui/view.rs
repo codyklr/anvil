@@ -42,6 +42,7 @@ use super::theme;
 mod ask;
 mod diagnostics;
 mod filter;
+mod goto;
 mod search;
 
 /// How long the green "copied" flash stays over the selection before it
@@ -541,6 +542,24 @@ pub struct MainView {
     /// Optional Tier 2 interpreter (embedded model when the `nl-model`
     /// feature is on; injectable in tests).
     ask_interpreter: Option<AskInterpreter>,
+
+    /// Whether the go-to-row input bar (Cmd/Ctrl+G) is visible.
+    goto_open: bool,
+    /// Text + caret for the go-to-row input.
+    goto_input: TextEdit,
+    /// Inline error from the last Enter, e.g. a non-numeric entry.
+    goto_error: Option<String>,
+    /// Focus handle for the go-to-row bar, kept separate from the other
+    /// bars so its keys route to `on_goto_key_down`.
+    goto_focus_handle: FocusHandle,
+    /// Set when the bar opens; the next render schedules a deferred
+    /// focus onto `goto_focus_handle`.
+    focus_goto_on_next_frame: bool,
+    /// Window-space bounds of the go-to-row input, for pointer
+    /// hit-testing.
+    goto_text_bounds: Option<Bounds<Pixels>>,
+    /// True between a mouse-down and mouse-up in the go-to-row input.
+    goto_dragging: bool,
 }
 
 /// A Tier 2 interpreter: phrase + schema + value source to an expression.
@@ -671,6 +690,13 @@ impl MainView {
             ask_generation: 0,
             ask_task: None,
             ask_interpreter: ask_interpreter_default(),
+            goto_open: false,
+            goto_input: TextEdit::new(),
+            goto_error: None,
+            goto_focus_handle: cx.focus_handle(),
+            focus_goto_on_next_frame: false,
+            goto_text_bounds: None,
+            goto_dragging: false,
         }
     }
 
@@ -2101,6 +2127,8 @@ impl MainView {
                     self.close_filter(cx);
                 } else if self.ask_open {
                     self.close_ask(cx);
+                } else if self.goto_open {
+                    self.close_goto(cx);
                 } else if !self.selection.is_empty() {
                     self.selection.clear();
                     cx.notify();
@@ -2133,6 +2161,9 @@ impl MainView {
             }
             Action::ToggleInspector => self.toggle_inspector(cx),
             Action::ToggleDiagnostics => self.toggle_diagnostics(cx),
+            Action::SelectAll => self.select_all(cx),
+            Action::OpenGoToRow => self.open_goto(cx),
+            Action::OpenFile => self.pick_file(cx),
         }
     }
 
@@ -2411,7 +2442,22 @@ impl MainView {
         let Some(model) = &self.model else {
             return;
         };
-        let count = self.selection.cell_count();
+        let doc = model.doc.clone();
+        let selection = self.selection.clone();
+        let cell_at = |r: u64, c: usize| {
+            doc.cell(r, anvil_core::ColumnIndex(c))
+                .map(|cell| cell.to_exact_string().into_owned())
+        };
+        // Under an active filter/sort, copy only the rows the user can
+        // actually see, in display order. Select-all relies on this so a
+        // hidden record is never written to the clipboard.
+        let (text, count) = match self.view_rows() {
+            Some(rows) => (
+                selection.copy_view_text_with(&rows, cell_at),
+                selection.view_cell_count(&rows),
+            ),
+            None => (selection.copy_text_with(cell_at), selection.cell_count()),
+        };
         if count == 0 {
             // Nothing to copy. We still notify so that any prior
             // "copied ..." message is cleared.
@@ -2419,12 +2465,6 @@ impl MainView {
             cx.notify();
             return;
         }
-        let doc = model.doc.clone();
-        let selection = self.selection.clone();
-        let text = selection.copy_text_with(|r, c| {
-            doc.cell(r, anvil_core::ColumnIndex(c))
-                .map(|cell| cell.to_exact_string().into_owned())
-        });
         match (self.clipboard)(&text) {
             Ok(()) => {
                 self.status_message = Some(format!("copied {count} cell{}", plural(count)));
@@ -2606,6 +2646,24 @@ impl MainView {
             self.selection.set(next);
         }
         self.ensure_column_visible(next.column_index, cx);
+        self.kick_inspector(cx);
+        cx.notify();
+    }
+
+    /// Select the whole view (Cmd/Ctrl+A). The rectangle is anchored at
+    /// `(0, 0)` and its cursor is the document's last row / last column;
+    /// an active filter or sort is honoured because the grid paints only
+    /// visible rows and the copy path
+    /// ([`copy_selection_to_clipboard`](Self::copy_selection_to_clipboard))
+    /// walks the visible display order, so hidden records are neither
+    /// highlighted nor copied.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let records = model.row_count();
+        let cols = model.doc.column_count();
+        self.selection.select_all(records, cols);
         self.kick_inspector(cx);
         cx.notify();
     }
@@ -3022,11 +3080,20 @@ impl Render for MainView {
                 window.focus(&focus_handle);
             });
         }
+        // Deferred focus for the go-to-row bar.
+        if self.focus_goto_on_next_frame {
+            self.focus_goto_on_next_frame = false;
+            let focus_handle = self.goto_focus_handle.clone();
+            cx.defer_in(window, move |_view, window, _cx| {
+                window.focus(&focus_handle);
+            });
+        }
 
         let center = self.render_center(window, cx);
         let search_bar = self.render_search_bar(window, cx);
         let filter_bar = self.render_filter_bar(window, cx);
         let ask_bar = self.render_ask_bar(window, cx);
+        let goto_bar = self.render_goto_bar(window, cx);
         let overlays = self.render_overlay(cx);
 
         // The grid body and the optional file panel share a row. The
@@ -3044,6 +3111,7 @@ impl Render for MainView {
             .children(filter_bar)
             .children(search_bar)
             .children(ask_bar)
+            .children(goto_bar)
             .child(center)
             .children(overlays);
         let panel = if self.file_panel_open && !self.documents.is_empty() {

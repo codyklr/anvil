@@ -86,6 +86,24 @@ impl Selection {
         self.anchor = Some(pos);
     }
 
+    /// Select the entire document: anchor at `(0, 0)`, cursor at
+    /// `(record_count - 1, column_count - 1)`. An empty document
+    /// clears the selection instead of leaving a dangling cursor.
+    ///
+    /// The rectangle is expressed in *record-index* space, so an active
+    /// filter or sort is honoured by the callers: the grid only paints
+    /// visible rows and
+    /// [`copy_view_text_with`](Self::copy_view_text_with) only emits
+    /// rows present in the visible order.
+    pub fn select_all(&mut self, record_count: u64, column_count: usize) {
+        if record_count == 0 || column_count == 0 {
+            self.clear();
+            return;
+        }
+        self.anchor = Some(CellPos::new(0, 0));
+        self.cursor = Some(CellPos::new(record_count - 1, column_count - 1));
+    }
+
     /// Clear the selection entirely. After this call `is_empty()` is
     /// `true` and `cursor()` / `anchor()` are `None`.
     pub fn clear(&mut self) {
@@ -290,6 +308,55 @@ impl Selection {
             out.push_str(line_ending);
         }
         out
+    }
+
+    /// Render the selection as TSV, but only for rows present in
+    /// `view_rows` (the filtered/sorted display order). Rows are emitted
+    /// in `view_rows` order and the column range is the selection's
+    /// normalized column range. Records inside the selection rectangle
+    /// that are hidden by the active filter are skipped, so a select-all
+    /// under a filter copies exactly what the user can see.
+    ///
+    /// `view_rows` must be in ascending record-index order for the
+    /// binary search used to skip out-of-range records.
+    pub fn copy_view_text_with<F>(&self, view_rows: &[u64], cell_at: F) -> String
+    where
+        F: Fn(u64, usize) -> Option<String>,
+    {
+        let Some((tl, br)) = self.normalize() else {
+            return String::new();
+        };
+        let line_ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        let mut out = String::new();
+        for &row in view_rows {
+            if row < tl.record_index || row > br.record_index {
+                continue;
+            }
+            for col in tl.column_index..=br.column_index {
+                if col > tl.column_index {
+                    out.push('\t');
+                }
+                let raw = cell_at(row, col).unwrap_or_default();
+                push_tsv_cell(&mut out, &raw);
+            }
+            out.push_str(line_ending);
+        }
+        out
+    }
+
+    /// Number of rows in the selection rectangle that also appear in
+    /// `view_rows`. Used for the "copied N cells" status message so it
+    /// matches what was actually written under a filter.
+    pub fn view_cell_count(&self, view_rows: &[u64]) -> u64 {
+        let Some((tl, br)) = self.normalize() else {
+            return 0;
+        };
+        let cols = br.column_index as u64 - tl.column_index as u64 + 1;
+        let rows = view_rows
+            .iter()
+            .filter(|&&row| row >= tl.record_index && row <= br.record_index)
+            .count() as u64;
+        rows * cols
     }
 }
 
@@ -656,5 +723,52 @@ mod tests {
             text,
             format!("r0c1\tr0c2\tr0c3{ending}r1c1\tr1c2\tr1c3{ending}r2c1\tr2c2\tr2c3{ending}")
         );
+    }
+
+    #[test]
+    fn select_all_covers_the_whole_document() {
+        let mut s = Selection::empty();
+        s.select_all(3, 4);
+        assert!(s.is_range());
+        assert_eq!(s.anchor(), Some(CellPos::new(0, 0)));
+        assert_eq!(s.cursor(), Some(CellPos::new(2, 3)));
+        assert_eq!(s.cell_count(), 12);
+    }
+
+    #[test]
+    fn select_all_on_empty_document_clears() {
+        let mut s = Selection::empty();
+        s.set(CellPos::new(1, 1));
+        s.select_all(0, 4);
+        assert!(s.is_empty());
+        s.set(CellPos::new(1, 1));
+        s.select_all(3, 0);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn copy_view_text_skips_hidden_rows() {
+        let mut s = Selection::empty();
+        s.select_all(5, 2);
+        // View order: records 0, 2 and 4 are the only visible ones.
+        let view = [0u64, 2, 4];
+        let text = s.copy_view_text_with(&view, |r, c| Some(format!("r{r}c{c}")));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(
+            text,
+            format!("r0c0\tr0c1{ending}r2c0\tr2c1{ending}r4c0\tr4c1{ending}")
+        );
+        assert_eq!(s.view_cell_count(&view), 6);
+    }
+
+    #[test]
+    fn copy_view_text_preserves_display_order() {
+        let mut s = Selection::empty();
+        s.select_all(3, 1);
+        // A descending sort permutation of records 0, 1, 2.
+        let view = [2u64, 1, 0];
+        let text = s.copy_view_text_with(&view, |r, _| Some(format!("r{r}")));
+        let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+        assert_eq!(text, format!("r2{ending}r1{ending}r0{ending}"));
     }
 }

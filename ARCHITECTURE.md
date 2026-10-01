@@ -124,6 +124,7 @@ anvil/
 │   │   ├── view/
 │   │   │   ├── search.rs       # search bar: state, render, editing
 │   │   │   ├── filter.rs       # filter bar: apply, render, editing
+│   │   │   ├── goto.rs         # go-to-row bar: display-row jump
 │   │   │   ├── ask.rs          # Ask bar: preview, interpretation, apply
 │   │   │   ├── diagnostics.rs  # warnings panel + click-to-navigate
 │   │   │   └── tests.rs        # `#[cfg(test)]` UI + unit suite
@@ -213,7 +214,8 @@ anvil/
 - `ui::commands` — pure `Keystroke` → `Action` binding table
   (`MoveCursor`, `NextCell`, `Copy`, `Escape`, `OpenSearch`,
   `NextMatch`, `ToggleFilePanel`, `OpenFilter`, `OpenAsk`,
-  `ToggleInspector`, `ToggleDiagnostics`), with
+  `ToggleInspector`, `ToggleDiagnostics`, `SelectAll`, `OpenGoToRow`,
+  `OpenFile`), with
   unit tests; no window or view state dependencies.
 - `ui::view` — toolbar, tab strip, drag/drop, archive picker
   overlay, search bar overlay, status bar (with copy / error /
@@ -244,7 +246,8 @@ anvil/
   executor, and returns text that the filter parser re-validates before
   it can become a query.
 - `ui::input` / `ui::text_edit` — the shared editable-text widget used
-  by the search, filter and Ask bars. `text_edit` holds the GPUI-free
+  by the search, filter, Ask and go-to-row bars. `text_edit` holds the
+  GPUI-free
   single-line buffer and caret logic; `input` renders and hit-tests it.
 - `ui::view::ask` — the Ask bar: live preview of the parsed filter,
   `Ctrl/Cmd+Enter` escalation to a Tier 2 backend, and `Enter` to hand
@@ -401,9 +404,11 @@ Keyboard bindings are now centralized in `src/ui/commands.rs`:
 - `commands::action_for(&Keystroke) -> Option<Action>` is a pure
   keystroke-to-intent mapping. It handles arrow / Page / Home / End
   movement (including Shift extension), Cmd/Ctrl+Home/End row jumps,
-  Tab / Shift-Tab, Cmd/Ctrl+C, and Esc.
+  Tab / Shift-Tab, Cmd/Ctrl+C, Cmd/Ctrl+A (select the whole view),
+  Cmd/Ctrl+G (go-to-row), Cmd/Ctrl+O (open file), and Esc.
 - `Action` is a small UI-layer enum (`MoveCursor`, `NextCell`, `Copy`,
-  `Escape`, `OpenSearch`, `NextMatch`), not a GPUI `Action` type.
+  `Escape`, `OpenSearch`, `NextMatch`, `SelectAll`, `OpenGoToRow`,
+  `OpenFile`, ...), not a GPUI `Action` type.
   `PAGE_STEP` lives alongside the binding table. The module has unit
   tests that need no window.
 - `MainView::on_grid_key_down` delegates to `action_for`; its

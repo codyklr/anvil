@@ -2798,3 +2798,193 @@ async fn ask_document_change_clears_pending_preview(cx: &mut TestAppContext) {
         assert!(view.ask_schema.is_none() && view.ask_result.is_none());
     });
 }
+
+/// Cmd/Ctrl+A selects the whole document when the grid is focused:
+/// anchor at `(0, 0)`, cursor at the last row / last column.
+#[gpui::test]
+async fn cmd_a_selects_all_when_grid_focused(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    let chord = if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    };
+    cx.simulate_keystrokes(chord);
+
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.selection.anchor(), Some(CellPos::new(0, 0)));
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 2)));
+        assert_eq!(view.selection.cell_count(), 9);
+    });
+}
+
+/// With a filter active, select-all copies only the visible rows, in
+/// display order. `country_document` filters to records 0 and 2.
+#[gpui::test]
+async fn select_all_copy_respects_active_filter(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let written = inject_doc(cx, &view, country_document());
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "country == US".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.close_filter(cx);
+        view.select_all(cx);
+        view.copy_selection_to_clipboard(cx);
+    });
+
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    let captured = written.lock().expect("clipboard recorder").clone();
+    assert_eq!(
+        captured,
+        vec![format!("US\t10{ending}US\t30{ending}")],
+        "hidden record (UK) must not be copied"
+    );
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.status_message.as_deref(), Some("copied 4 cells"));
+    });
+}
+
+/// Cmd/Ctrl+G opens the go-to-row bar; typing a 1-based row number and
+/// pressing Enter jumps to it and closes the bar.
+#[gpui::test]
+async fn cmd_g_opens_goto_bar_and_enter_jumps(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, large_document(50));
+
+    let chord = if cfg!(target_os = "macos") {
+        "cmd-g"
+    } else {
+        "ctrl-g"
+    };
+    cx.simulate_keystrokes(chord);
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(view.goto_open, "go-to-row bar should be open");
+    });
+
+    cx.simulate_keystrokes("1 0");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.goto_input.text(), "10");
+    });
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(!view.goto_open);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(9, 0)));
+    });
+}
+
+/// A filtered/sorted view remaps the 1-based display row through the
+/// visible order: display row 2 is record 2, not record 1.
+#[gpui::test]
+async fn goto_maps_through_active_filter(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, country_document());
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_filter(cx);
+        view.filter_input = "country == US".into();
+        view.apply_filter_input(cx);
+    });
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.close_filter(cx);
+        view.open_goto(cx);
+        view.goto_input = "2".into();
+        view.commit_goto(cx);
+    });
+
+    cx.update_window_entity(&view, |view, _, _| {
+        // Filtered view is [0, 2]; display row 2 maps to record 2.
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(2, 0)));
+    });
+}
+
+/// An out-of-range row number is clamped to the last visible row.
+#[gpui::test]
+async fn goto_clamps_out_of_range_input(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject_doc(cx, &view, large_document(5));
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_goto(cx);
+        view.goto_input = "999".into();
+        view.commit_goto(cx);
+    });
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(!view.goto_open);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(4, 0)));
+    });
+}
+
+/// Non-numeric input shows an inline error and keeps the bar open
+/// instead of moving the selection.
+#[gpui::test]
+async fn goto_rejects_non_numeric_input(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.open_goto(cx);
+        view.goto_input = "nope".into();
+        view.commit_goto(cx);
+    });
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(view.goto_open);
+        assert_eq!(view.goto_error.as_deref(), Some("enter a row number"));
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+    });
+}
+
+/// Esc dismisses the go-to-row bar without changing the selection.
+#[gpui::test]
+async fn escape_closes_goto_bar(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    cx.update_window_entity(&view, |view, _, cx| view.open_goto(cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        assert!(!view.goto_open);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+    });
+}
+
+/// Cmd/Ctrl+A inside the filter field selects the field's text and does
+/// not reach the grid's select-all binding.
+#[gpui::test]
+async fn cmd_a_in_filter_field_selects_text_not_grid(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.selection.set(CellPos::new(1, 1));
+        view.open_filter(cx);
+        view.filter_input = "country == US".into();
+    });
+    cx.run_until_parked();
+
+    let chord = if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    };
+    cx.simulate_keystrokes(chord);
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        assert_eq!(view.filter_input.selected_text(), "country == US");
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(1, 1)));
+    });
+}

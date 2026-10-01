@@ -6084,3 +6084,111 @@ derivation and the headless-only Linux release build.
 
 Iteration 2: select-all (Cmd/Ctrl+A), go-to-row (Cmd/Ctrl+G) and open
 file (Cmd/Ctrl+O) in `ui/commands.rs` plus UI tests.
+
+---
+
+## 2026-09-30 — Iteration 2: keyboard basics (select-all, go-to-row, open)
+
+### Context
+
+Second slice of the improvement run (branch
+`agent/iterative-improvements`). The roadmap had Cmd/Ctrl+G unchecked
+and select-all living in Future Ideas; Cmd/Ctrl+O was missing entirely.
+This iteration wires all three through the existing pure binding table
+and adds unit + headless UI tests.
+
+### Implemented
+
+- `ui/commands.rs`: three new actions — `SelectAll`, `OpenGoToRow`,
+  `OpenFile` — with Cmd/Ctrl+A, Cmd/Ctrl+G and Cmd/Ctrl+O bindings
+  (all gated on `secondary()`, no alt/function). Unit tests for each
+  chord plus the plain- and alt-key negatives.
+- `selection.rs`: `Selection::select_all(record_count, column_count)`
+  anchors at `(0, 0)` with the cursor at the last row / last column,
+  and clears instead of leaving a dangling cursor on an empty document.
+  Added `copy_view_text_with(view_rows, cell_at)` and
+  `view_cell_count(view_rows)`, which emit/sum only the rows present in
+  the visible display order. Four new unit tests.
+- `ui/view.rs`: `select_all` uses the document dimensions; copy now
+  routes through the view-aware helpers, so under an active filter or
+  sort a select-all copies exactly the visible rows, in display order,
+  and the "copied N cells" count matches. This closes a pre-existing
+  gap where copying with a filter active wrote hidden records.
+- `ui/view/goto.rs` (new): the go-to-row bar, modelled on the search
+  bar. It reuses `TextEdit`, the shared `input::editable_text_area`,
+  the deferred-focus pattern and mouse click/drag caret handling.
+  Enter parses a 1-based display row, clamps to
+  `[1, displayed_row_count]`, maps through `view_rows` to a record
+  index, keeps the current column, scrolls the row to the top and
+  closes the bar. Esc closes without changing the selection; invalid
+  input shows an inline error. `render_goto_bar` is wired into
+  `Render::render` below the other bars.
+- `Action::OpenFile` runs the exact `MainView::pick_file` path as the
+  toolbar **Open…** button.
+
+### Verified
+
+- `cargo fmt --check` — clean.
+- `cargo build --release` — succeeds.
+- `cargo test --release` — **434 passed, 6 ignored** (194 library,
+  160 binary, 79 `tests/core.rs` of which 5 ignored, 1 style guard).
+- `cargo clippy --release --all-targets` — clean apart from the
+  pre-existing future-incompatibility notice for `block` /
+  `proc-macro-error2`.
+- New headless `TestAppContext` tests exercise the real focus path:
+  Cmd/Ctrl+A selects all; select-all + copy under a filter emits only
+  the two `US` rows; Cmd/Ctrl+G opens the bar, typing `10` + Enter
+  moves to record 9; a filtered go-to maps display row 2 to record 2;
+  an out-of-range number clamps; non-numeric input shows an error and
+  keeps the bar open; Esc closes it; and Cmd/Ctrl+A inside the filter
+  field selects the field's text without touching the grid selection.
+- Manual GUI exercise was not performed (the GUI cannot be driven
+  interactively from this environment). The behaviour is covered by
+  the headless UI suite.
+
+### Tests added / changed
+
+- `ui/commands.rs`: `select_all_chord`, `plain_a_is_not_select_all`,
+  `alt_a_is_not_select_all`, `go_to_row_chord`,
+  `plain_g_is_not_go_to_row`, `open_file_chord`,
+  `plain_o_is_not_open_file`.
+- `selection.rs`: `select_all_covers_the_whole_document`,
+  `select_all_on_empty_document_clears`,
+  `copy_view_text_skips_hidden_rows`,
+  `copy_view_text_preserves_display_order`.
+- `ui/view/tests.rs`: `cmd_a_selects_all_when_grid_focused`,
+  `select_all_copy_respects_active_filter`,
+  `cmd_g_opens_goto_bar_and_enter_jumps`,
+  `goto_maps_through_active_filter`,
+  `goto_clamps_out_of_range_input`, `goto_rejects_non_numeric_input`,
+  `escape_closes_goto_bar`, `cmd_a_in_filter_field_selects_text_not_grid`.
+
+### Roadmap changes
+
+- Milestone 2 keyboard navigation: Cmd/Ctrl+G ticked; added and ticked
+  Cmd/Ctrl+A and Cmd/Ctrl+O.
+- Milestone 1 known gaps: removed "No keyboard shortcut to open files".
+- Future Ideas: removed the select-all bullet (now implemented).
+
+### Architecture changes
+
+`ARCHITECTURE.md` module tree, keyboard-binding list and shared-input
+description updated for `ui/view/goto.rs` and the three new actions.
+No state-ownership or concurrency change: the go-to-row bar holds
+global (not per-tab) transient state, like `filter_open`.
+
+### Issues / technical debt discovered
+
+- `Selection` is a rectangle in raw record-index space. The grid and
+  the copy path now walk the visible display order, but a *dragged*
+  range under an active sort still spans a record-index interval that
+  may not be contiguous on screen. Fixing that needs a display-space
+  selection model and is out of scope here.
+- The delegated implementation worker hit its model-turn limit on the
+  first CI slice (produced no files); work has continued locally with
+  each slice verified by the test suite.
+
+### Next recommended task
+
+Iteration 3: performance baseline (measure only) written to
+`docs/benchmarks.md` and referenced from `ARCHITECTURE.md`.

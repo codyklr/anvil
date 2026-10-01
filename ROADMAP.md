@@ -106,7 +106,6 @@ and react appropriately when the archive has multiple data files.
 ### Known gaps carried forward into Milestone 2
 
 - No progress UI during long extractions.
-- No keyboard shortcut to open files.
 - ZIP extraction always writes the full entry to a temp file; no
   streaming.
 - Window cannot be closed gracefully from inside the app other than
@@ -151,7 +150,20 @@ this may freeze the UI.
   advances in row-major order, wrapping across rows and around the
   document ends; with a filter active the walk covers visible rows
   only.
-- [ ] Cmd/Ctrl+G — go-to-row input box.
+- [x] Cmd/Ctrl+G — go-to-row input box. `ui/view/goto.rs` adds a
+  one-line bar over the shared `TextEdit`. Enter resolves a 1-based
+  display row, clamps it to `[1, visible rows]`, maps it through the
+  filtered/sorted view to a record index, moves the cursor there
+  (keeping the current column) and scrolls it to the top; Esc closes
+  the bar. Reuses the same deferred-focus and mouse caret patterns as
+  the search and filter bars.
+- [x] Cmd/Ctrl+A — select the whole view. `Selection::select_all`
+  anchors at `(0, 0)` and puts the cursor at the last row / last
+  column. Under an active filter or sort the copy path walks the
+  visible display order, so hidden records are neither highlighted nor
+  copied. The command does not reach the filter / search / Ask inputs,
+  which handle Cmd/Ctrl+A themselves.
+- [x] Cmd/Ctrl+O — open a file through the toolbar **Open…** path.
 - [x] Esc — clear selection / close overlays.
 - [x] Cmd/Ctrl+C — copy selection to clipboard.
 
@@ -870,11 +882,6 @@ whether to elevate one.
   JSON when headers exist. Persist the preference (ties into the
   config-file work in Milestone 5). The copy-confirmation flash and
   status message should stay format-agnostic.
-- **Select-all (Cmd/Ctrl+A)** — select the whole dataset (all records
-  × all columns). Cheap with the current rectangular model: anchor
-  `(0,0)`, cursor `(record_count-1, column_count-1)`. Land this before
-  non-contiguous selection. Consider row/column selection from the
-  gutter and header clicks too.
 - **Non-contiguous multi-select** — Cmd/Ctrl-click to add separate
   cells or blocks (and Cmd/Ctrl+drag to add a rectangle) to a single
   selection. Today `Selection` is one anchor→cursor rectangle, so this

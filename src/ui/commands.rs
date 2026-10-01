@@ -59,6 +59,15 @@ pub(super) enum Action {
     ToggleInspector,
     /// Show or hide the diagnostics panel (Cmd/Ctrl+D).
     ToggleDiagnostics,
+    /// Select the whole view: anchor at the first cell, cursor at the
+    /// last (Cmd/Ctrl+A). With an active filter or sort the grid and
+    /// copy honour the visible display order.
+    SelectAll,
+    /// Open the go-to-row input bar (Cmd/Ctrl+G).
+    OpenGoToRow,
+    /// Open a file via the same path as the toolbar **Open…** button
+    /// (Cmd/Ctrl+O).
+    OpenFile,
 }
 
 /// Translate a keystroke into an [`Action`], or `None` when the chord is
@@ -94,6 +103,18 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
 
     if key == "d" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
         return Some(Action::ToggleDiagnostics);
+    }
+
+    if key == "a" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::SelectAll);
+    }
+
+    if key == "g" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::OpenGoToRow);
+    }
+
+    if key == "o" && modifiers.secondary() && !modifiers.alt && !modifiers.function {
+        return Some(Action::OpenFile);
     }
 
     // Cmd/Ctrl+Home / Cmd/Ctrl+End jump to the first / last row while
@@ -425,5 +446,55 @@ mod tests {
     #[test]
     fn alt_d_is_not_toggle_diagnostics() {
         assert_eq!(act("alt-d"), None);
+    }
+
+    #[test]
+    fn select_all_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        };
+        assert_eq!(act(chord), Some(Action::SelectAll));
+    }
+
+    #[test]
+    fn plain_a_is_not_select_all() {
+        assert_eq!(act("a"), None);
+    }
+
+    #[test]
+    fn alt_a_is_not_select_all() {
+        assert_eq!(act("alt-a"), None);
+    }
+
+    #[test]
+    fn go_to_row_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-g"
+        } else {
+            "ctrl-g"
+        };
+        assert_eq!(act(chord), Some(Action::OpenGoToRow));
+    }
+
+    #[test]
+    fn plain_g_is_not_go_to_row() {
+        assert_eq!(act("g"), None);
+    }
+
+    #[test]
+    fn open_file_chord() {
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-o"
+        } else {
+            "ctrl-o"
+        };
+        assert_eq!(act(chord), Some(Action::OpenFile));
+    }
+
+    #[test]
+    fn plain_o_is_not_open_file() {
+        assert_eq!(act("o"), None);
     }
 }
