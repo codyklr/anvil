@@ -1,15 +1,20 @@
-//! Left-hand file-manager panel rendering.
+//! Open-document sidebar with archive grouping and explicit close controls.
 //!
-//! Extracted verbatim from `view.rs` (behaviour-neutral split).
+//! The panel is only useful if it says something the tab strip does not, so
+//! each row carries the document's shape (rows x columns, source size) as
+//! secondary text. With a single document that turns an otherwise empty
+//! column into the fastest read on what is actually loaded.
 
 use super::*;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable};
 
 impl MainView {
-    /// Left-hand file-manager panel. Lists every open document, with
-    /// ZIP entries nested under their archive. Click a row to switch
-    /// to it; click × to close it. Toggled with Cmd/Ctrl+B or the
-    /// toolbar button; hidden by default when no documents are open.
+    /// Lists every open document; ZIP entries remain grouped by archive
+    /// identity. Selection and close controls share the same lifecycle as
+    /// the tab strip.
     pub(super) fn render_file_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::palette(cx);
         let groups = group_documents(&self.documents);
         let mut rows: Vec<AnyElement> = Vec::with_capacity(self.documents.len() + groups.len());
         for (archive, entries) in &groups {
@@ -17,123 +22,186 @@ impl MainView {
                 rows.push(
                     div()
                         .flex()
-                        .flex_row()
                         .items_center()
-                        .gap_1()
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .text_xs()
-                        .text_color(theme::TEXT_DIM)
-                        .child("▾")
-                        .child(div().truncate().child(archive.archive_name().to_string()))
+                        .gap_2()
+                        .px(px(10.))
+                        .pt(px(12.))
+                        .pb(px(4.))
+                        .child(
+                            Icon::new(IconName::FolderOpen)
+                                .small()
+                                .text_color(colors.faint_foreground),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .text_color(colors.muted_foreground)
+                                .child(archive.archive_name().to_string()),
+                        )
                         .into_any_element(),
                 );
             }
-            for (index, label, loaded) in entries {
-                let is_active = Some(*index) == self.active;
-                let indented = archive.is_some();
-                let select_index = *index;
-                let close_index = *index;
-                let label_color = if is_active {
-                    theme::TEXT_STRONG
+            for (index, _, _loaded) in entries {
+                let snap = &self.documents[*index];
+                let id = snap.id;
+                let active = Some(*index) == self.active;
+                let background = if active {
+                    colors.chrome_active
                 } else {
-                    theme::TEXT
+                    colors.panel
                 };
-                let dot_color = if *loaded { theme::ACCENT } else { theme::WARN };
-                let mut row = div()
-                    .id(("file-row", *index))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .pr_2()
-                    .py_1()
-                    .cursor_pointer()
-                    .when(is_active, |s| s.bg(theme::BG_SELECTED))
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.switch_to(select_index, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(dot_color)
-                            .child("●"),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .text_color(label_color)
-                            .child(label.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(("file-row-close", *index))
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(theme::TEXT_DIM)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme::TEXT_STRONG))
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(move |view, _, _, cx| {
-                                    view.close_active_at(close_index, cx);
-                                }),
-                            )
-                            .child("×"),
-                    );
-                row = if indented {
-                    row.pl(px(f32::from(theme::FILE_PANEL_ENTRY_INDENT)))
+                let foreground = if active {
+                    colors.strong_foreground
                 } else {
-                    row.pl_2()
+                    colors.foreground
                 };
-                rows.push(row.into_any_element());
+                let style = ButtonCustomVariant::new(cx)
+                    .color(background)
+                    .foreground(foreground)
+                    .hover(if active {
+                        colors.chrome_active
+                    } else {
+                        colors.hover
+                    })
+                    .active(colors.chrome_active);
+                let label = snap.navigation_label();
+                let tooltip = snap.navigation_tooltip();
+                // A loaded document reports its shape; a pending one says so
+                // instead of showing a dash where a number should be.
+                let detail = match &snap.doc {
+                    Some(doc) => format!(
+                        "{} x {} · {}",
+                        format_count(doc.record_count()),
+                        format_count(doc.column_count() as u64),
+                        archive_picker::format_size(doc.opened.len())
+                    ),
+                    None if snap.loading => "Opening...".to_string(),
+                    None => "Opens on selection".to_string(),
+                };
+
+                rows.push(
+                    div()
+                        .id(("file-row-surface", id))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded(cx.theme().radius_tokens().sm)
+                        .bg(background)
+                        .pr(px(2.))
+                        .when(archive.is_some(), |row| row.ml(px(10.)))
+                        .child(
+                            Button::new(("file-row", id))
+                                .small()
+                                .custom(style)
+                                .toggled(active)
+                                .flex_1()
+                                .min_w_0()
+                                .justify_start()
+                                .accessibility_label(tooltip.clone())
+                                .tooltip(tooltip)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_2()
+                                        .child(snap.navigation_icon(colors))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .flex_col()
+                                                .items_start()
+                                                .gap(px(1.))
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .w_full()
+                                                        .truncate()
+                                                        .font_weight(if active {
+                                                            gpui_kit::FontWeight::MEDIUM
+                                                        } else {
+                                                            gpui_kit::FontWeight::NORMAL
+                                                        })
+                                                        .child(label.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .w_full()
+                                                        .truncate()
+                                                        .text_color(colors.faint_foreground)
+                                                        .child(detail.clone()),
+                                                ),
+                                        ),
+                                )
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.select_navigation_document(id, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(("file-row-close", id))
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Close)
+                                .accessibility_label(format!("Close {label}"))
+                                .tooltip(format!("Close {label}"))
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    cx.stop_propagation();
+                                    view.close_navigation_document(id, cx);
+                                })),
+                        )
+                        .into_any_element(),
+                );
             }
         }
 
         div()
             .flex()
             .flex_col()
-            .w(theme::FILE_PANEL_WIDTH)
+            .w_full()
             .h_full()
+            .min_h_0()
             .flex_shrink_0()
-            .bg(theme::BG_PANEL)
+            .bg(colors.panel)
             .border_r_1()
-            .border_color(theme::BORDER)
+            .border_color(colors.border)
             .child(
                 div()
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .justify_between()
-                    .h(px(f32::from(theme::TAB_BAR_HEIGHT)))
-                    .px_2()
+                    .gap_2()
+                    .h(px(30.))
+                    .pl(px(10.))
+                    .pr(px(6.))
                     .border_b_1()
-                    .border_color(theme::BORDER)
+                    .border_color(colors.border)
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_xs()
-                            .text_color(theme::TEXT_DIM)
-                            .child(format!("{} open", self.documents.len())),
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(colors.muted_foreground)
+                            .child("OPEN DOCUMENTS"),
                     )
                     .child(
-                        div()
-                            .id("file-panel-close")
-                            .text_xs()
-                            .text_color(theme::TEXT_DIM)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme::TEXT_STRONG))
-                            .on_mouse_down(
-                                gpui::MouseButton::Left,
-                                cx.listener(|view, _, _, cx| {
-                                    view.file_panel_open = false;
-                                    cx.notify();
-                                }),
-                            )
-                            .child("×"),
+                        Button::new("file-panel-close")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::PanelLeftClose)
+                            .accessibility_label("Hide files")
+                            .tooltip("Hide files · Ctrl/Cmd+B")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.file_panel_open = false;
+                                cx.notify();
+                            })),
                     ),
             )
             .child(
@@ -142,8 +210,9 @@ impl MainView {
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .child(div().flex().flex_col().gap(px(1.)).p(px(6.)).children(rows)),
             )
     }
 }

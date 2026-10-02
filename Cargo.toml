@@ -20,7 +20,7 @@ path = "src/bin/gen_fixture.rs"
 
 [dependencies]
 # UI (used by the `anvil` binary)
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+gpui-kit = "=0.7.0"
 rfd = { version = "0.17", default-features = false }
 
 # Data access
@@ -52,34 +52,15 @@ gliner-tokenizers = { package = "tokenizers", version = "0.22", optional = true,
 # libraries), so select it explicitly on Linux while leaving macOS/Windows
 # resolution untouched. The generic `rfd` entry in [dependencies] above
 # still applies everywhere else.
-#
-# GPUI's Linux window backends are feature-gated. Without `x11` or
-# `wayland`, `gpui::current_platform` always resolves to the headless
-# client on Linux, so the release binary cannot open a window even when a
-# display is available. The dev-only `test-support` feature already pulls
-# both in for `cargo test`; mirror them for the release binary. The CI
-# Linux packages already cover this feature set. macOS/Windows are
-# unaffected because this table is Linux-only.
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "x11", "wayland"] }
 
-# GPUI's Windows application manifest is feature-gated too. Without
-# `windows-manifest`, gpui's build script does not embed
-# `resources/windows/gpui.manifest.xml`, so the release binary is not
-# bound to common-controls v6 and fails to start with
-# `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139). `windows-manifest` is part
-# of gpui's default feature set; select it explicitly for Windows, leaving
-# macOS and Linux resolution untouched.
-[target.'cfg(target_os = "windows")'.dependencies]
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "windows-manifest"] }
 
 [dev-dependencies]
 crc32fast = "1"
-# Enable GPUI's headless test harness only for tests. `test-support`
-# pulls in the deterministic executor and `TestAppContext`; it is a
-# dev-only feature so release builds keep the minimal gpui surface.
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "test-support"] }
+# Enable the matching headless UI test harness only for tests.
+gpui-kit = { version = "=0.7.0", features = ["test-support"] }
 
 [profile.dev]
 opt-level = 1

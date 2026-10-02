@@ -6,6 +6,11 @@
 //! visible range, moves the cursor to that display position and scrolls
 //! it to the top. Esc closes the bar without changing the selection.
 
+use gpui_kit::component::{
+    button::{Button, ButtonVariants},
+    Disableable, IconName, Sizable,
+};
+
 use super::*;
 
 impl MainView {
@@ -235,48 +240,40 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let colors = theme::palette(cx);
         if !self.goto_open {
             return None;
         }
-        let text = self.goto_input.text().to_string();
-        let selection = self.goto_input.selection();
         let (status_text, status_color) = match &self.goto_error {
-            Some(error) => (error.clone(), theme::WARN),
+            Some(error) => (error.clone(), colors.danger),
             None => (
-                format!("of {}", self.displayed_row_count()),
-                theme::TEXT_DIM,
+                format!("{} rows", format_count(self.displayed_row_count())),
+                colors.muted_foreground,
             ),
         };
 
         Some(
-            div()
-                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .bg(theme::BG_PANEL)
-                .border_b_1()
-                .border_color(theme::BORDER_STRONG)
+            input::query_bar(colors)
+                .min_w_0()
                 .key_context("GoToRow")
-                .track_focus(&self.goto_focus_handle)
-                .on_key_down(cx.listener(Self::on_goto_key_down))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Go to row:"),
-                )
-                .child(
+                .track_focus(&self.goto_focus_handle.clone().tab_stop(true))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if this.goto_focus_handle.is_focused(window) || event.keystroke.key == "escape"
+                    {
+                        this.on_goto_key_down(event, window, cx);
+                    }
+                }))
+                .child(input::query_label("Row", cx))
+                .child(input::query_field(
                     input::editable_text_area(
                         window,
-                        &text,
-                        selection,
-                        self.goto_input.caret(),
-                        "row number…",
-                        "anvil-goto-input",
+                        cx,
+                        input::InputPresentation {
+                            edit: &self.goto_input,
+                            focus: &self.goto_focus_handle,
+                            placeholder: "row number",
+                            debug_id: "anvil-goto-input",
+                        },
                         {
                             let entity = cx.entity();
                             move |bounds, app_cx| {
@@ -286,31 +283,40 @@ impl MainView {
                             }
                         },
                     )
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(Self::goto_mouse_down))
+                    .on_mouse_down(
+                        gpui_kit::MouseButton::Left,
+                        cx.listener(Self::goto_mouse_down),
+                    )
                     .on_mouse_move(cx.listener(Self::goto_mouse_move))
                     .on_mouse_up(
-                        gpui::MouseButton::Left,
+                        gpui_kit::MouseButton::Left,
                         cx.listener(|this, _ev: &MouseUpEvent, _window, cx| this.goto_mouse_up(cx)),
                     ),
+                    &self.goto_focus_handle,
+                    self.goto_error.is_some(),
+                    window,
+                    cx,
+                ))
+                .child(input::query_feedback(status_text, status_color))
+                .child(input::query_rule(colors))
+                .child(
+                    Button::new("goto-commit")
+                        .small()
+                        .primary()
+                        .icon(IconName::ArrowRight)
+                        .label("Go")
+                        .disabled(self.goto_input.is_empty() || self.displayed_row_count() == 0)
+                        .on_click(cx.listener(|this, _, _, cx| this.commit_goto(cx))),
                 )
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(status_text),
-                )
-                .child(
-                    div()
-                        .id("goto-close")
+                    Button::new("goto-close")
+                        .small()
+                        .ghost()
                         .debug_selector(|| "goto-close".to_string())
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .px_1()
-                        .text_color(theme::TEXT_DIM)
-                        .hover(|s| s.text_color(theme::WARN))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_goto(cx)))
-                        .child("×"),
+                        .icon(IconName::Close)
+                        .accessibility_label("Close Go to row")
+                        .tooltip("Close Go to row · Esc")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_goto(cx))),
                 )
                 .into_any_element(),
         )

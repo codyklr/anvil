@@ -7,20 +7,31 @@ use super::search::search_column_label;
 use super::*;
 use std::sync::Mutex;
 
-use gpui::{Entity, TestAppContext, VisualTestContext};
+use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 
-#[gpui::test]
+fn init_theme(cx: &mut gpui_kit::App) {
+    if !cx.has_global::<gpui_kit::component::Theme>() {
+        gpui_kit::init(cx);
+        theme::init(cx);
+    }
+}
+
+#[gpui_kit::test]
 async fn windows_space_inserts_in_ask_filter_and_search(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, window, cx| {
-        let mut event = gpui::KeyDownEvent {
-            keystroke: gpui::Keystroke {
-                modifiers: gpui::Modifiers::default(),
+        let mut event = gpui_kit::KeyDownEvent {
+            keystroke: gpui_kit::Keystroke {
+                modifiers: gpui_kit::Modifiers::default(),
                 key: "space".into(),
                 key_char: None,
             },
             is_held: false,
+            prefer_character_input: false,
         };
         view.ask_open = true;
         view.filter_open = true;
@@ -200,9 +211,12 @@ fn inject_doc(
 /// introduced the grid was never focusable, so neither arrow
 /// navigation nor Cmd/Ctrl+C worked. This test fails if the grid
 /// loses `track_focus` or focus is no longer transferred to it.
-#[gpui::test]
+#[gpui_kit::test]
 async fn arrow_keys_move_selection_when_grid_focused(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.simulate_keystrokes("down");
@@ -219,9 +233,12 @@ async fn arrow_keys_move_selection_when_grid_focused(cx: &mut TestAppContext) {
 /// Cmd/Ctrl+Home / Cmd/Ctrl+End jump to the first / last row while
 /// keeping the current column. Fails if the chord is bound to the
 /// plain column jump instead.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_home_and_end_jump_to_row_extremes(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, large_document(50));
 
     // Put the cursor at (1, 1).
@@ -252,9 +269,12 @@ async fn cmd_home_and_end_jump_to_row_extremes(cx: &mut TestAppContext) {
 /// Tab / Shift-Tab move one cell in row-major order and wrap across
 /// row boundaries. Fails if the grid stops receiving Tab events
 /// (e.g. focus traversal swallows them) or the wrap is off by one.
-#[gpui::test]
+#[gpui_kit::test]
 async fn tab_and_shift_tab_move_adjacent_cells(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     // sample.csv has 3 columns and 3 data rows.
@@ -277,9 +297,12 @@ async fn tab_and_shift_tab_move_adjacent_cells(cx: &mut TestAppContext) {
 /// shortcut only reaches `on_grid_key_down` while the grid is
 /// focused; this asserts the handler runs, reports a count, and
 /// writes the expected TSV to the clipboard sink.
-#[gpui::test]
+#[gpui_kit::test]
 async fn copy_shortcut_reaches_handler_when_grid_focused(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let written = inject(cx, &view);
 
     let copy_keystroke = if cfg!(target_os = "macos") {
@@ -314,7 +337,7 @@ fn cell_center(
     view: &Entity<MainView>,
     row: u64,
     col: usize,
-) -> gpui::Point<gpui::Pixels> {
+) -> gpui_kit::Point<gpui_kit::Pixels> {
     let bounds = cx
         .debug_bounds("anvil-grid-list")
         .expect("grid list bounds");
@@ -324,27 +347,30 @@ fn cell_center(
     });
     let x = bounds.origin.x + theme::ROW_NUMBER_WIDTH + px(col_offset) + px(col_width) / 2.0;
     let y = bounds.origin.y + px((row as f32 + 0.5) * f32::from(theme::ROW_HEIGHT));
-    gpui::point(x, y)
+    gpui_kit::point(x, y)
 }
 
 /// Drag-select: press on one cell, drag across to another, release.
 /// The selection should become the rectangle between them, and the
 /// copy should then emit the whole block as TSV.
-#[gpui::test]
+#[gpui_kit::test]
 async fn drag_select_builds_rectangle(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let written = inject(cx, &view);
 
     let start = cell_center(cx, &view, 0, 0);
     let end = cell_center(cx, &view, 1, 1);
-    let modifiers = gpui::Modifiers::default();
+    let modifiers = gpui_kit::Modifiers::default();
 
-    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(start, gpui_kit::MouseButton::Left, modifiers);
     // Two moves to the same cell: the first updates the hover hit
     // test, the second is delivered to the now-hovered cell.
-    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(end, gpui_kit::MouseButton::Left, modifiers);
 
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(
@@ -379,9 +405,12 @@ async fn drag_select_builds_rectangle(cx: &mut TestAppContext) {
 /// `shuffled_document` ascending on `a` is records [2, 0, 1], i.e. the
 /// visible rows (10, z), (20, x), (30, y). Dragging display rows 0..1
 /// must copy the first two visible rows only.
-#[gpui::test]
+#[gpui_kit::test]
 async fn drag_select_under_sort_copies_the_visible_block(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let written = inject_doc(cx, &view, shuffled_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.cycle_sort(0, cx));
@@ -396,11 +425,11 @@ async fn drag_select_under_sort_copies_the_visible_block(cx: &mut TestAppContext
 
     let start = cell_center(cx, &view, 0, 0);
     let end = cell_center(cx, &view, 1, 1);
-    let modifiers = gpui::Modifiers::default();
-    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    let modifiers = gpui_kit::Modifiers::default();
+    cx.simulate_mouse_down(start, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(end, gpui_kit::MouseButton::Left, modifiers);
 
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(
@@ -427,9 +456,12 @@ async fn drag_select_under_sort_copies_the_visible_block(cx: &mut TestAppContext
 
 /// Arrow keys move by display position under an active sort, and clamp
 /// at the last visible row rather than walking off the view.
-#[gpui::test]
+#[gpui_kit::test]
 async fn arrow_keys_walk_the_sorted_view(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, shuffled_document());
     cx.update_window_entity(&view, |view, _, cx| view.cycle_sort(0, cx));
     cx.run_until_parked();
@@ -454,9 +486,12 @@ async fn arrow_keys_walk_the_sorted_view(cx: &mut TestAppContext) {
 
 /// Tab walks the visible cells under an active sort: from the last column
 /// of display row 0 it wraps to column 0 of display row 1.
-#[gpui::test]
+#[gpui_kit::test]
 async fn tab_walks_the_sorted_view(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, shuffled_document());
     cx.update_window_entity(&view, |view, _, cx| view.cycle_sort(0, cx));
     cx.run_until_parked();
@@ -472,9 +507,12 @@ async fn tab_walks_the_sorted_view(cx: &mut TestAppContext) {
 
 /// A filter that shrinks the visible set clamps a selection that now
 /// points past the end instead of leaving it dangling.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_change_clamps_selection(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, _| {
         view.selection.set(CellPos::new(2, 0));
@@ -495,8 +533,8 @@ async fn filter_change_clamps_selection(cx: &mut TestAppContext) {
 #[test]
 fn auto_scroll_direction_detects_edges() {
     let bounds = Bounds {
-        origin: gpui::point(px(0.), px(100.)),
-        size: gpui::size(px(400.), px(200.)),
+        origin: gpui_kit::point(px(0.), px(100.)),
+        size: gpui_kit::size(px(400.), px(200.)),
     };
     assert_eq!(
         auto_scroll_direction(px(50.), bounds),
@@ -516,21 +554,24 @@ fn auto_scroll_direction_detects_edges() {
 /// selection past the initially visible rows without any further
 /// pointer movement (the tick loop keeps it going); this asserts the
 /// immediate step driven by the mouse-move listener.
-#[gpui::test]
+#[gpui_kit::test]
 async fn drag_past_bottom_edge_starts_auto_scroll(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, large_document(1000));
 
     let start = cell_center(cx, &view, 0, 0);
     let bounds = cx
         .debug_bounds("anvil-grid-list")
         .expect("grid list bounds");
-    let below = gpui::point(start.x, bounds.origin.y + bounds.size.height + px(40.0));
-    let modifiers = gpui::Modifiers::default();
+    let below = gpui_kit::point(start.x, bounds.origin.y + bounds.size.height + px(40.0));
+    let modifiers = gpui_kit::Modifiers::default();
 
-    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(below, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(below, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(start, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(below, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(below, gpui_kit::MouseButton::Left, modifiers);
 
     cx.update_window_entity(&view, |view, _, _| {
         assert!(view.drag_selecting, "drag should still be active");
@@ -553,7 +594,7 @@ async fn drag_past_bottom_edge_starts_auto_scroll(cx: &mut TestAppContext) {
         );
     });
 
-    cx.simulate_mouse_up(below, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(below, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         assert!(!view.drag_selecting);
         assert!(
@@ -567,9 +608,12 @@ async fn drag_past_bottom_edge_starts_auto_scroll(cx: &mut TestAppContext) {
 /// keystroke reaches `on_grid_key_down` while the grid is focused
 /// and the binding maps to `Action::OpenSearch`. After the
 /// keystroke the bar must be open and the query empty.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_f_opens_search_bar_when_grid_focused(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, _| {
@@ -592,9 +636,12 @@ async fn cmd_f_opens_search_bar_when_grid_focused(cx: &mut TestAppContext) {
 /// Typing characters into the open search bar appends to the query
 /// (instead of moving the grid cursor). The bar's key handler must
 /// swallow printable keystrokes; the grid receives nothing.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_bar_input_appends_and_skips_grid_navigation(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
@@ -616,9 +663,12 @@ async fn search_bar_input_appends_and_skips_grid_navigation(cx: &mut TestAppCont
 
 /// Backspace inside the search bar pops one character at a time
 /// without falling back to grid navigation.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_bar_backspace_drops_last_character(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
@@ -637,9 +687,12 @@ async fn search_bar_backspace_drops_last_character(cx: &mut TestAppContext) {
 /// grid ready to take keyboard focus again. We assert the bar is
 /// closed and `focus_grid_on_next_frame` is set so the next render
 /// will refocus the grid.
-#[gpui::test]
+#[gpui_kit::test]
 async fn escape_closes_search_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
@@ -661,9 +714,12 @@ async fn escape_closes_search_bar(cx: &mut TestAppContext) {
 }
 
 /// Esc closes the filter bar while it holds focus.
-#[gpui::test]
+#[gpui_kit::test]
 async fn escape_closes_filter_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -680,15 +736,20 @@ async fn escape_closes_filter_bar(cx: &mut TestAppContext) {
 /// Esc must also close the filter bar through the grid's `Action::Escape`
 /// path. That arm previously handled only the search bar, so once focus
 /// was back on the grid the filter was impossible to dismiss.
-#[gpui::test]
+#[gpui_kit::test]
 async fn escape_action_closes_filter_bar_when_grid_focused(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
     cx.run_until_parked();
     // Move focus back to the grid, as a click on a cell would.
-    cx.update_window_entity(&view, |view, window, _| window.focus(&view.focus_handle));
+    cx.update_window_entity(&view, |view, window, cx| {
+        window.focus(&view.focus_handle, cx)
+    });
     cx.run_until_parked();
 
     cx.simulate_keystrokes("escape");
@@ -702,9 +763,12 @@ async fn escape_action_closes_filter_bar_when_grid_focused(cx: &mut TestAppConte
 }
 
 /// The visible × dismisses the filter bar (in addition to Esc).
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_close_button_dismisses_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
     cx.run_until_parked();
@@ -713,9 +777,9 @@ async fn filter_close_button_dismisses_bar(cx: &mut TestAppContext) {
         .debug_bounds("filter-close")
         .expect("filter close button");
     let center = bounds.center();
-    let modifiers = gpui::Modifiers::none();
-    cx.simulate_mouse_down(center, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(center, gpui::MouseButton::Left, modifiers);
+    let modifiers = gpui_kit::Modifiers::none();
+    cx.simulate_mouse_down(center, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(center, gpui_kit::MouseButton::Left, modifiers);
     cx.run_until_parked();
 
     cx.update_window_entity(&view, |view, _, _| {
@@ -724,9 +788,12 @@ async fn filter_close_button_dismisses_bar(cx: &mut TestAppContext) {
 }
 
 /// The visible × dismisses the search bar.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_close_button_dismisses_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
     cx.run_until_parked();
@@ -735,9 +802,9 @@ async fn search_close_button_dismisses_bar(cx: &mut TestAppContext) {
         .debug_bounds("search-close")
         .expect("search close button");
     let center = bounds.center();
-    let modifiers = gpui::Modifiers::none();
-    cx.simulate_mouse_down(center, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(center, gpui::MouseButton::Left, modifiers);
+    let modifiers = gpui_kit::Modifiers::none();
+    cx.simulate_mouse_down(center, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(center, gpui_kit::MouseButton::Left, modifiers);
     cx.run_until_parked();
 
     cx.update_window_entity(&view, |view, _, _| {
@@ -747,9 +814,12 @@ async fn search_close_button_dismisses_bar(cx: &mut TestAppContext) {
 
 /// Typing in the filter bar opens the autocomplete popup with the
 /// matching column.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_suggestions_open_on_typing(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
     cx.run_until_parked();
@@ -767,9 +837,12 @@ async fn filter_suggestions_open_on_typing(cx: &mut TestAppContext) {
 
 /// Up/Down move the popup selection and Enter fills the highlighted
 /// suggestion (plus a separator) and closes the popup.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_suggestions_arrow_and_enter_accept(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -807,7 +880,7 @@ async fn filter_suggestions_arrow_and_enter_accept(cx: &mut TestAppContext) {
 
 /// Accepting a column whose name contains a space inserts it quoted, so
 /// it stays one token and the value suggestions for that column populate.
-#[gpui::test]
+#[gpui_kit::test]
 async fn accepting_a_multi_word_column_suggestion_quotes_it(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cities.csv");
@@ -815,7 +888,10 @@ async fn accepting_a_multi_word_column_suggestion_quotes_it(cx: &mut TestAppCont
     let opened = anvil_core::source::local::open_local(&path).expect("open");
     let doc = anvil_core::index_opened(opened);
 
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, doc);
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -851,7 +927,7 @@ async fn accepting_a_multi_word_column_suggestion_quotes_it(cx: &mut TestAppCont
 
 /// Moving the selection past the popup's visible area must scroll the
 /// popup so the highlighted row stays in view (regression: it did not).
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_suggestions_scroll_to_keep_selection_visible(cx: &mut TestAppContext) {
     // A column with many distinct values so the value slot overflows the
     // popup's 200px max height.
@@ -865,7 +941,10 @@ async fn filter_suggestions_scroll_to_keep_selection_visible(cx: &mut TestAppCon
     let opened = anvil_core::source::local::open_local(&path).expect("open");
     let doc = anvil_core::index_opened(opened);
 
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, doc);
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -898,9 +977,12 @@ async fn filter_suggestions_scroll_to_keep_selection_visible(cx: &mut TestAppCon
 }
 
 /// Esc closes the autocomplete popup first; a second Esc closes the bar.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_suggestions_escape_closes_popup_then_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -925,9 +1007,12 @@ async fn filter_suggestions_escape_closes_popup_then_bar(cx: &mut TestAppContext
 }
 
 /// Clicking a popup row fills the input like accepting it with Enter.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_suggestion_mouse_click_fills_the_input(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -940,9 +1025,9 @@ async fn filter_suggestion_mouse_click_fills_the_input(cx: &mut TestAppContext) 
         .debug_bounds("filter-suggestion-3")
         .expect("suggestion row 3");
     let center = bounds.center();
-    let modifiers = gpui::Modifiers::none();
-    cx.simulate_mouse_down(center, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(center, gpui::MouseButton::Left, modifiers);
+    let modifiers = gpui_kit::Modifiers::none();
+    cx.simulate_mouse_down(center, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(center, gpui_kit::MouseButton::Left, modifiers);
     cx.run_until_parked();
 
     cx.update_window_entity(&view, |view, _, _| {
@@ -952,9 +1037,12 @@ async fn filter_suggestion_mouse_click_fills_the_input(cx: &mut TestAppContext) 
 }
 
 /// Switching the active document drops the cached value samples.
-#[gpui::test]
+#[gpui_kit::test]
 async fn switching_document_clears_the_value_cache(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, _| {
         view.filter_value_cache.insert(0, vec!["US".to_string()]);
@@ -966,9 +1054,12 @@ async fn switching_document_clears_the_value_cache(cx: &mut TestAppContext) {
 /// A search that has finished must populate `search_matches` and
 /// set `search_active` to the first match. We assert on the
 /// search state directly rather than the renderer.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_populates_match_list(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
@@ -990,9 +1081,12 @@ async fn search_populates_match_list(cx: &mut TestAppContext) {
 
 /// Searching a fixture whose records contain the needle should
 /// return the matching record indexes in order.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_finds_real_matches_in_fixture(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     // Build a fixture where the string `needle` appears in two
     // records. `a,b\nneedle,1\nx,needle\nother,foo\n` -> rows 0 and
     // 1 match when searching for "needle".
@@ -1019,9 +1113,12 @@ async fn search_finds_real_matches_in_fixture(cx: &mut TestAppContext) {
 /// The `Aa` toggle switches the active search between
 /// case-insensitive and byte-exact, and re-runs the open search so
 /// the match list follows the option.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_case_sensitive_toggle_changes_matches(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("case.csv");
     std::fs::write(&path, b"name,tag\nAlice,x\nalice,y\nALICE,z\n").expect("write");
@@ -1049,9 +1146,12 @@ async fn search_case_sensitive_toggle_changes_matches(cx: &mut TestAppContext) {
 
 /// A column scope restricts the search to one column, and the
 /// active-match jump lands the cursor in that column.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_column_scope_limits_matches(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("scope.csv");
     std::fs::write(&path, b"a,b\nUS,x\nUK,US\n").expect("write");
@@ -1076,30 +1176,33 @@ async fn search_column_scope_limits_matches(cx: &mut TestAppContext) {
 /// Clicking a column header toggles the search column scope; a
 /// second click on the same header clears it. Exercises the real
 /// `grid::render_header` click wiring via the test debug selector.
-#[gpui::test]
+#[gpui_kit::test]
 async fn alt_header_click_toggles_search_column(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     let bounds = cx.debug_bounds("header-cell-1").expect("header cell 1");
-    let center = gpui::point(
+    let center = gpui_kit::point(
         bounds.origin.x + bounds.size.width / 2.0,
         bounds.origin.y + bounds.size.height / 2.0,
     );
     // Alt/Option-click sets the search scope; a plain click sorts.
-    let modifiers = gpui::Modifiers {
+    let modifiers = gpui_kit::Modifiers {
         alt: true,
         ..Default::default()
     };
 
-    cx.simulate_mouse_down(center, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(center, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(center, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(center, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(view.search_column, Some(1));
     });
 
-    cx.simulate_mouse_down(center, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(center, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(center, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(center, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(view.search_column, None);
     });
@@ -1108,21 +1211,24 @@ async fn alt_header_click_toggles_search_column(cx: &mut TestAppContext) {
 /// A plain header click cycles the sort none -> ascending -> descending
 /// -> none. The sample document's column `a` is 1, 4, 7 (numeric), so
 /// the sorted permutations are easy to assert.
-#[gpui::test]
+#[gpui_kit::test]
 async fn header_click_cycles_sort(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     let bounds = cx.debug_bounds("header-cell-0").expect("header cell 0");
-    let center = gpui::point(
+    let center = gpui_kit::point(
         bounds.origin.x + bounds.size.width / 2.0,
         bounds.origin.y + bounds.size.height / 2.0,
     );
-    let modifiers = gpui::Modifiers::default();
+    let modifiers = gpui_kit::Modifiers::default();
 
     let click = |cx: &mut VisualTestContext| {
-        cx.simulate_mouse_down(center, gpui::MouseButton::Left, modifiers);
-        cx.simulate_mouse_up(center, gpui::MouseButton::Left, modifiers);
+        cx.simulate_mouse_down(center, gpui_kit::MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(center, gpui_kit::MouseButton::Left, modifiers);
         cx.run_until_parked();
     };
 
@@ -1163,9 +1269,12 @@ async fn header_click_cycles_sort(cx: &mut TestAppContext) {
 /// `country_document` rows are (US,10), (UK,20), (US,30). Filtering to
 /// the US rows leaves records 0 and 2; sorting those by `amount`
 /// descending gives 2 then 0.
-#[gpui::test]
+#[gpui_kit::test]
 async fn sort_composes_with_filter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -1199,9 +1308,12 @@ async fn sort_composes_with_filter(cx: &mut TestAppContext) {
 
 /// `search_options()` is the single source of truth shared by the
 /// background search and the grid highlight pass.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_options_reflect_toggles(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(view.search_options(), anvil_core::SearchOptions::default());
@@ -1230,9 +1342,12 @@ fn search_column_label_resolves_headers_and_fallback() {
 /// Enter inside the search bar advances to the next match;
 /// Shift+Enter goes to the previous. The test uses a multi-match
 /// fixture so both directions are observable.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_enter_cycles_through_matches(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cycle.csv");
     std::fs::write(&path, b"a,b\nhit,1\nhit,2\nhit,3\nskip,4\nhit,5\n").expect("write");
@@ -1276,9 +1391,12 @@ async fn search_enter_cycles_through_matches(cx: &mut TestAppContext) {
 /// F3 / Shift-F3 cycle through matches without consuming characters
 /// in the search bar. The bar must remain open and the query
 /// unchanged after the keystrokes; only `search_active` advances.
-#[gpui::test]
+#[gpui_kit::test]
 async fn f3_advances_match_without_opening_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("f3.csv");
     std::fs::write(&path, b"a,b\nhit,1\nhit,2\nhit,3\n").expect("write");
@@ -1323,9 +1441,12 @@ async fn f3_advances_match_without_opening_bar(cx: &mut TestAppContext) {
 
 /// The search field supports caret movement and Shift selection,
 /// matching the filter field's behaviour.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_keyboard_caret_and_selection(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_search(cx);
@@ -1349,9 +1470,12 @@ async fn search_keyboard_caret_and_selection(cx: &mut TestAppContext) {
 
 /// Clicking and dragging in the search field place and extend the
 /// caret, exactly like the filter field.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_mouse_click_and_drag(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_search(cx);
@@ -1364,20 +1488,20 @@ async fn search_mouse_click_and_drag(cx: &mut TestAppContext) {
         .debug_bounds("anvil-search-input")
         .expect("search input bounds");
     let y = bounds.origin.y + bounds.size.height / 2.0;
-    let left = gpui::point(bounds.origin.x + px(1.0), y);
-    let right = gpui::point(bounds.origin.x + bounds.size.width - px(1.0), y);
-    let mid = gpui::point(bounds.origin.x + bounds.size.width / 2.0, y);
-    let modifiers = gpui::Modifiers::default();
+    let left = gpui_kit::point(bounds.origin.x + px(1.0), y);
+    let right = gpui_kit::point(bounds.origin.x + bounds.size.width - px(1.0), y);
+    let mid = gpui_kit::point(bounds.origin.x + bounds.size.width / 2.0, y);
+    let modifiers = gpui_kit::Modifiers::default();
 
-    cx.simulate_mouse_down(right, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(right, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(right, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(right, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(view.search_query.caret(), len);
     });
 
-    cx.simulate_mouse_down(left, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(mid, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(mid, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(left, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(mid, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(mid, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         let selection = view.search_query.selection();
         assert_eq!(selection.start, 0);
@@ -1390,9 +1514,12 @@ async fn search_mouse_click_and_drag(cx: &mut TestAppContext) {
 
 /// Typing at a mid-string caret inserts there and re-runs the live
 /// search with the new query.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_insert_at_caret_re_runs_search(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("insert.csv");
     std::fs::write(&path, b"a,b\nneedle,1\nx,needle\nother,foo\n").expect("write");
@@ -1425,9 +1552,12 @@ async fn search_insert_at_caret_re_runs_search(cx: &mut TestAppContext) {
 /// the grid horizontally so the matched cell is on screen. Uses the
 /// real (panel-aware) viewport rather than forcing one, so it also
 /// guards the file-panel inset.
-#[gpui::test]
+#[gpui_kit::test]
 async fn search_jump_scrolls_horizontally_to_match(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     // 300 columns is far wider than any test window.
     inject_doc(cx, &view, wide_document(300, 299));
 
@@ -1466,9 +1596,12 @@ async fn search_jump_scrolls_horizontally_to_match(cx: &mut TestAppContext) {
 /// from the previous frame's measured `grid_bounds`, so closing a panel
 /// left the table at the old width until a later frame re-measured - a
 /// visible gap. A single `notify` + render now settles it.
-#[gpui::test]
+#[gpui_kit::test]
 async fn viewport_width_reflows_synchronously_with_panels(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     let window_w = cx.update_window_entity(&view, |_, window, _| {
@@ -1505,7 +1638,8 @@ async fn viewport_width_reflows_synchronously_with_panels(cx: &mut TestAppContex
         );
     });
 
-    // Diagnostics adds its own width.
+    // Diagnostics replaces the inspector on the single auxiliary surface,
+    // even when both flags remain open.
     cx.update_window_entity(&view, |view, _, cx| {
         view.diagnostics_open = true;
         cx.notify();
@@ -1517,7 +1651,6 @@ async fn viewport_width_reflows_synchronously_with_panels(cx: &mut TestAppContex
             window_w
                 - gutter
                 - f32::from(theme::FILE_PANEL_WIDTH)
-                - f32::from(theme::INSPECTOR_WIDTH)
                 - f32::from(theme::DIAGNOSTICS_WIDTH),
         );
     });
@@ -1537,9 +1670,12 @@ async fn viewport_width_reflows_synchronously_with_panels(cx: &mut TestAppContex
 
 /// Scrolling by display position must map through the filtered/sorted
 /// view, not raw record indexes.
-#[gpui::test]
+#[gpui_kit::test]
 async fn display_position_maps_through_view_rows(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, _| {
@@ -1558,9 +1694,12 @@ async fn display_position_maps_through_view_rows(cx: &mut TestAppContext) {
 /// A new document open must clear the previous search state.
 /// Without this the next-document's grid would still show stale
 /// match highlighting.
-#[gpui::test]
+#[gpui_kit::test]
 async fn opening_new_document_clears_search_state(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
@@ -1587,9 +1726,12 @@ async fn opening_new_document_clears_search_state(cx: &mut TestAppContext) {
 /// Pushing two documents into the tab list (the way a
 /// multi-file drop or two sequential opens would) keeps both
 /// snapshots and switches the live fields to the most recent.
-#[gpui::test]
+#[gpui_kit::test]
 async fn push_two_documents_switches_to_last(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     // Add a second document directly via the public helpers used
@@ -1611,9 +1753,12 @@ async fn push_two_documents_switches_to_last(cx: &mut TestAppContext) {
 
 /// Switching tabs snapshots the active doc's selection /
 /// scroll_x and restores them when the user comes back.
-#[gpui::test]
+#[gpui_kit::test]
 async fn switching_tabs_restores_per_document_state(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     // Set selection on the active tab (the sample fixture has 3
@@ -1664,9 +1809,12 @@ async fn switching_tabs_restores_per_document_state(cx: &mut TestAppContext) {
 
 /// Closing the active tab via `close_active_at` shifts
 /// `active` to a neighbour.
-#[gpui::test]
+#[gpui_kit::test]
 async fn closing_active_tab_picks_neighbour(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     // Add three tabs total.
@@ -1699,9 +1847,12 @@ async fn closing_active_tab_picks_neighbour(cx: &mut TestAppContext) {
 
 /// Closing a non-active tab earlier than the active one shifts
 /// the active index down by one.
-#[gpui::test]
+#[gpui_kit::test]
 async fn closing_earlier_non_active_tab_shifts_active(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     // Add two more tabs; active ends up at index 2.
@@ -1733,9 +1884,12 @@ async fn closing_earlier_non_active_tab_shifts_active(cx: &mut TestAppContext) {
 
 /// Closing the last remaining tab empties the document list and
 /// `active` becomes `None`.
-#[gpui::test]
+#[gpui_kit::test]
 async fn closing_last_tab_leaves_empty_state(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -1752,9 +1906,12 @@ async fn closing_last_tab_leaves_empty_state(cx: &mut TestAppContext) {
 /// drives the real `apply(OpenOutcome::Ready)` path twice - the
 /// same code that runs after `begin_open`'s background task - so
 /// the tab-push / switch logic is exercised end-to-end.
-#[gpui::test]
+#[gpui_kit::test]
 async fn two_sequential_applies_create_two_tabs(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
 
     for name in ["one.csv", "two.csv"] {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1779,9 +1936,12 @@ async fn two_sequential_applies_create_two_tabs(cx: &mut TestAppContext) {
 }
 
 /// A single open arrives as one tab with the loaded document live.
-#[gpui::test]
+#[gpui_kit::test]
 async fn apply_ready_creates_one_tab(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("only.csv");
     std::fs::write(&path, b"a,b\n1,2\n3,4\n").expect("write");
@@ -1806,9 +1966,12 @@ async fn apply_ready_creates_one_tab(cx: &mut TestAppContext) {
 /// After an error with no tabs open, the centre panel shows the
 /// error page. With a tab already open, an error on a background
 /// task must NOT clobber the visible document.
-#[gpui::test]
+#[gpui_kit::test]
 async fn error_with_open_tab_keeps_the_tab(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ok.csv");
     std::fs::write(&path, b"a,b\n1,2\n").expect("write");
@@ -1840,9 +2003,12 @@ async fn error_with_open_tab_keeps_the_tab(cx: &mut TestAppContext) {
 /// Every usable archive entry becomes a tab synchronously, before
 /// any extraction runs. Only the first tab's document is loaded
 /// on demand.
-#[gpui::test]
+#[gpui_kit::test]
 async fn archive_entries_become_tabs_immediately(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv", "c.csv"]);
     assert_eq!(archive.total_candidates(), 3);
 
@@ -1885,9 +2051,12 @@ async fn archive_entries_become_tabs_immediately(cx: &mut TestAppContext) {
 /// `apply(NeedArchiveChoice)` is the path a multi-entry ZIP drop
 /// takes. Every usable entry becomes a tab and no modal picker is
 /// shown any more.
-#[gpui::test]
+#[gpui_kit::test]
 async fn apply_need_archive_choice_installs_all_tabs(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let (_dir, archive) = make_zip_archive(&["one.csv", "two.csv", "three.csv"]);
     cx.update_window_entity(&view, move |view, _, cx| {
         view.apply(OpenOutcome::NeedArchiveChoice(archive), cx);
@@ -1907,9 +2076,12 @@ async fn apply_need_archive_choice_installs_all_tabs(cx: &mut TestAppContext) {
 /// When the loader already produced a document for one entry (the
 /// auto-opened favourite), that entry's tab is ready and the
 /// active tab points at it; the others stay pending.
-#[gpui::test]
+#[gpui_kit::test]
 async fn install_archive_tabs_marks_loaded_entry_as_ready(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv"]);
     let loaded = anvil_core::load_entry(&archive, "b.csv").expect("load entry");
     let loaded_doc = Arc::new(loaded.document);
@@ -1942,9 +2114,12 @@ async fn install_archive_tabs_marks_loaded_entry_as_ready(cx: &mut TestAppContex
 /// Cmd/Ctrl+B toggles the file-manager panel. The binding routes
 /// through `on_grid_key_down` like every other grid shortcut, so
 /// this also re-verifies the keyboard path.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_b_toggles_file_panel(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, _| {
         assert!(view.file_panel_open, "panel open by default");
@@ -1967,9 +2142,12 @@ async fn cmd_b_toggles_file_panel(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+I toggles the column-inspector panel and scans the selected
 /// column when it opens.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_i_toggles_inspector(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, _| {
         assert!(!view.inspector_open, "inspector closed by default");
@@ -1996,9 +2174,12 @@ async fn cmd_i_toggles_inspector(cx: &mut TestAppContext) {
 
 /// The inspector follows the selected column: moving right rescans the
 /// new column.
-#[gpui::test]
+#[gpui_kit::test]
 async fn inspector_follows_selected_column(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.inspector_open = true;
@@ -2026,9 +2207,12 @@ async fn inspector_follows_selected_column(cx: &mut TestAppContext) {
 
 /// The inspector body data distinguishes exact distinct counts and
 /// ranks frequent values.
-#[gpui::test]
+#[gpui_kit::test]
 async fn inspector_reports_exact_distinct_and_frequencies(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.inspector_open = true;
@@ -2046,9 +2230,12 @@ async fn inspector_reports_exact_distinct_and_frequencies(cx: &mut TestAppContex
 }
 
 /// Cmd/Ctrl+D toggles the diagnostics panel.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_d_toggles_diagnostics(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, _| {
         assert!(!view.diagnostics_open, "diagnostics closed by default");
@@ -2071,9 +2258,12 @@ async fn cmd_d_toggles_diagnostics(cx: &mut TestAppContext) {
 
 /// Clicking a row warning moves the cursor to that record; the panel is
 /// a pure render over the document's existing `ParseMeta.warnings`.
-#[gpui::test]
+#[gpui_kit::test]
 async fn diagnostics_navigation_moves_selection_to_warning_row(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, warning_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.diagnostics_open = true;
@@ -2091,9 +2281,12 @@ async fn diagnostics_navigation_moves_selection_to_warning_row(cx: &mut TestAppC
 
 /// A warning whose record is hidden by the active filter must not move
 /// the cursor to an unrelated row; the status bar explains why.
-#[gpui::test]
+#[gpui_kit::test]
 async fn diagnostics_navigation_refuses_a_filtered_out_row(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, warning_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.selection.set(CellPos::new(0, 0));
@@ -2106,9 +2299,12 @@ async fn diagnostics_navigation_refuses_a_filtered_out_row(cx: &mut TestAppConte
 }
 
 /// A header-level warning has no row to jump to and reports that.
-#[gpui::test]
+#[gpui_kit::test]
 async fn diagnostics_navigation_reports_header_warning(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("empty_header.csv");
@@ -2127,9 +2323,12 @@ async fn diagnostics_navigation_reports_header_warning(cx: &mut TestAppContext) 
 
 /// Opening the diagnostics panel kicks a background UTF-8 scan; the
 /// report then names the offending column.
-#[gpui::test]
+#[gpui_kit::test]
 async fn diagnostics_scan_reports_invalid_utf8(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("encoding.csv");
@@ -2155,9 +2354,12 @@ async fn diagnostics_scan_reports_invalid_utf8(cx: &mut TestAppContext) {
 }
 
 /// Changing the active document drops the cached encoding report.
-#[gpui::test]
+#[gpui_kit::test]
 async fn switching_document_invalidates_encoding_report(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("encoding.csv");
@@ -2182,9 +2384,12 @@ async fn switching_document_invalidates_encoding_report(cx: &mut TestAppContext)
 
 /// An ambiguous all-text file is a header under Auto; forcing headerless
 /// re-indexes it so every row is data and columns get `colN` labels.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cycle_header_mode_reindexes_active_document(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ambiguous.csv");
@@ -2217,9 +2422,12 @@ async fn cycle_header_mode_reindexes_active_document(cx: &mut TestAppContext) {
 
 /// Forcing a header when the row count shrinks drops an out-of-range
 /// selection rather than leaving the cursor on a non-existent row.
-#[gpui::test]
+#[gpui_kit::test]
 async fn header_toggle_clamps_selection(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ambiguous.csv");
@@ -2249,9 +2457,12 @@ async fn header_toggle_clamps_selection(cx: &mut TestAppContext) {
 }
 
 /// The forced mode is per tab and survives switching away and back.
-#[gpui::test]
+#[gpui_kit::test]
 async fn header_mode_persists_per_tab(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ambiguous.csv");
@@ -2321,9 +2532,12 @@ fn group_documents_groups_by_archive_identity() {
 /// closing still move `active` correctly, so a test that drives the
 /// underlying methods is enough to pin the behaviour the panel
 /// depends on.
-#[gpui::test]
+#[gpui_kit::test]
 async fn file_panel_navigation_uses_tab_lifecycle(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let (_dir, archive) = make_zip_archive(&["a.csv", "b.csv"]);
     let ar = archive.clone();
     cx.update_window_entity(&view, move |view, _, cx| {
@@ -2375,9 +2589,12 @@ fn country_document() -> anvil_core::ParsedDocument {
 }
 
 /// Cmd/Ctrl+L opens the filter bar through the grid keyboard path.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_l_opens_filter_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, _| {
         assert!(!view.filter_open);
@@ -2394,9 +2611,12 @@ async fn cmd_l_opens_filter_bar(cx: &mut TestAppContext) {
 }
 
 /// Cmd/Ctrl+Shift+L opens the Ask bar (not the plain filter bar).
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_shift_l_opens_ask_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     let chord = if cfg!(target_os = "macos") {
         "cmd-shift-l"
@@ -2412,9 +2632,12 @@ async fn cmd_shift_l_opens_ask_bar(cx: &mut TestAppContext) {
 }
 
 /// Cmd/Ctrl+Shift+L while the filter bar is focused switches to Ask.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_shift_l_switches_from_filter_to_ask(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
     cx.run_until_parked();
@@ -2433,9 +2656,12 @@ async fn cmd_shift_l_switches_from_filter_to_ask(cx: &mut TestAppContext) {
 
 /// A clean phrase previews and, on Enter, is written into the filter bar
 /// and applied through the normal path.
-#[gpui::test]
+#[gpui_kit::test]
 async fn ask_accepts_a_phrase_into_the_filter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_ask(cx);
@@ -2443,10 +2669,10 @@ async fn ask_accepts_a_phrase_into_the_filter(cx: &mut TestAppContext) {
         view.refresh_ask();
     });
     cx.run_until_parked();
-    cx.update_window_entity(&view, |view, _, _| {
+    cx.update_window_entity(&view, |view, _, cx| {
         let result = view.ask_result.as_ref().expect("ask result");
         assert!(result.clean, "{result:?}");
-        assert_eq!(view.ask_status_text().0, "country == US AND amount > 25");
+        assert_eq!(view.ask_status_text(cx).0, "country == US AND amount > 25");
     });
 
     cx.simulate_keystrokes("enter");
@@ -2462,9 +2688,12 @@ async fn ask_accepts_a_phrase_into_the_filter(cx: &mut TestAppContext) {
 
 /// An unparseable phrase previews the failure and Enter does not apply
 /// anything.
-#[gpui::test]
+#[gpui_kit::test]
 async fn ask_does_not_apply_an_unparseable_phrase(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_ask(cx);
@@ -2483,9 +2712,12 @@ async fn ask_does_not_apply_an_unparseable_phrase(cx: &mut TestAppContext) {
 /// When the rules cannot resolve a phrase, Ctrl/Cmd+Enter escalates to the
 /// injected Tier 2 interpreter and the validated result becomes the
 /// preview.
-#[gpui::test]
+#[gpui_kit::test]
 async fn ask_escalates_to_tier2_when_rules_are_unclean(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.ask_interpreter = Some(std::sync::Arc::new(|_phrase, _schema, _values| {
@@ -2524,9 +2756,12 @@ async fn ask_escalates_to_tier2_when_rules_are_unclean(cx: &mut TestAppContext) 
 }
 
 /// Esc closes the Ask bar without touching the filter.
-#[gpui::test]
+#[gpui_kit::test]
 async fn escape_closes_ask_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_ask(cx));
     cx.run_until_parked();
@@ -2539,9 +2774,12 @@ async fn escape_closes_ask_bar(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+L while the search bar is focused switches to the filter
 /// bar in one step (no need to close search first).
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_l_switches_from_search_bar_to_filter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
     cx.run_until_parked();
@@ -2559,9 +2797,12 @@ async fn cmd_l_switches_from_search_bar_to_filter(cx: &mut TestAppContext) {
 }
 
 /// Cmd/Ctrl+F while the filter bar is focused switches to search.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_f_switches_from_filter_bar_to_search(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
     cx.run_until_parked();
@@ -2580,13 +2821,18 @@ async fn cmd_f_switches_from_filter_bar_to_search(cx: &mut TestAppContext) {
 
 /// The switch also works through the grid's action path: search open with
 /// focus returned to the grid, Cmd/Ctrl+L switches to the filter bar.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_l_from_grid_switches_open_search_to_filter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
     cx.update_window_entity(&view, |view, _, cx| view.open_search(cx));
     cx.run_until_parked();
-    cx.update_window_entity(&view, |view, window, _| window.focus(&view.focus_handle));
+    cx.update_window_entity(&view, |view, window, cx| {
+        window.focus(&view.focus_handle, cx)
+    });
     cx.run_until_parked();
     let chord = if cfg!(target_os = "macos") {
         "cmd-l"
@@ -2603,9 +2849,12 @@ async fn cmd_l_from_grid_switches_open_search_to_filter(cx: &mut TestAppContext)
 
 /// Keyboard editing in the filter field: End / Home move the caret
 /// and Shift+Home extends the selection from the caret.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_keyboard_caret_and_selection(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -2632,9 +2881,12 @@ async fn filter_keyboard_caret_and_selection(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+A selects the whole field and typing replaces it;
 /// Backspace removes the selection.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_select_all_typing_and_backspace(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -2668,9 +2920,12 @@ async fn filter_select_all_typing_and_backspace(cx: &mut TestAppContext) {
 
 /// Mouse interaction: clicking positions the caret and a click-drag
 /// selects the spanned range.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_mouse_click_and_drag(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_filter(cx);
@@ -2683,22 +2938,22 @@ async fn filter_mouse_click_and_drag(cx: &mut TestAppContext) {
         .debug_bounds("anvil-filter-input")
         .expect("filter input bounds");
     let y = bounds.origin.y + bounds.size.height / 2.0;
-    let left = gpui::point(bounds.origin.x + px(1.0), y);
-    let right = gpui::point(bounds.origin.x + bounds.size.width - px(1.0), y);
-    let mid = gpui::point(bounds.origin.x + bounds.size.width / 2.0, y);
-    let modifiers = gpui::Modifiers::default();
+    let left = gpui_kit::point(bounds.origin.x + px(1.0), y);
+    let right = gpui_kit::point(bounds.origin.x + bounds.size.width - px(1.0), y);
+    let mid = gpui_kit::point(bounds.origin.x + bounds.size.width / 2.0, y);
+    let modifiers = gpui_kit::Modifiers::default();
 
     // Click near the right edge: caret goes to the end of the text.
-    cx.simulate_mouse_down(right, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(right, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(right, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(right, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         assert_eq!(view.filter_input.caret(), len);
     });
 
     // Drag from the start towards the middle selects a prefix.
-    cx.simulate_mouse_down(left, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(mid, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(mid, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(left, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(mid, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(mid, gpui_kit::MouseButton::Left, modifiers);
     cx.update_window_entity(&view, |view, _, _| {
         let selection = view.filter_input.selection();
         assert_eq!(selection.start, 0);
@@ -2712,9 +2967,12 @@ async fn filter_mouse_click_and_drag(cx: &mut TestAppContext) {
 /// Enter parses the input and, on success, populates `filter_rows`
 /// from the background evaluation. The fixture's `country == US`
 /// rows are 0 and 2.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_input_applies_on_enter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2734,9 +2992,12 @@ async fn filter_input_applies_on_enter(cx: &mut TestAppContext) {
 /// Compound predicates reach the data side through the filter bar.
 /// Fixture rows are (US,10), (UK,20), (US,30): `AND` keeps only row 2,
 /// `OR` keeps rows 1 and 2.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_input_applies_compound_expression_on_enter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2765,9 +3026,12 @@ async fn filter_input_applies_compound_expression_on_enter(cx: &mut TestAppConte
 
 /// A parse error is shown and leaves the previous predicate in
 /// place; no rows are installed.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_parse_error_is_shown(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2783,9 +3047,12 @@ async fn filter_parse_error_is_shown(cx: &mut TestAppContext) {
 }
 
 /// Clearing the filter restores the unfiltered document.
-#[gpui::test]
+#[gpui_kit::test]
 async fn clear_filter_restores_document(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2810,9 +3077,12 @@ async fn clear_filter_restores_document(cx: &mut TestAppContext) {
 /// skipping hidden ones. Rows are (US,10), (UK,20), (US,30) and the
 /// filter keeps 0 and 2, so the visible rows are display positions 0
 /// and 1.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_vertical_navigation_skips_hidden_rows(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2844,9 +3114,12 @@ async fn filter_vertical_navigation_skips_hidden_rows(cx: &mut TestAppContext) {
 /// With a filter active, Tab / Shift-Tab and Cmd/Ctrl+End operate
 /// on the *visible* rows. Rows are (US,10), (UK,20), (US,30); the
 /// filter keeps records 0 and 2, so the visible grid is 2x2.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_tab_and_row_jumps_walk_visible_rows(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2886,9 +3159,12 @@ async fn filter_tab_and_row_jumps_walk_visible_rows(cx: &mut TestAppContext) {
 
 /// The status label reports the filtered count and the original
 /// total when a filter is active.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_status_label_reports_counts(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| view.open_filter(cx));
@@ -2897,15 +3173,21 @@ async fn filter_status_label_reports_counts(cx: &mut TestAppContext) {
         view.apply_filter_input(cx);
     });
     cx.run_until_parked();
-    cx.update_window_entity(&view, |view, _, _| {
-        let (text, _) = view.filter_status_text();
-        assert!(text.contains("2 rows"), "got {text:?}");
+    cx.update_window_entity(&view, |view, _, cx| {
+        let (text, _) = view.filter_status_text(cx);
+        assert!(
+            text.contains("2 of 3 rows"),
+            "status should report filtered and total rows, got {text:?}"
+        );
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 async fn ask_does_not_accept_partial_preview(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_ask(cx);
@@ -2926,9 +3208,12 @@ async fn ask_does_not_accept_partial_preview(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 async fn ask_edit_invalidates_inflight_model_result(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.ask_interpreter = Some(Arc::new(|_, _, _| {
@@ -2949,15 +3234,18 @@ async fn ask_edit_invalidates_inflight_model_result(cx: &mut TestAppContext) {
         assert!(!view.ask_loading);
     });
     cx.run_until_parked();
-    cx.update_window_entity(&view, |view, _, _| {
+    cx.update_window_entity(&view, |view, _, cx| {
         assert!(!view.ask_result.as_ref().unwrap().from_model);
-        assert!(!view.ask_status_text().0.contains("US"));
+        assert!(!view.ask_status_text(cx).0.contains("US"));
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 async fn ask_document_change_clears_pending_preview(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
     cx.update_window_entity(&view, |view, _, cx| {
         view.open_ask(cx);
@@ -2972,9 +3260,12 @@ async fn ask_document_change_clears_pending_preview(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+A selects the whole document when the grid is focused:
 /// anchor at `(0, 0)`, cursor at the last row / last column.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_a_selects_all_when_grid_focused(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     let chord = if cfg!(target_os = "macos") {
@@ -2993,9 +3284,12 @@ async fn cmd_a_selects_all_when_grid_focused(cx: &mut TestAppContext) {
 
 /// With a filter active, select-all copies only the visible rows, in
 /// display order. `country_document` filters to records 0 and 2.
-#[gpui::test]
+#[gpui_kit::test]
 async fn select_all_copy_respects_active_filter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let written = inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3024,9 +3318,12 @@ async fn select_all_copy_respects_active_filter(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+G opens the go-to-row bar; typing a 1-based row number and
 /// pressing Enter jumps to it and closes the bar.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_g_opens_goto_bar_and_enter_jumps(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, large_document(50));
 
     let chord = if cfg!(target_os = "macos") {
@@ -3056,9 +3353,12 @@ async fn cmd_g_opens_goto_bar_and_enter_jumps(cx: &mut TestAppContext) {
 
 /// A filtered/sorted view remaps the 1-based display row through the
 /// visible order: display row 2 is record 2, not record 1.
-#[gpui::test]
+#[gpui_kit::test]
 async fn goto_maps_through_active_filter(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3081,9 +3381,12 @@ async fn goto_maps_through_active_filter(cx: &mut TestAppContext) {
 }
 
 /// An out-of-range row number is clamped to the last visible row.
-#[gpui::test]
+#[gpui_kit::test]
 async fn goto_clamps_out_of_range_input(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, large_document(5));
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3099,9 +3402,12 @@ async fn goto_clamps_out_of_range_input(cx: &mut TestAppContext) {
 
 /// Non-numeric input shows an inline error and keeps the bar open
 /// instead of moving the selection.
-#[gpui::test]
+#[gpui_kit::test]
 async fn goto_rejects_non_numeric_input(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3117,9 +3423,12 @@ async fn goto_rejects_non_numeric_input(cx: &mut TestAppContext) {
 }
 
 /// Esc dismisses the go-to-row bar without changing the selection.
-#[gpui::test]
+#[gpui_kit::test]
 async fn escape_closes_goto_bar(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| view.open_goto(cx));
@@ -3134,9 +3443,12 @@ async fn escape_closes_goto_bar(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+A inside the filter field selects the field's text and does
 /// not reach the grid's select-all binding.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cmd_a_in_filter_field_selects_text_not_grid(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3163,9 +3475,12 @@ async fn cmd_a_in_filter_field_selects_text_not_grid(cx: &mut TestAppContext) {
 /// The loading indicator reflects the shared progress tracker: a
 /// determinate bar with byte counts while a load is in flight, and
 /// nothing once the load finishes.
-#[gpui::test]
+#[gpui_kit::test]
 async fn loading_progress_indicator_appears_and_clears(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3180,22 +3495,25 @@ async fn loading_progress_indicator_appears_and_clears(cx: &mut TestAppContext) 
         assert!(text.contains("indexing"), "label was {text:?}");
         assert!(text.contains("5.0 MiB"), "label was {text:?}");
         assert!(text.contains("10.0 MiB"), "label was {text:?}");
-        assert!(view.render_progress_bar().is_some());
+        assert!(view.render_progress_bar(cx).is_some());
     });
 
     cx.update_window_entity(&view, |view, _, cx| {
         view.clear_progress(cx);
         assert!(view.progress_text().is_none());
-        assert!(view.render_progress_bar().is_none());
+        assert!(view.render_progress_bar(cx).is_none());
     });
     cx.run_until_parked();
 }
 
 /// An unknown total shows the indeterminate form (a phase plus an
 /// ellipsis) rather than a misleading percentage.
-#[gpui::test]
+#[gpui_kit::test]
 async fn loading_progress_without_total_is_indeterminate(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3208,7 +3526,7 @@ async fn loading_progress_without_total_is_indeterminate(cx: &mut TestAppContext
         view.refresh_progress();
         assert_eq!(view.progress_text().as_deref(), Some("extracting…"));
         // The indeterminate bar still renders.
-        assert!(view.render_progress_bar().is_some());
+        assert!(view.render_progress_bar(cx).is_some());
         view.clear_progress(cx);
     });
 }
@@ -3216,9 +3534,12 @@ async fn loading_progress_without_total_is_indeterminate(cx: &mut TestAppContext
 /// Dragging a header boundary widens the column, keeps the live layout
 /// and the persisted per-tab widths in sync, and stores the width for
 /// the tab so it survives a switch.
-#[gpui::test]
+#[gpui_kit::test]
 async fn header_drag_resizes_column(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     let before = view.read_with(cx, |view, _| {
@@ -3227,19 +3548,19 @@ async fn header_drag_resizes_column(cx: &mut TestAppContext) {
     let handle = cx
         .debug_bounds("header-resize-0")
         .expect("column 0 resize handle should be rendered");
-    let start = gpui::point(
+    let start = gpui_kit::point(
         handle.origin.x + handle.size.width / 2.0,
         handle.origin.y + handle.size.height / 2.0,
     );
-    let end = gpui::point(start.x + px(40.), start.y);
-    let modifiers = gpui::Modifiers::default();
+    let end = gpui_kit::point(start.x + px(40.), start.y);
+    let modifiers = gpui_kit::Modifiers::default();
 
-    cx.simulate_mouse_down(start, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_down(start, gpui_kit::MouseButton::Left, modifiers);
     // Two moves: the first updates the hover hit test, the second is
     // delivered to the now-hovered handle.
-    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_move(end, gpui::MouseButton::Left, modifiers);
-    cx.simulate_mouse_up(end, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_move(end, gpui_kit::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(end, gpui_kit::MouseButton::Left, modifiers);
 
     cx.update_window_entity(&view, |view, _, _| {
         assert!(view.column_drag.is_none(), "mouse-up should end the drag");
@@ -3257,9 +3578,12 @@ async fn header_drag_resizes_column(cx: &mut TestAppContext) {
 
 /// A manually-resized width is stored per tab and restored when the tab
 /// becomes active again.
-#[gpui::test]
+#[gpui_kit::test]
 async fn resized_widths_restore_after_tab_switch(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     let resized = cx.update_window_entity(&view, |view, _, cx| {
@@ -3286,9 +3610,12 @@ async fn resized_widths_restore_after_tab_switch(cx: &mut TestAppContext) {
 
 /// Cmd/Ctrl+Enter opens the full-cell panel on the cursor cell, which
 /// shows the exact value.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cell_detail_shows_exact_value(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject(cx, &view);
 
     cx.update_window_entity(&view, |view, _, _| {
@@ -3314,7 +3641,7 @@ async fn cell_detail_shows_exact_value(cx: &mut TestAppContext) {
 
 /// A multi-MB cell is read on the background executor and capped, with
 /// the panel reporting that it is truncated.
-#[gpui::test]
+#[gpui_kit::test]
 async fn cell_detail_caps_a_huge_value(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("huge.csv");
@@ -3323,7 +3650,10 @@ async fn cell_detail_caps_a_huge_value(cx: &mut TestAppContext) {
     let opened = anvil_core::source::local::open_local(&path).expect("open");
     let doc = anvil_core::index_opened(opened);
 
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, doc);
     cx.update_window_entity(&view, |view, _, cx| {
         view.selection.set(CellPos::new(0, 1));
@@ -3343,9 +3673,12 @@ async fn cell_detail_caps_a_huge_value(cx: &mut TestAppContext) {
 
 /// With a filter active, the column inspector scans only the visible
 /// rows and reports that view's metrics.
-#[gpui::test]
+#[gpui_kit::test]
 async fn inspector_scopes_to_the_filtered_view(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| {
@@ -3378,9 +3711,12 @@ async fn inspector_scopes_to_the_filtered_view(cx: &mut TestAppContext) {
 /// The inspector's inferred type must also come from the scoped view,
 /// not the whole document: the `US` rows are numeric while the `UK` row
 /// is text, so the whole column is mixed but the filtered view is not.
-#[gpui::test]
+#[gpui_kit::test]
 async fn inspector_infers_type_from_the_filtered_view(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     let doc = {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("scoped_type.csv");
@@ -3417,9 +3753,12 @@ async fn inspector_infers_type_from_the_filtered_view(cx: &mut TestAppContext) {
 
 /// The filter bar accepts a `NOT` expression and applies it through the
 /// normal background filter path.
-#[gpui::test]
+#[gpui_kit::test]
 async fn filter_bar_applies_not(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
     inject_doc(cx, &view, country_document());
 
     cx.update_window_entity(&view, |view, _, cx| {

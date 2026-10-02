@@ -11,7 +11,9 @@ does today, not a future aspiration.
 ## Overview
 
 Anvil is a native desktop application written in Rust using
-[GPUI](https://gpui.rs). It is a single-binary, two-crate workspace:
+[GPUI Kit](https://crates.io/crates/gpui-kit), pinned to `=0.7.0`
+with the `gpui-pre` 0.3.7 runtime in the lockfile. The single Cargo
+package produces a data library, the application and a fixture generator:
 
 - **`anvil_core`** (`src/lib.rs`) — a GUI-free crate exposing the data
   source, parser, indexer, archive handler, and open orchestrator.
@@ -84,6 +86,7 @@ anvil/
 ├── docs/
 │   ├── agent-log.md            # chronological handoff log
 │   ├── benchmarks.md           # reference-machine performance baseline
+│   ├── ui-design.md            # Kit workspace conventions and acceptance
 │   ├── adr/                    # architectural decision records
 │   │   ├── 0001-natural-language-ask.md
 │   │   └── 0002-native-gliner-ask.md
@@ -125,6 +128,9 @@ anvil/
 │   │   ├── view.rs             # MainView: toolbar, tabs, grid, status,
 │   │   │                       # picker, drag/drop, open orchestration
 │   │   ├── view/
+│   │   │   ├── shell.rs        # native titlebar, toolbar/menu, welcome, startup
+│   │   │   ├── workspace.rs    # Kit resizable panes + shared viewport geometry
+│   │   │   ├── archive_dialog.rs # Kit archive dialog lifecycle
 │   │   │   ├── search.rs       # search bar: state, render, editing
 │   │   │   ├── filter.rs       # filter bar: apply, render, editing
 │   │   │   ├── goto.rs         # go-to-row bar: display-row jump
@@ -150,7 +156,7 @@ anvil/
     └── style.rs                # repo style guards (no em-dashes)
 ```
 
-### What is *current* vs *planned*
+### What is _current_ vs _planned_
 
 **Current (Milestones 1-4 plus the natural-language Ask work, in `src/`):**
 
@@ -169,7 +175,7 @@ anvil/
   cursor + anchor + `CellPos` coordinate type. Rows are display
   positions (the filtered/sorted view order), so a range always covers
   the rows the user can see. Selected cells are painted with
-  `theme::BG_SELECTED`; arrow / Page / Home / End /
+  `Palette::selection`; arrow / Page / Home / End /
   Cmd+Home / Cmd+End / Tab / Esc keys drive the cursor; click and
   shift-click on cells drive it too;
   `Selection::copy_text_with` / `copy_view_text_with` render TSV for
@@ -223,17 +229,17 @@ anvil/
   It reads the immutable `ParseMeta.warnings` (no background task)
   and lists each warning's kind, row, and note, jumping the grid to the
   offending record on click; header-level warnings (`record_index ==
-  None`) are listed but not navigable. It also runs `encoding::scan` on
+None`) are listed but not navigable. It also runs `encoding::scan` on
   the background executor when it opens (generation-guarded by
   `encoding_generation`, cached until the document changes) and shows a
   BOM notice plus one row per column with non-UTF-8 cells.
 - `ui::grid` — sticky-header + virtualized rows; visible-column window
   for horizontal virtualization. Per-cell `on_mouse_down` for
   selection. Cell text is decoded byte-faithfully and cached per
-  visible `(record, column)` in a bounded `GridModel` cache. Matched search rows are tinted `BG_MATCH`; the active
-  row uses `BG_MATCH_ACTIVE`; the literal matched substring inside
-  each cell is drawn with a brighter `BG_MATCH_TEXT` background so
-  the user can see *where* in the row the match is. Rows carrying a
+  visible `(record, column)` in a bounded `GridModel` cache. Matched search rows use `Palette::search_match`; the active
+  row uses `Palette::search_active`; the literal matched substring inside
+  each cell is drawn with a brighter `Palette::search_text` background so
+  the user can see _where_ in the row the match is. Rows carrying a
   parse warning get a kind-aware marker in the row-number gutter
   (`✖` red for an unterminated quote, `⚠` warn otherwise), looked up
   from the `GridModel`'s cached, sorted warning index.
@@ -243,8 +249,8 @@ anvil/
   `ToggleInspector`, `ToggleDiagnostics`, `SelectAll`, `OpenGoToRow`,
   `OpenFile`, `RevealCell`), with
   unit tests; no window or view state dependencies.
-- `ui::view` — toolbar, tab strip, drag/drop, archive picker
-  overlay, search bar overlay, status bar (with copy / error /
+- `ui::view` — document composition, drag/drop, Kit archive dialog
+  lifecycle, query bars, status bar (with copy / error /
   match-count slot), generation counter for cancellation,
   `MainView::run_action` which executes intents decoded by
   `ui::commands`, and `MainView::on_search_key_down` which handles
@@ -310,13 +316,74 @@ the source tree before assuming a capability is implemented.
 
 `src/ui/app.rs::run()`:
 
-1. `Application::new().run(...)` — creates the GPUI runtime.
-2. Opens a single 1200×800 window centred on the primary monitor with
-   the title "Anvil".
-3. Constructs a `MainView` (`src/ui/view.rs`) as the root view.
+1. `gpui_kit::application().with_assets(AllAssets).run(...)` creates
+   the runtime; `gpui_kit::init` and `ui::theme::init` register components
+   and the Anvil Slate/Warm appearances.
+2. `gpui_kit::open_window` installs the Kit window root for menus/dialogs
+   and opens a centred 1200 x 800 window, with a 900 x 480 minimum,
+   using native-aware `TitleBar::window_options` / `title_bar_options`.
+3. Constructs `MainView` (`src/ui/view.rs`) inside the Kit root and calls
+   `MainView::startup` to focus the workspace and open the first positional
+   non-option path, if supplied, via the normal asynchronous `begin_open`.
+   Headless probe modes remain dispatched by `src/main.rs`.
 
 There is exactly one window today. Closing it exits the application
 (this is GPUI default behaviour).
+
+### Shell, appearance and resizable workspace
+
+`view/shell.rs` renders the native-aware Kit TitleBar, Open/appearance/help
+controls, document toolbar/dropdown menu and welcome surface. Kit Buttons
+supply command focus, tooltips and selected/disabled/loading states. The
+keyboard-shortcuts help is a Kit dialog reachable from the window toolbar;
+Cmd/Ctrl+? and Ctrl/Cmd+Shift+/ open the same shortcuts dialog. `view/archive_dialog.rs` synchronizes the archive
+choice flags with a Kit dialog; modal focus and dismissal belong to Kit's
+window root, while entry selection retains the existing tab/load lifecycle.
+
+`ui/theme.rs` centralizes all raw color definitions and registers Anvil
+Slate (dark, startup default) and Anvil Warm (light). The titlebar toggle
+calls `Theme::change`; appearance is not persisted. Renderers consume the
+active Kit theme or allocation-free `Palette` snapshots, including semantic
+surfaces, borders, selection/copy/search tints and warning/danger. Grid
+helpers receive the snapshot rather than old global `BG_*` constants.
+Shell prose uses Kit's UI font; grid data uses its mono family with unchanged
+physical 22 px rows and 12 px text.
+
+Canonical presentation contracts live in `docs/design/ANVIL_DESIGN_SYSTEM.md`
+and `docs/design/HOME_WORKSPACE_SPEC.md`. The existing `ui/theme.rs` palette
+now uses copper primary/Button/focus tokens and cool search/selection colors.
+Data surfaces and shared inspector wells are opaque; modal scrims retain
+workspace context. Shared panel type/geometry tokens remain in `theme.rs`.
+
+The material language lives in `ui/texture.rs`. Title/command chrome uses
+GPU slash patterns at 0.025 input alpha; errors/loading retain GPU grain.
+These avoid CPU enumeration, not GPU fill cost. Home has a quiet opening
+lane and an isometric ordered-dither anvil, not a full-canvas texture.
+Eight convex faces form the broad striking block, narrow waist and stepped
+base; face-specific dot densities supply depth using the existing copper tint.
+`home_field` caches fixed 520x420 geometry in `OnceLock<Vec<(f32,f32)>>`:
+4x4 Bayer thresholds on a 6 px lattice, fewer than 4000 quads, centered
+at 68% width/50% height with downward-only scaling and cropping. Painting
+translates cached offsets without generating/allocating a dot list. No
+idle animation task is installed. Legacy radial stipple is test-only.
+Root and Home entrance external-path drag-over use GPUI style refinements,
+without new persistent hover state, scans or changes to opening semantics.
+Native external-drop acceptance and real GPU frame measurements remain open.
+
+`view/workspace.rs::Workspace` owns retained Files/per-tool widths,
+`ResizableState`, its observation subscription and constrained `Geometry`.
+Kit `h_resizable` / `resizable_panel` compose the optional Files sidebar,
+primary area, and a single auxiliary slot (Column, Diagnostics or Cell).
+Open handlers make tools exclusive; workspace selection also chooses just
+one surface if multiple flags survive. Geometry reserves a useful primary
+area and constrains tool widths to available space without overwriting
+retained preferences merely because the window narrows. Layout and grid
+viewport arithmetic use the same geometry synchronously; measured bounds
+are not the viewport source of truth.
+
+See [docs/ui-design.md](docs/ui-design.md) for presentation conventions.
+These are implemented structures, not final visual acceptance or new
+performance measurements; the redesign roadmap keeps validation open.
 
 ### Primary state / model ownership
 
@@ -326,71 +393,72 @@ source of truth for "which documents are open"; the live fields are a
 mirror of the active snapshot so render and test code can keep
 reading a single set of names.
 
-| Field              | Purpose                                               |
-|--------------------|-------------------------------------------------------|
-| `documents: Vec<DocumentSnapshot>` | Every open document, in tab order. |
-| `active: Option<usize>` | Index into `documents` of the active tab, or `None`. |
-| `next_doc_id: u64` | Monotonic source of `DocumentSnapshot::id`, never reused. |
-| `file_panel_open: bool` | Whether the left file-manager panel is shown. Toggled by Cmd/Ctrl+B / the toolbar **Files** button. |
-| `tab_scroll: ScrollHandle` | Horizontal scroll state for the (possibly overflowing) tab strip. |
-| `generation: u64`  | Bumped on every open; obsolete results are dropped.   |
-| `state: ViewState` | `Empty`, `Loading`, `Ready`, or `Error`; only shown when no tab is active. |
-| `archive: Option<Arc<ArchiveSource>>` | Active tab's ZIP source, for the picker. (Mirror.) |
-| `selected_entry: Option<String>`     | Active tab's archive entry. (Mirror.) |
-| `show_picker: bool` | Whether the archive-entry overlay is shown. |
-| `model: Option<GridModel>` | Active tab's rendered document. (Mirror.) |
-| `scroll_x: f32`, `viewport_w: f32` | Horizontal scroll bookkeeping. (Mirror / per-frame.) |
-| `v_scroll: UniformListScrollHandle` | Vertical scroll handle for the active tab. (Mirror.) |
-| `h_drag: Option<(f32, f32)>`        | Horizontal scrollbar drag state.        |
-| `selection: Selection` | Active tab's cell / range selection. (Mirror.) |
-| `header_mode: HeaderMode` | Active tab's first-row interpretation (`Auto` / `Header` / `Headerless`). Toggled by the toolbar **Headers** button; forcing a mode re-indexes the opened source. (Mirror.) |
-| `drag_selecting: bool` | Armed on a grid cell mouse-down, disarmed on mouse-up. Drag-select only extends the selection while set. |
-| `grid_bounds: Option<Bounds<Pixels>>` | Window-space bounds of the scrollable grid, recorded by the overlay canvas each frame. Used to detect a drag past the vertical edges; the viewport width no longer depends on it (see below). |
-| `pointer_pos: Option<Point<Pixels>>` | Last pointer position (window coords), updated by the overlay canvas's global mouse-move listener. |
-| `auto_scroll_task: Option<Task<()>>` | Tick loop that advances the list while a drag is held outside the vertical edges. |
-| `inspector_open: bool` | Whether the right-side column-inspector panel is shown. Toggled by Cmd/Ctrl+I and the toolbar button. |
-| `inspector_column: Option<usize>` | The column whose stats are currently shown, or `None`. |
-| `inspector_stats: Option<Arc<ColumnStats>>` | Stats for `inspector_column`, or `None` while the scan is in flight. |
-| `inspector_generation: u64` | Discards obsolete background stats scans. |
-| `inspector_task: Option<Task<()>>` | Outstanding background column-stats task. |
-| `diagnostics_open: bool` | Whether the right-side diagnostics panel is shown. Toggled by Cmd/Ctrl+D and the toolbar button. Warnings are read live from the active model, so there is no generation counter or task. |
-| `encoding_report: Option<Arc<EncodingReport>>` | UTF-8 scan of the active document, computed when the diagnostics panel opens. `None` while in flight or before the first open. |
-| `encoding_generation: u64` | Discards obsolete encoding scans after a document change. |
-| `encoding_task: Option<Task<()>>` | Outstanding background encoding-scan task. |
-| `task: Option<Task<()>>`            | Outstanding background task handle.     |
-| `status_message: Option<String>`    | Transient status-bar message (e.g. "copied N cells"). Cleared on every `OpenOutcome`. |
-| `focus_handle: FocusHandle` | Keyboard focus target for the grid. The grid element carries `.track_focus(...)`; keyboard events are only delivered to `on_grid_key_down` while this handle is focused. |
-| `focus_grid_on_next_frame: bool` | Set when a document becomes ready or a tab is switched. The next `render_grid` schedules a deferred `window.focus`. |
-| `clipboard: ClipboardWriter` | `Arc<dyn Fn(&str) -> Result<(), String>>`; defaults to `arboard`, replaced by a recorder in UI tests. |
-| `copy_flash_rect: Option<(CellPos, CellPos)>` | Active tab's normalized copy rectangle, painted green until the flash timer clears it. (Mirror.) |
-| `copy_flash_generation: u64` | Bumped on every copy. (Mirror.) |
-| `search_open: bool` | Whether the search bar overlay is visible. (Mirror.) |
-| `search_query: TextEdit` | Editable needle (text + caret + selection anchor) for the search bar. (Mirror.) |
-| `search_matches: Vec<u64>` | Record indexes that match the latest query. (Mirror.) |
-| `search_active: i64` | Index into `search_matches` of the active match (`-1` when there are none). (Mirror.) |
-| `search_generation: u64` | Bumped on every keystroke; a background task only applies its result if the view's generation still matches. (Mirror.) |
-| `search_case_sensitive: bool` | Whether the active tab's search is byte-exact (`Aa` toggle). Per tab. (Mirror.) |
-| `search_column: Option<usize>` | Column the active tab's search is scoped to (header click), or `None`. Persists across closing the bar; the scoped header stays highlighted. (Mirror.) |
-| `search_task: Option<Task<()>>` | Outstanding background search task. |
-| `search_focus_handle: FocusHandle` | Keyboard focus target for the search bar overlay; independent of the grid handle. |
-| `focus_search_on_next_frame: bool` | Set when the search bar opens; the next `Render::render` schedules a deferred `window.focus` for the bar. |
-| `search_text_bounds: Option<Bounds<Pixels>>` | Window-space bounds of the search text area, recorded each frame by a `canvas`; maps pointer x to a byte index. |
-| `search_dragging: bool` | True between a search-input mouse-down and mouse-up; drag-select only extends while set. |
-| `filter_open: bool` | Whether the filter bar is visible. Global, not per tab. |
-| `filter_input: TextEdit` | Text + caret + selection anchor for the filter input. (Mirror.) |
-| `filter_applied: Option<FilterExpr>` | The active tab's parsed predicate expression (single predicate or an AND/OR tree), or `None`. (Mirror.) |
-| `filter_rows: Option<Arc<Vec<u64>>>` | Record indexes passing the active predicate; `None` means unfiltered. (Mirror.) |
-| `filter_generation: u64` | Discards obsolete background filter results. (Mirror.) |
-| `filter_error: Option<String>` | Last parse error, shown inline in the bar. |
-| `filter_task: Option<Task<()>>` | Outstanding background filter task. |
-| `filter_focus_handle: FocusHandle` | Keyboard focus target for the filter bar. |
-| `focus_filter_on_next_frame: bool` | Set when the filter bar opens; deferred focus for it. |
-| `filter_text_bounds: Option<Bounds<Pixels>>` | Window-space bounds of the filter text area, recorded each frame by a `canvas`; used to map pointer x to a byte index. |
-| `filter_dragging: bool` | True between a filter-input mouse-down and mouse-up; drag-select only extends while set. |
-| `sort_spec: Option<SortSpec>` | Active sort (column + direction) for the active tab. (Mirror.) |
-| `sort_rows: Option<Arc<Vec<u64>>>` | Sorted record indexes (a permutation of the filtered set or all records). (Mirror.) |
-| `sort_generation: u64` | Discards obsolete background sort results. (Mirror.) |
-| `sort_task: Option<Task<()>>` | Outstanding background sort task. |
+| Field                                            | Purpose                                                                                                                                                                                       |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `documents: Vec<DocumentSnapshot>`               | Every open document, in tab order.                                                                                                                                                            |
+| `active: Option<usize>`                          | Index into `documents` of the active tab, or `None`.                                                                                                                                          |
+| `next_doc_id: u64`                               | Monotonic source of `DocumentSnapshot::id`, never reused.                                                                                                                                     |
+| `file_panel_open: bool`                          | Whether the left file-manager panel is shown. Toggled by Cmd/Ctrl+B / the toolbar **Files** button.                                                                                           |
+| `tab_scroll: ScrollHandle`                       | Horizontal scroll state for the (possibly overflowing) tab strip.                                                                                                                             |
+| `generation: u64`                                | Bumped on every open; obsolete results are dropped.                                                                                                                                           |
+| `state: ViewState`                               | `Empty`, `Loading`, `Ready`, or `Error`; only shown when no tab is active.                                                                                                                    |
+| `archive: Option<Arc<ArchiveSource>>`            | Active tab's ZIP source, for the picker. (Mirror.)                                                                                                                                            |
+| `selected_entry: Option<String>`                 | Active tab's archive entry. (Mirror.)                                                                                                                                                         |
+| `show_picker: bool`, `archive_dialog_open: bool` | Requested archive choice and Kit dialog lifecycle guard.                                                                                                                                      |
+| `workspace: Workspace`                           | Retained pane widths, selected auxiliary surface, Kit resize state and shared viewport geometry.                                                                                              |
+| `model: Option<GridModel>`                       | Active tab's rendered document. (Mirror.)                                                                                                                                                     |
+| `scroll_x: f32`, `viewport_w: f32`               | Horizontal scroll bookkeeping. (Mirror / per-frame.)                                                                                                                                          |
+| `v_scroll: UniformListScrollHandle`              | Vertical scroll handle for the active tab. (Mirror.)                                                                                                                                          |
+| `h_drag: Option<(f32, f32)>`                     | Horizontal scrollbar drag state.                                                                                                                                                              |
+| `selection: Selection`                           | Active tab's cell / range selection. (Mirror.)                                                                                                                                                |
+| `header_mode: HeaderMode`                        | Active tab's first-row interpretation (`Auto` / `Header` / `Headerless`). Toggled by the toolbar **Headers** button; forcing a mode re-indexes the opened source. (Mirror.)                   |
+| `drag_selecting: bool`                           | Armed on a grid cell mouse-down, disarmed on mouse-up. Drag-select only extends the selection while set.                                                                                      |
+| `grid_bounds: Option<Bounds<Pixels>>`            | Window-space bounds of the scrollable grid, recorded by the overlay canvas each frame. Used to detect a drag past the vertical edges; the viewport width no longer depends on it (see below). |
+| `pointer_pos: Option<Point<Pixels>>`             | Last pointer position (window coords), updated by the overlay canvas's global mouse-move listener.                                                                                            |
+| `auto_scroll_task: Option<Task<()>>`             | Tick loop that advances the list while a drag is held outside the vertical edges.                                                                                                             |
+| `inspector_open: bool`                           | Whether the right-side column-inspector panel is shown. Toggled by Cmd/Ctrl+I and the toolbar button.                                                                                         |
+| `inspector_column: Option<usize>`                | The column whose stats are currently shown, or `None`.                                                                                                                                        |
+| `inspector_stats: Option<Arc<ColumnStats>>`      | Stats for `inspector_column`, or `None` while the scan is in flight.                                                                                                                          |
+| `inspector_generation: u64`                      | Discards obsolete background stats scans.                                                                                                                                                     |
+| `inspector_task: Option<Task<()>>`               | Outstanding background column-stats task.                                                                                                                                                     |
+| `diagnostics_open: bool`                         | Whether the right-side diagnostics panel is shown. Toggled by Cmd/Ctrl+D and the toolbar button. Warnings are read live from the active model, so there is no generation counter or task.     |
+| `encoding_report: Option<Arc<EncodingReport>>`   | UTF-8 scan of the active document, computed when the diagnostics panel opens. `None` while in flight or before the first open.                                                                |
+| `encoding_generation: u64`                       | Discards obsolete encoding scans after a document change.                                                                                                                                     |
+| `encoding_task: Option<Task<()>>`                | Outstanding background encoding-scan task.                                                                                                                                                    |
+| `task: Option<Task<()>>`                         | Outstanding background task handle.                                                                                                                                                           |
+| `status_message: Option<String>`                 | Transient status-bar message (e.g. "copied N cells"). Cleared on every `OpenOutcome`.                                                                                                         |
+| `focus_handle: FocusHandle`                      | Keyboard focus target for the grid. The grid element carries `.track_focus(...)`; keyboard events are only delivered to `on_grid_key_down` while this handle is focused.                      |
+| `focus_grid_on_next_frame: bool`                 | Set when a document becomes ready or a tab is switched. The next `render_grid` schedules a deferred `window.focus`.                                                                           |
+| `clipboard: ClipboardWriter`                     | `Arc<dyn Fn(&str) -> Result<(), String>>`; defaults to `arboard`, replaced by a recorder in UI tests.                                                                                         |
+| `copy_flash_rect: Option<(CellPos, CellPos)>`    | Active tab's normalized copy rectangle, painted green until the flash timer clears it. (Mirror.)                                                                                              |
+| `copy_flash_generation: u64`                     | Bumped on every copy. (Mirror.)                                                                                                                                                               |
+| `search_open: bool`                              | Whether the search bar overlay is visible. (Mirror.)                                                                                                                                          |
+| `search_query: TextEdit`                         | Editable needle (text + caret + selection anchor) for the search bar. (Mirror.)                                                                                                               |
+| `search_matches: Vec<u64>`                       | Record indexes that match the latest query. (Mirror.)                                                                                                                                         |
+| `search_active: i64`                             | Index into `search_matches` of the active match (`-1` when there are none). (Mirror.)                                                                                                         |
+| `search_generation: u64`                         | Bumped on every keystroke; a background task only applies its result if the view's generation still matches. (Mirror.)                                                                        |
+| `search_case_sensitive: bool`                    | Whether the active tab's search is byte-exact (`Aa` toggle). Per tab. (Mirror.)                                                                                                               |
+| `search_column: Option<usize>`                   | Column the active tab's search is scoped to (header click), or `None`. Persists across closing the bar; the scoped header stays highlighted. (Mirror.)                                        |
+| `search_task: Option<Task<()>>`                  | Outstanding background search task.                                                                                                                                                           |
+| `search_focus_handle: FocusHandle`               | Keyboard focus target for the search bar overlay; independent of the grid handle.                                                                                                             |
+| `focus_search_on_next_frame: bool`               | Set when the search bar opens; the next `Render::render` schedules a deferred `window.focus` for the bar.                                                                                     |
+| `search_text_bounds: Option<Bounds<Pixels>>`     | Window-space bounds of the search text area, recorded each frame by a `canvas`; maps pointer x to a byte index.                                                                               |
+| `search_dragging: bool`                          | True between a search-input mouse-down and mouse-up; drag-select only extends while set.                                                                                                      |
+| `filter_open: bool`                              | Whether the filter bar is visible. Global, not per tab.                                                                                                                                       |
+| `filter_input: TextEdit`                         | Text + caret + selection anchor for the filter input. (Mirror.)                                                                                                                               |
+| `filter_applied: Option<FilterExpr>`             | The active tab's parsed predicate expression (single predicate or an AND/OR tree), or `None`. (Mirror.)                                                                                       |
+| `filter_rows: Option<Arc<Vec<u64>>>`             | Record indexes passing the active predicate; `None` means unfiltered. (Mirror.)                                                                                                               |
+| `filter_generation: u64`                         | Discards obsolete background filter results. (Mirror.)                                                                                                                                        |
+| `filter_error: Option<String>`                   | Last parse error, shown inline in the bar.                                                                                                                                                    |
+| `filter_task: Option<Task<()>>`                  | Outstanding background filter task.                                                                                                                                                           |
+| `filter_focus_handle: FocusHandle`               | Keyboard focus target for the filter bar.                                                                                                                                                     |
+| `focus_filter_on_next_frame: bool`               | Set when the filter bar opens; deferred focus for it.                                                                                                                                         |
+| `filter_text_bounds: Option<Bounds<Pixels>>`     | Window-space bounds of the filter text area, recorded each frame by a `canvas`; used to map pointer x to a byte index.                                                                        |
+| `filter_dragging: bool`                          | True between a filter-input mouse-down and mouse-up; drag-select only extends while set.                                                                                                      |
+| `sort_spec: Option<SortSpec>`                    | Active sort (column + direction) for the active tab. (Mirror.)                                                                                                                                |
+| `sort_rows: Option<Arc<Vec<u64>>>`               | Sorted record indexes (a permutation of the filtered set or all records). (Mirror.)                                                                                                           |
+| `sort_generation: u64`                           | Discards obsolete background sort results. (Mirror.)                                                                                                                                          |
+| `sort_task: Option<Task<()>>`                    | Outstanding background sort task.                                                                                                                                                             |
 
 `DocumentSnapshot` owns the per-document state that survives a tab
 switch: a stable `id`, an optional parsed `Arc<ParsedDocument>`
@@ -421,15 +489,15 @@ the model without aliasing `MainView` mutably.
    `this.update(...)`. If `generation` has moved on, the result is
    silently discarded.
 4. Otherwise, `apply` installs the new `GridModel` / archive and
-   transitions to `Ready` (or `Error`, or the picker overlay).
+   transitions to `Ready` (or `Error`, or archive tab creation).
 5. The GPUI `Render::render` rebuilds the layout tree from `state`,
    `model`, and the various input handles.
 
 ### Actions / commands
 
-There is **no GPUI typed `Action` layer** yet (no `actions!` macro or
-`cx.bind_keys`). The toolbar `Open…` button and file picker (`rfd`)
-remain the only actions wired through GPUI's typed-action system.
+There is **no application GPUI typed `Action` layer** yet (no `actions!`
+macro or `cx.bind_keys` for document commands). Kit Button/menu listeners
+invoke view methods; Open still uses the native `rfd` picker.
 
 Keyboard bindings are now centralized in `src/ui/commands.rs`:
 
@@ -450,8 +518,9 @@ Keyboard bindings are now centralized in `src/ui/commands.rs`:
 
 This is the deliberately small extraction that makes new bindings
 (search, filter, go-to-row, select-all) easy to add and test. It does
-not yet provide user-rebindable shortcuts, menu integration, or a
-shortcut cheatsheet. A later GPUI-native layer (`actions!` +
+not yet provide user-rebindable shortcuts or typed-action menu integration.
+Kit supplies the document dropdown menu and toolbar-accessible shortcut
+cheatsheet, but Cmd/Ctrl+? is not implemented. A later GPUI-native layer (`actions!` +
 `cx.bind_keys`) can consume the same intents; Shift-navigation will
 need distinct typed actions or a modifier-aware binding strategy.
 
@@ -514,7 +583,7 @@ Opening:
   build the tab strip. The entry the loader pre-opened (when there
   is a clear favourite) is marked ready; the rest are pending.
 - The modal archive picker is no longer shown automatically. It
-  remains reachable from the toolbar's **Archive…** button to list a
+  remains reachable from the document menu's **Browse archive…** item to list a
   ZIP's contents (including skipped entries); clicking an entry calls
   `switch_to_entry`, which switches to the existing tab.
 
@@ -544,22 +613,23 @@ Closing / switching:
 
 Presentation — tab strip and file panel:
 
-- The tab strip sits between the toolbar and the body. Tabs are
-  `flex_shrink_0`, so a long list keeps its natural widths; the
-  inner track is `overflow_x_scroll()` and tracked by
-  `MainView.tab_scroll`, so distant tabs stay reachable by scrolling.
+- The tab strip sits below the titlebar and above the document toolbar.
+  Focusable Kit Buttons provide selection and separate close controls;
+  stable document IDs are resolved at activation time. Tabs are
+  `flex_shrink_0`; the inner `overflow_x_scroll()` track uses
+  `MainView.tab_scroll`. Full names and loading state are in tooltips.
 - The left-hand file-manager panel (`render_file_panel`) lists every
   open document. `group_documents` groups consecutive snapshots that
   share an archive by `Arc` identity (direct files are top-level
   rows, ZIP entries are nested under an archive header), so two
   archives with the same entry name stay separate. Each row has an
-  active highlight, a loaded/pending dot, and a × that calls
-  `close_active_at`; clicking the row calls `switch_to`.
+  active highlight, a loaded/pending icon or loading spinner, full-name
+  tooltip and separate Kit close Button. Selection/close resolve the
+  snapshot's stable ID before calling `switch_to` / `close_active_at`.
 - The panel is shown when `file_panel_open && !documents.is_empty()`.
-  It is toggled by the toolbar **Files** button, its own × , and
-  `Action::ToggleFilePanel` (Cmd/Ctrl+B). It is a `flex_shrink_0`
-  sibling of the grid body with a fixed width, so the grid takes the
-  remaining space and reflows when the panel is hidden.
+  It is toggled by the toolbar **Files** button, its own close control,
+  and `Action::ToggleFilePanel` (Cmd/Ctrl+B). It occupies a Kit resizable
+  slot in `Workspace`; shared geometry reflows the grid on hide/resize.
 
 Status / error behaviour:
 
@@ -576,6 +646,13 @@ documents are not duplicated; the tab bar just indexes into them.
 
 ### Keyboard handling
 
+The shell captures Cmd/Ctrl+O so Open works from welcome and focused Kit
+controls as well as the grid. It routes query/panel intents from shell
+controls only when none of the grid/query focus handles owns the event,
+leaving input editing to its existing handler. Kit supplies control focus
+and dialog/menu behavior. The shortcut cheatsheet is toolbar-accessible;
+there is no Cmd/Ctrl+? binding or user-rebinding implementation.
+
 The grid div carries `key_context("Grid")`, `.track_focus(&self.focus_handle)`,
 and an `on_key_down` listener that delegates to
 `MainView::on_grid_key_down`. **Focus is a prerequisite**: GPUI only
@@ -587,30 +664,30 @@ grid stops tracking focus (see Testing).
 
 Focus is moved to the grid:
 
-* when a document becomes ready — `apply` sets
+- when a document becomes ready — `apply` sets
   `focus_grid_on_next_frame`, and `render_grid` schedules a deferred
   `window.focus` (focus is not mutated mid-render, which can re-enter
   the frame); and
-* on any mouse-down inside the grid — `.track_focus` registers a
+- on any mouse-down inside the grid — `.track_focus` registers a
   bubble-phase listener that focuses the grid, so clicking a cell then
   pressing Cmd/Ctrl+C works.
 
 Recognised keys:
 
-| Key            | Action                                                       |
-|----------------|--------------------------------------------------------------|
-| Arrow keys     | Move the selection by one cell.                              |
-| Page Up/Down   | Move the selection by `commands::PAGE_STEP` rows.              |
-| Home / End     | Jump the column cursor to the first / last column.           |
-| Cmd/Ctrl+Home  | Jump the row cursor to the first row (column preserved).     |
-| Cmd/Ctrl+End   | Jump the row cursor to the last row (column preserved).      |
-| Tab / Shift-Tab | Move to the next / previous cell in row-major order, wrapping across rows and around the document ends. With a filter active the walk covers visible rows only. |
-| F3 / Shift-F3  | Advance to the next / previous search match (no-op when no search is active). |
-| Esc            | Close the search or filter bar if open (whichever is up), else clear the selection, else close the archive picker. |
-| Cmd/Ctrl+C     | Copy the current selection to the clipboard as TSV; status bar reports "copied N cells" or "copy failed: ...". |
-| Cmd/Ctrl+F     | Open the search bar overlay; if the filter bar is open, switch to search (closing it first). No-op when search is already open. |
-| Cmd/Ctrl+L     | Open the filter bar overlay; if the search bar is open, switch to filter (closing it first). No-op when filter is already open. |
-| Cmd/Ctrl+Shift+L | Open the natural-language **Ask** bar; previews a Tier 1 parse and accepts it into the filter bar. |
+| Key              | Action                                                                                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Arrow keys       | Move the selection by one cell.                                                                                                                                 |
+| Page Up/Down     | Move the selection by `commands::PAGE_STEP` rows.                                                                                                               |
+| Home / End       | Jump the column cursor to the first / last column.                                                                                                              |
+| Cmd/Ctrl+Home    | Jump the row cursor to the first row (column preserved).                                                                                                        |
+| Cmd/Ctrl+End     | Jump the row cursor to the last row (column preserved).                                                                                                         |
+| Tab / Shift-Tab  | Move to the next / previous cell in row-major order, wrapping across rows and around the document ends. With a filter active the walk covers visible rows only. |
+| F3 / Shift-F3    | Advance to the next / previous search match (no-op when no search is active).                                                                                   |
+| Esc              | Close the search or filter bar if open (whichever is up), else clear the selection, else close the archive picker.                                              |
+| Cmd/Ctrl+C       | Copy the current selection to the clipboard as TSV; status bar reports "copied N cells" or "copy failed: ...".                                                  |
+| Cmd/Ctrl+F       | Open the search bar overlay; if the filter bar is open, switch to search (closing it first). No-op when search is already open.                                 |
+| Cmd/Ctrl+L       | Open the filter bar overlay; if the search bar is open, switch to filter (closing it first). No-op when filter is already open.                                 |
+| Cmd/Ctrl+Shift+L | Open the natural-language **Ask** bar; previews a Tier 1 parse and accepts it into the filter bar.                                                              |
 
 `commands::action_for` maps each `Keystroke` to a logical
 `commands::Action`; `MainView::run_action` executes it. Shift held
@@ -659,45 +736,45 @@ altogether.
 
 ### Operations
 
-| Method                          | Meaning                                       |
-|---------------------------------|-----------------------------------------------|
-| `Selection::empty`              | New empty selection.                          |
-| `Selection::single(pos)`        | One-cell selection, no range.                 |
-| `selection.set(pos)`            | Replace selection with a single cell.         |
-| `selection.extend_to(pos)`      | Move cursor to `pos`, keep anchor fixed.      |
+| Method                                                 | Meaning                                                                                                                                                                                 |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Selection::empty`                                     | New empty selection.                                                                                                                                                                    |
+| `Selection::single(pos)`                               | One-cell selection, no range.                                                                                                                                                           |
+| `selection.set(pos)`                                   | Replace selection with a single cell.                                                                                                                                                   |
+| `selection.extend_to(pos)`                             | Move cursor to `pos`, keep anchor fixed.                                                                                                                                                |
 | `selection.move_cursor(dr, dc, columns, rows, extend)` | Translate the cursor by `(dr, dc)` with saturating arithmetic, clamp to the visible rows / columns; preserve anchor if `extend`. `i64::MIN` / `i64::MAX` deltas express the view edges. |
-| `selection.move_cell(forward, columns, rows, extend)` | Move to the adjacent cell in row-major order (Tab / Shift-Tab), wrapping across rows and around the view ends. |
-| `selection.clear()`             | Empty the selection.                          |
-| `selection.cursor()`            | Current cursor cell (or `None`).              |
-| `selection.anchor()`            | Current anchor cell (or `None`).              |
-| `selection.normalize()`         | Top-left + bottom-right of the rectangle.     |
-| `selection.contains(r, c)`      | Is `(r, c)` inside the rectangle?             |
-| `selection.cell_count()`        | Number of data cells in the rectangle (0 if empty). |
-| `selection.clamp_to_rows(n)`    | Clamp cursor and anchor into `[0, n - 1]`; `n == 0` clears. |
-| `selection.copy_text_with(cell_at)` | Render the selection as TSV in identity order. |
-| `selection.copy_view_text_with(view_rows, cell_at)` | Render the selection as TSV for the current view; `view_rows` maps display positions to record indexes. |
-| `selection.view_cell_count(view_rows)` | Cells the selection covers in the current view, for the status message. |
+| `selection.move_cell(forward, columns, rows, extend)`  | Move to the adjacent cell in row-major order (Tab / Shift-Tab), wrapping across rows and around the view ends.                                                                          |
+| `selection.clear()`                                    | Empty the selection.                                                                                                                                                                    |
+| `selection.cursor()`                                   | Current cursor cell (or `None`).                                                                                                                                                        |
+| `selection.anchor()`                                   | Current anchor cell (or `None`).                                                                                                                                                        |
+| `selection.normalize()`                                | Top-left + bottom-right of the rectangle.                                                                                                                                               |
+| `selection.contains(r, c)`                             | Is `(r, c)` inside the rectangle?                                                                                                                                                       |
+| `selection.cell_count()`                               | Number of data cells in the rectangle (0 if empty).                                                                                                                                     |
+| `selection.clamp_to_rows(n)`                           | Clamp cursor and anchor into `[0, n - 1]`; `n == 0` clears.                                                                                                                             |
+| `selection.copy_text_with(cell_at)`                    | Render the selection as TSV in identity order.                                                                                                                                          |
+| `selection.copy_view_text_with(view_rows, cell_at)`    | Render the selection as TSV for the current view; `view_rows` maps display positions to record indexes.                                                                                 |
+| `selection.view_cell_count(view_rows)`                 | Cells the selection covers in the current view, for the status message.                                                                                                                 |
 
 ### Invariants
 
-* Cursor and anchor are `Option<CellPos>` so "nothing selected" is
+- Cursor and anchor are `Option<CellPos>` so "nothing selected" is
   representable without sentinel coordinates.
-* `set` always produces a single-cell selection (cursor == anchor).
-* The first call to `move_cursor(..., extend=true)` from an empty
+- `set` always produces a single-cell selection (cursor == anchor).
+- The first call to `move_cursor(..., extend=true)` from an empty
   selection anchors at the implicit origin `(0, 0)` so that the very
   first shift-arrow produces a real range.
 
 ### Grid integration
 
-* `MainView.selection` is reset on every successful `OpenOutcome`.
-* `render_row` receives both the record index (for cell text, search
+- `MainView.selection` is reset on every successful `OpenOutcome`.
+- `render_row` receives both the record index (for cell text, search
   and warnings) and the display position; the selection test uses the
   display position, so the highlight matches the visible rows after a
   sort.
-* Mouse click on a cell: `Selection::set(pos)`; shift-click:
+- Mouse click on a cell: `Selection::set(pos)`; shift-click:
   `Selection::extend_to(pos)`. Both go through the captured
   `Entity<MainView>` handle and call `cx.notify()` to re-render.
-* Click-and-drag: a mouse-down on a cell arms `drag_selecting`; every
+- Click-and-drag: a mouse-down on a cell arms `drag_selecting`; every
   cell also carries an `on_mouse_move` handler, and while
   `MouseMoveEvent::dragging()` is true and `drag_selecting` is set, the
   handler calls `Selection::extend_to(pos)` for whichever cell the
@@ -707,7 +784,7 @@ altogether.
   arithmetic and no vertical-scroll bookkeeping. `drag_selecting`
   guards the case where a drag began outside the grid and passes over
   cells.
-* Drag auto-scroll: per-cell handlers cannot see the pointer once it
+- Drag auto-scroll: per-cell handlers cannot see the pointer once it
   leaves the grid, so an overlay `canvas` (no hitbox, so it does not
   intercept input) records the scroll area's bounds and installs a
   global `window.on_mouse_event` mouse-move listener. When
@@ -718,47 +795,51 @@ altogether.
   `cx.spawn` tick loop (`AUTO_SCROLL_TICK`, 30 ms) repeats this while
   the pointer is held still outside the edge; the loop exits when
   `drag_selecting` clears.
-* Keyboard: `MainView::on_grid_key_down` routes arrow / Page /
+- Keyboard: `MainView::on_grid_key_down` routes arrow / Page /
   Home / End / Cmd+Home / Cmd+End keys through
   `Selection::move_cursor`, and Tab / Shift-Tab through
   `Selection::move_cell`. Shift extends a range.
 
 ### Architectural invariants preserved
 
-* `Selection` is owned by `anvil_core`, not the UI crate; it has no
+- `Selection` is owned by `anvil_core`, not the UI crate; it has no
   GPUI types in its public surface. The grid renders from it, the
   keyboard handlers write to it, the (future) clipboard reads from
   it. They all agree on the same data type.
-* `Selection::move_cursor` is `O(1)`; we never iterate cells to
+- `Selection::move_cursor` is `O(1)`; we never iterate cells to
   decide whether a key needs handling.
 
 ### Open loops
 
-* Drag auto-scroll only triggers when the pointer is fully outside the
+- Drag auto-scroll only triggers when the pointer is fully outside the
   list's vertical bounds; there is no proximity margin, and the speed
   is a fixed one row per tick (no proportional acceleration).
-* The `commands` module that will own keybindings (search, filter,
+- The `commands` module that will own keybindings (search, filter,
   copy) is not yet extracted. Today keybindings are inlined in
   `view.rs::on_grid_key_down`.
 
 ## Editable text inputs
 
-GPUI 0.2.2 ships no `TextInput` element, so the filter bar implements
-editing itself. The state machine is
+Search, filter, Ask and go-to-row intentionally retain their existing
+editing model rather than replacing it with Kit input state during a
+presentation migration. Kit controls and shared `input::query_field`
+framing surround the editor. This does not implement native IME or
+composition support; an input-model replacement is a separate slice.
+The state machine is
 `ui::text_edit::TextEdit` (`src/ui/text_edit.rs`), which is GPUI-free
 and unit-tested without a window:
 
-* `text` plus a `caret` and an `anchor` (both byte offsets, always on a
+- `text` plus a `caret` and an `anchor` (both byte offsets, always on a
   UTF-8 char boundary). `anchor == caret` means no selection.
-* `insert` replaces the selection; `backspace` / `delete` remove the
+- `insert` replaces the selection; `backspace` / `delete` remove the
   selection or the adjacent character; `move_left/right/home/end/word_*`
   and `select_all` move or extend the caret.
-* This mirrors `anvil_core::Selection` for the grid: a small pure model
+- This mirrors `anvil_core::Selection` for the grid: a small pure model
   the UI drives, so the editing logic is testable end to end.
 
 Rendering (`ui::input::editable_text_area`, used by both
 `render_search_bar` and `render_filter_bar`) paints the text with
-`StyledText` and, for a non-empty selection, a `BG_SELECTED` highlight
+`StyledText` and, for a non-empty selection, a `Palette::selection` highlight
 range. The caret is a 1px bar positioned from
 `text_caret_x(window, text, caret)`, which shapes the line with
 `window.text_system().shape_line(..)` and reads `x_for_index`. The same
@@ -854,7 +935,7 @@ It:
    text. On error, captures the message but does not panic.
 5. Stores either `copied N cells` or `copy failed: ...` in
    `MainView.status_message`, which `render_status` paints in
-   `theme::ACCENT` (or `gpui::red()` for failures) ahead of the
+   semantic `Palette::primary` (or `Palette::danger` for failures) ahead of the
    generic state line.
 6. On success, calls `start_copy_flash`: it records the normalized
    selection rectangle in `copy_flash_rect`, bumps
@@ -871,10 +952,10 @@ It:
 ### Copy confirmation flash
 
 As immediate positive feedback, the copied cells flash green
-(`theme::BG_COPIED = #2f8f4f`) for `COPY_FLASH_DURATION` (450 ms)
+(`Palette::copied`, derived from the active theme's success color) for `COPY_FLASH_DURATION` (450 ms)
 before returning to the normal selection colour. `grid::render_row`
 takes `copy_flash: Option<(CellPos, CellPos)>`; a cell inside the
-rectangle is painted `BG_COPIED` in preference to `BG_SELECTED`, and
+rectangle is painted `Palette::copied` in preference to `Palette::selection`, and
 a full-width rectangle also tints the row gutter. The flash rectangle
 is captured at copy time, so moving the selection during the 450 ms
 does not move the green feedback; it still marks what was copied.
@@ -910,7 +991,7 @@ div (column, flex-1)
 └── status bar    (render_status)
 ```
 
-The grid uses `gpui::uniform_list` so only rows in the visible range
+The grid uses `gpui_kit::uniform_list` so only rows in the visible range
 are built per frame. The header is rebuilt each frame because visible
 columns change with horizontal scroll. `cx.notify()` is called
 whenever the `generation`, `model`, `scroll_x`, or any state changes
@@ -1028,11 +1109,11 @@ shows the reason for every skipped entry.
 
 Recognised extensions (with rank):
 
-| Extension                              | Rank |
-|----------------------------------------|------|
-| `csv`, `tsv`, `tab`, `psv`             | 0    |
-| `dat`, `out`                           | 1    |
-| `txt`                                  | 2    |
+| Extension                  | Rank |
+| -------------------------- | ---- |
+| `csv`, `tsv`, `tab`, `psv` | 0    |
+| `dat`, `out`               | 1    |
+| `txt`                      | 2    |
 
 Lower rank means "more likely to be the dataset the user wants".
 
@@ -1051,8 +1132,8 @@ usable-but-lower-rank entries. The `best_candidate` helper in
 If multiple candidates share the best rank, `loader::load` returns
 `LoadResult::NeedArchiveChoice(Arc<ArchiveSource>)`. The UI then gives
 every usable entry a tab and keeps the archive picker reachable from the
-toolbar's **Archive…** button. The overlay lists the usable entries and
-a *skipped entries* section that shows each rejected entry's name and
+document menu's **Browse archive…** item. The Kit dialog lists usable entries and
+a _skipped entries_ section that shows each rejected entry's name and
 `rejected_reason` (capped at 40 rows with an "…and N more" summary).
 Clicking a usable entry switches to its tab via `switch_to_entry`.
 
@@ -1180,7 +1261,7 @@ interpretation; it is carried on `IndexOptions` and threaded through
 (`Headerless` never emits header warnings).
 
 Under `Auto`, `looks_like_header_in_context` compares the first row's
-per-column *textness* (empty / typed / text) against up to
+per-column _textness_ (empty / typed / text) against up to
 `HEADER_CONTEXT_ROWS` (20) following logical lines:
 
 - **header vote** — a text cell above a typed (numeric/boolean)
@@ -1188,7 +1269,7 @@ per-column *textness* (empty / typed / text) against up to
 - **data vote** — a typed cell above a typed value, i.e. the first row
   looks like another data row.
 
-Text-over-text is deliberately *not* a data vote, so
+Text-over-text is deliberately _not_ a data vote, so
 `first_name,last_name` over `alice,bob` keeps defaulting to a header.
 When the votes tie, or there is nothing to compare, it falls back to
 the earlier local `looks_like_header` rule (at least half the first
@@ -1211,7 +1292,7 @@ column inspector, and encoding scan.
 
 The UI toolbar **Headers** control cycles `Auto → Header → Headerless`.
 Forcing a mode calls `anvil_core::reindex(&doc, options)`, which
-re-runs `indexing::parse_with` against the *same* `OpenedSource` (the
+re-runs `indexing::parse_with` against the _same_ `OpenedSource` (the
 `MmapSource` and extraction `TempDir` are shared behind `Arc`s, and
 `OpenedSource` is `Clone`), so there is no re-open or re-extract. The
 task runs on the background executor under the open `generation`
@@ -1283,13 +1364,13 @@ pre-decoding of all cells.
 
 Per `ParsedDocument`:
 
-| Field           | Bytes/row         | Notes                              |
-|-----------------|-------------------|------------------------------------|
-| `opened`        | constant          | `Arc<MmapSource>` + metadata       |
-| `record_offsets`| 8 (`u64`)         | `Vec<u64>` length `record_count+1` |
-| `meta.headers`  | per-header        | `Vec<String>` of header names      |
-| `meta.warnings` | per-warning       | `Vec<ParseWarning>`                |
-| temp file       | full entry bytes  | only when source was a ZIP entry   |
+| Field            | Bytes/row        | Notes                              |
+| ---------------- | ---------------- | ---------------------------------- |
+| `opened`         | constant         | `Arc<MmapSource>` + metadata       |
+| `record_offsets` | 8 (`u64`)        | `Vec<u64>` length `record_count+1` |
+| `meta.headers`   | per-header       | `Vec<String>` of header names      |
+| `meta.warnings`  | per-warning      | `Vec<ParseWarning>`                |
+| temp file        | full entry bytes | only when source was a ZIP entry   |
 
 A 1,000,000-row file costs ~8 MB of offsets plus the 173 MB mmap.
 
@@ -1330,17 +1411,16 @@ edge to the offset of the first visible column, so columns line up
 across the header and data rows.
 
 `MainView.viewport_w` is the columns area's width. It is **computed
-synchronously** from the window width minus the row-number gutter and
-the fixed width of every panel currently sharing the grid's flex row
-(`grid_viewport_width`: file panel, inspector, diagnostics — all
-`flex_shrink_0` with a `theme` constant). Because the arithmetic uses
-the same conditions as the panel layout in `render`, it is exact and,
-crucially, correct on the same frame a panel is shown or hidden.
-An earlier version read the previous frame's measured `grid_bounds`,
-which left the table at the old width for one to two frames after a
-panel toggle (a visible blank gap) until the overlay canvas re-measured
-and notified. `grid_bounds` is still recorded for drag auto-scroll,
-which needs the real on-screen rectangle.
+synchronously** by the shared constrained geometry in `view/workspace.rs`:
+window width minus the optional resizable Files pane, the one selected
+auxiliary pane (Column, Diagnostics or Cell), and the row-number gutter.
+The same geometry supplies Kit pane sizes/ranges, so viewport calculation
+and layout change together on toggle/resize. Width preferences are
+retained per tool; horizontal scroll is clamped when workspace width
+changes, not reset on ordinary tab rendering. Do not return to the older
+previous-frame measured-bounds calculation or fixed-width panel sums.
+`grid_bounds` is still recorded for drag auto-scroll, which needs the real
+on-screen rectangle.
 `scroll_horizontal`, `ensure_column_visible`,
 `ColumnLayout::visible`, and `render_h_scrollbar` all read the one
 `viewport_w` value.
@@ -1383,7 +1463,7 @@ per-frame state is added. Each row:
 1. Decides which columns are visible (`ColumnLayout::visible`).
 2. Renders a leading gutter div (`ROW_NUMBER_WIDTH`) with the row
    number (`index + 1`); a warning row is prefixed with `⚠` and
-   coloured `theme::WARN`.
+   coloured with semantic warning/danger colors from `Palette`.
 3. Renders a flex row of cell divs for the visible columns only, each
    with `on_mouse_down` (selection) and `on_mouse_move` (drag-select)
    handlers.
@@ -1491,17 +1571,17 @@ indeterminate stub when the total is unknown.
 
 `error.rs::AnvilError`:
 
-| Variant                              | Meaning                                    |
-|--------------------------------------|--------------------------------------------|
-| `Io(io::Error)`                      | Filesystem error during open/extract       |
-| `Zip(zip::result::ZipError)`         | Underlying zip crate error                 |
-| `UnsupportedCompression(String, String)` | Compression method not Stored/Deflate/Bzip2 |
-| `NoUsableEntries`                    | ZIP has no candidate data files            |
-| `EntryNotFound(String)`              | Archive entry name not present             |
-| `PathTraversal(String)`              | An entry name contained `..`               |
-| `DecompressedTooLarge { name, actual, limit }` | Size cap hit                           |
-| `EmptyFile`                          | 0-byte input                               |
-| `Other(String)`                      | Catch-all                                  |
+| Variant                                        | Meaning                                     |
+| ---------------------------------------------- | ------------------------------------------- |
+| `Io(io::Error)`                                | Filesystem error during open/extract        |
+| `Zip(zip::result::ZipError)`                   | Underlying zip crate error                  |
+| `UnsupportedCompression(String, String)`       | Compression method not Stored/Deflate/Bzip2 |
+| `NoUsableEntries`                              | ZIP has no candidate data files             |
+| `EntryNotFound(String)`                        | Archive entry name not present              |
+| `PathTraversal(String)`                        | An entry name contained `..`                |
+| `DecompressedTooLarge { name, actual, limit }` | Size cap hit                                |
+| `EmptyFile`                                    | 0-byte input                                |
+| `Other(String)`                                | Catch-all                                   |
 
 ### User-visible errors
 
@@ -1552,12 +1632,12 @@ performance work.
 
 ### Datasets tested
 
-| Fixture            | Size           | Rows     | Columns | Notes                       |
-|--------------------|----------------|----------|---------|-----------------------------|
-| `large.csv`        | 173,427,532 B  | 1,000,000 | 20     | mixed strings + numbers + JSON payloads |
-| `archive.zip`      | ~52 MB         | same     | same   | deflate; 1 CSV + 4 noise entries |
-| `multi.zip`        | 576 B          | 3 + 4    | 3 / 3  | 2 usable CSVs for the picker |
-| `malformed.csv`    | 68 B           | 4        | 2/3/4  | quote-not-closed, wrong width, etc. |
+| Fixture         | Size          | Rows      | Columns | Notes                                   |
+| --------------- | ------------- | --------- | ------- | --------------------------------------- |
+| `large.csv`     | 173,427,532 B | 1,000,000 | 20      | mixed strings + numbers + JSON payloads |
+| `archive.zip`   | ~52 MB        | same      | same    | deflate; 1 CSV + 4 noise entries        |
+| `multi.zip`     | 576 B         | 3 + 4     | 3 / 3   | 2 usable CSVs for the picker            |
+| `malformed.csv` | 68 B          | 4         | 2/3/4   | quote-not-closed, wrong width, etc.     |
 
 None of these files are committed to the repository. Recreate the set
 with `cargo run --release --bin gen_fixture` (1,000,000 rows by
@@ -1637,18 +1717,18 @@ instead of calling `doc.cell` per column.
   directly into the indexer would help, but quoted records need
   random access so the temp file is not avoidable today.
 - `render_row` still builds one `SharedString` per visible cell (the
-text element owns its bytes), and the case-insensitive highlight path
-allocates a case-folded copy per matched cell via `find_ranges`. Both
-are bounded to the visible range and were left as-is; an LRU/scratch
-reuse would remove them if frame time shows up.
+  text element owns its bytes), and the case-insensitive highlight path
+  allocates a case-folded copy per matched cell via `find_ranges`. Both
+  are bounded to the visible range and were left as-is; an LRU/scratch
+  reuse would remove them if frame time shows up.
 - Text sort builds one owned lowercased key `Vec<u8>` per row (1M
-allocations on the fixture). Numeric sort is unaffected. An arena of
-key bytes would remove the per-row allocation if needed.
+  allocations on the fixture). Numeric sort is unaffected. An arena of
+  key bytes would remove the per-row allocation if needed.
 - The indexing loop is a per-byte branch loop. A `memchr`/`memchr3`
-skip loop was tried and measured **slower** on the dense fixture
-(434 ms vs 250 ms) because there is a delimiter every few bytes, so
-the SIMD scan cannot skip and pays per-call setup. Do not "optimise"
-it back without a benchmark.
+  skip loop was tried and measured **slower** on the dense fixture
+  (434 ms vs 250 ms) because there is a delimiter every few bytes, so
+  the SIMD scan cannot skip and pays per-call setup. Do not "optimise"
+  it back without a benchmark.
 
 ### Unmeasured areas
 
@@ -1698,100 +1778,100 @@ header detection vote and forced modes.
 `test-support` dev-dependency) with eighty-nine UI regression tests
 (86 GPUI tests plus 3 pure-helper unit tests):
 
-* `arrow_keys_move_selection_when_grid_focused` — injects a ready
-document, lets `render_grid` schedule the production deferred focus,
-and asserts arrow keys move the cursor.
-* `copy_shortcut_reaches_handler_when_grid_focused` — same setup, then
-dispatches Cmd/Ctrl+C and asserts the status message, the green flash
-rectangle, and the exact TSV written to an injected clipboard recorder
-(the real clipboard is never touched).
-* `drag_select_builds_rectangle` — synthesises a mouse-down on one cell,
-a drag to another (via a test-only `debug_selector` on the grid list to
-derive cell pixel centres), and a mouse-up, then asserts the selection
-rectangle and a follow-up copy's TSV.
-* `drag_past_bottom_edge_starts_auto_scroll` — drags a 1000-row document
-past the bottom edge and asserts the selection extended past the first
-visible row and the list's scroll offset actually moved.
-* `auto_scroll_direction_detects_edges` — the pure above/inside/below
-decision.
-* `cmd_f_opens_search_bar_when_grid_focused` — asserts the
-Cmd/Ctrl+F chord flips `search_open` and leaves the query empty.
-* `search_bar_input_appends_and_skips_grid_navigation` — typing
-characters into the open bar appends to the query without moving the
-grid cursor.
-* `search_bar_backspace_drops_last_character` — Backspace removes the
-last typed character without falling back to grid navigation.
-* `escape_closes_search_bar` — Escape clears the search state.
-* `escape_closes_filter_bar` — Escape closes the filter bar while it
-has focus.
-* `escape_action_closes_filter_bar_when_grid_focused` — Escape still
-closes the filter bar through the grid's `Action::Escape` after focus
-returns to the grid (regression: that arm used to handle only search).
-* `filter_close_button_dismisses_bar` / `search_close_button_dismisses_bar`
-— clicking the visible `×` dismisses each bar.
-* `search_populates_match_list` — `kick_search` populates
-`search_matches` against the sample fixture (no matches for "foo").
-* `search_finds_real_matches_in_fixture` — `kick_search` against a
-two-row fixture populates `search_matches = [0, 1]` and sets
-`search_active = 0`.
-* `search_enter_cycles_through_matches` — Enter advances the active
-match index; Shift+Enter wraps backward.
-* `f3_advances_match_without_opening_bar` — F3 / Shift-F3 cycle the
-active match without touching the bar's open state or query.
-* `opening_new_document_clears_search_state` — `close_search` clears
-all search state, mirroring what `apply` does on a new document.
-* `apply_ready_creates_one_tab` — a single `apply(Ready)` pushes one
-snapshot and makes it active.
-* `two_sequential_applies_create_two_tabs` — two `apply(Ready)`
-calls (the multi-file-drop path) create two tabs.
-* `error_with_open_tab_keeps_the_tab` — an error on a second open
-does not clear the already-open tab; the message goes to the status
-bar.
-* `push_two_documents_switches_to_last` — pushing a snapshot makes
-it the active tab.
-* `switching_tabs_restores_per_document_state` — selection and
-horizontal scroll survive a round-trip through another tab.
-* `closing_active_tab_picks_neighbour` — closing the active tab
-selects a neighbour.
-* `closing_earlier_non_active_tab_shifts_active` — closing an
-earlier inactive tab shifts the active index down.
-* `closing_last_tab_leaves_empty_state` — closing the only tab
-resets to the empty document list.
-* `archive_entries_become_tabs_immediately` — `install_archive_tabs`
-on a real three-entry ZIP creates all three tabs synchronously;
-the first lazy-loads, switching to the second loads it, the third
-stays pending.
-* `apply_need_archive_choice_installs_all_tabs` — the multi-entry
-drop path installs all tabs and shows no modal picker.
-* `install_archive_tabs_marks_loaded_entry_as_ready` — when the
-loader pre-opened a favourite, that entry's tab is ready and
-active; the other is pending.
-* `cmd_b_toggles_file_panel` — Cmd/Ctrl+B flips `file_panel_open`
-both ways through the grid keyboard path.
-* `group_documents_groups_by_archive_identity` — direct files are
-top-level; ZIP entries nest under their archive keyed by `Arc`
-identity.
-* `cmd_l_opens_filter_bar` — Cmd/Ctrl+L opens the filter bar.
-* `cmd_l_switches_from_search_bar_to_filter` — Cmd/Ctrl+L while the
-search bar is focused closes search and opens filter in one step.
-* `cmd_shift_l_opens_ask_bar` — the chord opens Ask, not the plain
-filter bar.
-* `ask_accepts_a_phrase_into_the_filter` / `ask_does_not_apply_an_unparseable_phrase`
-— a clean phrase previews and applies through the filter path; a failed
-parse leaves the filter untouched.
-* `escape_closes_ask_bar` — Esc dismisses Ask.
-* `cmd_f_switches_from_filter_bar_to_search` — the symmetric switch.
-* `cmd_l_from_grid_switches_open_search_to_filter` — the same switch
-through the grid's `Action::OpenFilter` path when focus is on the grid.
-* `filter_input_applies_on_enter` — `country == US` populates
-`filter_rows = [0, 2]` after the background pass.
-* `filter_parse_error_is_shown` — a bad expression sets
-`filter_error` and installs no rows.
-* `clear_filter_restores_document` — clearing restores the full
-record set and empties the input.
-* `filter_vertical_navigation_skips_hidden_rows` — with rows `[0, 2]`,
-Down from record 0 lands on record 2 and Up returns.
-* `filter_status_label_reports_counts` — the label reads "2 rows".
+- `arrow_keys_move_selection_when_grid_focused` — injects a ready
+  document, lets `render_grid` schedule the production deferred focus,
+  and asserts arrow keys move the cursor.
+- `copy_shortcut_reaches_handler_when_grid_focused` — same setup, then
+  dispatches Cmd/Ctrl+C and asserts the status message, the green flash
+  rectangle, and the exact TSV written to an injected clipboard recorder
+  (the real clipboard is never touched).
+- `drag_select_builds_rectangle` — synthesises a mouse-down on one cell,
+  a drag to another (via a test-only `debug_selector` on the grid list to
+  derive cell pixel centres), and a mouse-up, then asserts the selection
+  rectangle and a follow-up copy's TSV.
+- `drag_past_bottom_edge_starts_auto_scroll` — drags a 1000-row document
+  past the bottom edge and asserts the selection extended past the first
+  visible row and the list's scroll offset actually moved.
+- `auto_scroll_direction_detects_edges` — the pure above/inside/below
+  decision.
+- `cmd_f_opens_search_bar_when_grid_focused` — asserts the
+  Cmd/Ctrl+F chord flips `search_open` and leaves the query empty.
+- `search_bar_input_appends_and_skips_grid_navigation` — typing
+  characters into the open bar appends to the query without moving the
+  grid cursor.
+- `search_bar_backspace_drops_last_character` — Backspace removes the
+  last typed character without falling back to grid navigation.
+- `escape_closes_search_bar` — Escape clears the search state.
+- `escape_closes_filter_bar` — Escape closes the filter bar while it
+  has focus.
+- `escape_action_closes_filter_bar_when_grid_focused` — Escape still
+  closes the filter bar through the grid's `Action::Escape` after focus
+  returns to the grid (regression: that arm used to handle only search).
+- `filter_close_button_dismisses_bar` / `search_close_button_dismisses_bar`
+  — clicking the visible `×` dismisses each bar.
+- `search_populates_match_list` — `kick_search` populates
+  `search_matches` against the sample fixture (no matches for "foo").
+- `search_finds_real_matches_in_fixture` — `kick_search` against a
+  two-row fixture populates `search_matches = [0, 1]` and sets
+  `search_active = 0`.
+- `search_enter_cycles_through_matches` — Enter advances the active
+  match index; Shift+Enter wraps backward.
+- `f3_advances_match_without_opening_bar` — F3 / Shift-F3 cycle the
+  active match without touching the bar's open state or query.
+- `opening_new_document_clears_search_state` — `close_search` clears
+  all search state, mirroring what `apply` does on a new document.
+- `apply_ready_creates_one_tab` — a single `apply(Ready)` pushes one
+  snapshot and makes it active.
+- `two_sequential_applies_create_two_tabs` — two `apply(Ready)`
+  calls (the multi-file-drop path) create two tabs.
+- `error_with_open_tab_keeps_the_tab` — an error on a second open
+  does not clear the already-open tab; the message goes to the status
+  bar.
+- `push_two_documents_switches_to_last` — pushing a snapshot makes
+  it the active tab.
+- `switching_tabs_restores_per_document_state` — selection and
+  horizontal scroll survive a round-trip through another tab.
+- `closing_active_tab_picks_neighbour` — closing the active tab
+  selects a neighbour.
+- `closing_earlier_non_active_tab_shifts_active` — closing an
+  earlier inactive tab shifts the active index down.
+- `closing_last_tab_leaves_empty_state` — closing the only tab
+  resets to the empty document list.
+- `archive_entries_become_tabs_immediately` — `install_archive_tabs`
+  on a real three-entry ZIP creates all three tabs synchronously;
+  the first lazy-loads, switching to the second loads it, the third
+  stays pending.
+- `apply_need_archive_choice_installs_all_tabs` — the multi-entry
+  drop path installs all tabs and shows no modal picker.
+- `install_archive_tabs_marks_loaded_entry_as_ready` — when the
+  loader pre-opened a favourite, that entry's tab is ready and
+  active; the other is pending.
+- `cmd_b_toggles_file_panel` — Cmd/Ctrl+B flips `file_panel_open`
+  both ways through the grid keyboard path.
+- `group_documents_groups_by_archive_identity` — direct files are
+  top-level; ZIP entries nest under their archive keyed by `Arc`
+  identity.
+- `cmd_l_opens_filter_bar` — Cmd/Ctrl+L opens the filter bar.
+- `cmd_l_switches_from_search_bar_to_filter` — Cmd/Ctrl+L while the
+  search bar is focused closes search and opens filter in one step.
+- `cmd_shift_l_opens_ask_bar` — the chord opens Ask, not the plain
+  filter bar.
+- `ask_accepts_a_phrase_into_the_filter` / `ask_does_not_apply_an_unparseable_phrase`
+  — a clean phrase previews and applies through the filter path; a failed
+  parse leaves the filter untouched.
+- `escape_closes_ask_bar` — Esc dismisses Ask.
+- `cmd_f_switches_from_filter_bar_to_search` — the symmetric switch.
+- `cmd_l_from_grid_switches_open_search_to_filter` — the same switch
+  through the grid's `Action::OpenFilter` path when focus is on the grid.
+- `filter_input_applies_on_enter` — `country == US` populates
+  `filter_rows = [0, 2]` after the background pass.
+- `filter_parse_error_is_shown` — a bad expression sets
+  `filter_error` and installs no rows.
+- `clear_filter_restores_document` — clearing restores the full
+  record set and empties the input.
+- `filter_vertical_navigation_skips_hidden_rows` — with rows `[0, 2]`,
+  Down from record 0 lands on record 2 and Up returns.
+- `filter_status_label_reports_counts` — the label reads "2 rows".
 
 The focus tests were confirmed to fail when `.track_focus(&self.focus_handle)`
 is removed from the grid, the drag test when the cell `on_mouse_move`
@@ -1810,37 +1890,37 @@ Cmd/Ctrl+L, plain-L, Cmd/Ctrl+D, plain-D/Alt-D, and unbound keys). `src/ui/grid.
 warning membership and severity, and per-record dedup) plus three
 `render_row` smoke tests.
 
-| Group                  | Tests                                                                 |
-|------------------------|-----------------------------------------------------------------------|
-| CSV parsing            | normal, TSV, semicolon/pipe, quoted delimiter, quoted newline, escaped quotes, missing values, trailing delimiter, empty column, no trailing newline, headerless, single value, CRLF, wide (2,000 cols), long cell (1M chars), 100k rows |
-| Headers / diagnostics  | duplicate headers, empty headers, inconsistent rows, headerless detection |
-| Regression             | quoted comma in later column, embedded JSON quotes, unterminated quote, record_count vs offsets |
-| open_path dispatch     | direct CSV, rejects empty file                                         |
-| ZIP handling           | single CSV, multiple CSVs, ignores `__MACOSX`/`.DS_Store`, no supported files, path traversal rejected, duplicate names, corrupted zip, large compressed round-trip |
-| Loader                 | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed |
-| Selection model        | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API) |
-| Selection copy (TSV)   | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s |
-| Search                 | empty needle, single match, multi-match order, case-sensitive vs case-insensitive, column-scoped (in / out of bounds / column-0 vs column-1), `max_matches` cap, quoted commas, substring match — against real `ParsedDocument`s |
-| Filter                 | parse (header name / index / `#N`, unknown column, unknown operator, value-less ops, spaces in values), every operator, case folding, numeric ordering and non-numeric skips, missing cells as empty, AND composition, empty filter list; compound grammar (AND/OR precedence, parentheses, multi-word and quoted values, case-insensitive keywords, parse errors, OR dedup/short-circuit) — in `src/query/filter.rs` and `tests/core.rs` |
-| Type inference         | integer / float / boolean / text / empty, the 0.9 numeric threshold boundary, header-name fallback, all-empty column — in `src/schema.rs` |
-| Column statistics      | counts / empties, distinct + duplicates, numeric vs case-insensitive min/max, frequent ranking, samples, the exact→approximate threshold, headerless naming, out-of-range column — in `src/schema/stats.rs` |
-| Encoding               | invalid UTF-8 counted per column, BOM detection, invalid bytes in header vs data, `Cell::is_utf8` — in `src/encoding.rs` and `tests/core.rs` |
-| Header detection       | text/typed vote cases, ambiguous all-text fallback, forced `Header`/`Headerless`, `reindex` reuses the opened source, per-tab toolbar cycle, selection clamp, `colN` labels — in `src/parser/delimit.rs` and `tests/core.rs` |
-| Sort                   | numeric vs lexicographic, ascending/descending, empty-last in both directions, non-numeric-last in a numeric column, filter composition, stability, empty input — in `src/query/sort.rs` |
-| Filter autocomplete    | slot state machine (empty/partial column, operator, value, keyword, parens, multi-word values, caret mid-word, multibyte ranges, quoted partial) and candidate prefix filtering/dedup/cap — in `src/query/suggest.rs`; bounded, file-wide `sample_distinct` in `src/schema/stats.rs` |
-| Commands (binary)     | `commands::action_for` maps chords to `Action` intents (26 unit tests: copy / search / filter / panel chords, arrow / Page / Home / End / Cmd+Home / Cmd+End / Tab / Shift-Tab, F3, Esc, unbound keys) |
-| UI / focus (binary)    | arrow-key navigation reaches the grid; Cmd/Ctrl+Home/End jump to the first / last row; Tab / Shift-Tab walk adjacent cells; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder) |
-| UI / drag (binary)     | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection |
-| UI / search (binary)   | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state; the `Aa` toggle changes matches; a column scope limits matches and lands the cursor in the scoped column; Alt-clicking a header toggles the scope; `search_options()` reflects the toggles; the scope chip label falls back to `col0`; Home/End + Shift+Home caret/selection; mouse click/drag; a mid-string insert re-runs the live search; jumping to a far-right match scrolls it into view |
-| UI / tabs (binary)     | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; every usable ZIP entry becomes a tab synchronously; each pending tab lazy-loads on activation; a pre-opened favourite is the ready active tab |
-| UI / file panel (binary) | Cmd/Ctrl+B toggles the panel; `group_documents` nests ZIP entries under their archive by `Arc` identity; panel switch / close reuse the tab lifecycle |
-| UI / filter (binary)   | Cmd/Ctrl+L opens the bar; a valid predicate populates `filter_rows`; a parse error is shown and installs nothing; clearing restores the document; vertical navigation skips hidden rows; the status label reports the filtered count; Tab and Cmd/Ctrl+End walk the visible rows; the filter field supports Home/End caret movement, Shift+Home selection, Cmd/Ctrl+A + typing, and mouse click / drag selection |
-| Grid geometry (binary) | `rect_contains` inclusive bounds for the copy flash; `should_highlight` column-scope gate |
-| Text edit (binary)     | `TextEdit`: insert / replace-selection / backspace / delete / caret movement / selection / select-all / word movement / multibyte boundaries |
-| UI / sort (binary)     | a plain header click cycles sort none→asc→desc→none (with the resulting permutation asserted); sorting composes with an active filter |
-| UI / inspector (binary)| Cmd/Ctrl+I and the toolbar button toggle the panel; it scans the selected column; moving right rescans the new column; exact distinct and frequent ranking are reported |
-| UI / diagnostics (binary) | Cmd/Ctrl+D toggles the panel; the panel reads the active document's warnings; clicking a row warning moves the cursor to that record; a warning hidden by the active filter reports instead of moving; a header-level warning reports that there is no row; opening the panel kicks a background UTF-8 scan that names the offending column; changing document drops the cached report |
-| Performance (ignored)  | `measure_large_fixture`, `measure_filter_large_fixture`, `measure_sort_large_fixture` (require `fixtures/large.csv`) |
+| Group                     | Tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CSV parsing               | normal, TSV, semicolon/pipe, quoted delimiter, quoted newline, escaped quotes, missing values, trailing delimiter, empty column, no trailing newline, headerless, single value, CRLF, wide (2,000 cols), long cell (1M chars), 100k rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Headers / diagnostics     | duplicate headers, empty headers, inconsistent rows, headerless detection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Regression                | quoted comma in later column, embedded JSON quotes, unterminated quote, record_count vs offsets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| open_path dispatch        | direct CSV, rejects empty file                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ZIP handling              | single CSV, multiple CSVs, ignores `__MACOSX`/`.DS_Store`, no supported files, path traversal rejected, duplicate names, corrupted zip, large compressed round-trip                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Loader                    | auto-open CSV over README, two CSVs require choice, no data → error, archive name listed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Selection model           | empty/set/extend/clear, anchor preservation, clamp at document bounds, contains inside multi-record range (via public `anvil_core::Selection` API)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Selection copy (TSV)      | empty / single / rectangle / normalised-rectangle / embedded-newline / doubled-quote / missing-cells / cell_count — against real `ParsedDocument`s                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Search                    | empty needle, single match, multi-match order, case-sensitive vs case-insensitive, column-scoped (in / out of bounds / column-0 vs column-1), `max_matches` cap, quoted commas, substring match — against real `ParsedDocument`s                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Filter                    | parse (header name / index / `#N`, unknown column, unknown operator, value-less ops, spaces in values), every operator, case folding, numeric ordering and non-numeric skips, missing cells as empty, AND composition, empty filter list; compound grammar (AND/OR precedence, parentheses, multi-word and quoted values, case-insensitive keywords, parse errors, OR dedup/short-circuit) — in `src/query/filter.rs` and `tests/core.rs`                                                                                                                                                                                                                                                               |
+| Type inference            | integer / float / boolean / text / empty, the 0.9 numeric threshold boundary, header-name fallback, all-empty column — in `src/schema.rs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Column statistics         | counts / empties, distinct + duplicates, numeric vs case-insensitive min/max, frequent ranking, samples, the exact→approximate threshold, headerless naming, out-of-range column — in `src/schema/stats.rs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Encoding                  | invalid UTF-8 counted per column, BOM detection, invalid bytes in header vs data, `Cell::is_utf8` — in `src/encoding.rs` and `tests/core.rs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Header detection          | text/typed vote cases, ambiguous all-text fallback, forced `Header`/`Headerless`, `reindex` reuses the opened source, per-tab toolbar cycle, selection clamp, `colN` labels — in `src/parser/delimit.rs` and `tests/core.rs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Sort                      | numeric vs lexicographic, ascending/descending, empty-last in both directions, non-numeric-last in a numeric column, filter composition, stability, empty input — in `src/query/sort.rs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Filter autocomplete       | slot state machine (empty/partial column, operator, value, keyword, parens, multi-word values, caret mid-word, multibyte ranges, quoted partial) and candidate prefix filtering/dedup/cap — in `src/query/suggest.rs`; bounded, file-wide `sample_distinct` in `src/schema/stats.rs`                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Commands (binary)         | `commands::action_for` maps chords to `Action` intents (26 unit tests: copy / search / filter / panel chords, arrow / Page / Home / End / Cmd+Home / Cmd+End / Tab / Shift-Tab, F3, Esc, unbound keys)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| UI / focus (binary)       | arrow-key navigation reaches the grid; Cmd/Ctrl+Home/End jump to the first / last row; Tab / Shift-Tab walk adjacent cells; Cmd/Ctrl+C routes to the copy handler, sets the green flash rectangle, and writes the expected TSV (via an injected recorder)                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| UI / drag (binary)        | drag-select builds the expected rectangle and copies the whole block as TSV; dragging past the bottom edge scrolls and grows the selection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| UI / search (binary)      | Cmd/Ctrl+F opens the bar; typed characters append to the query; Backspace deletes; Esc closes; F3 / Shift-F3 cycle matches without opening the bar; the search list and active index are populated against real fixtures; Enter / Shift+Enter cycle matches; opening a new document clears search state; the `Aa` toggle changes matches; a column scope limits matches and lands the cursor in the scoped column; Alt-clicking a header toggles the scope; `search_options()` reflects the toggles; the scope chip label falls back to `col0`; Home/End + Shift+Home caret/selection; mouse click/drag; a mid-string insert re-runs the live search; jumping to a far-right match scrolls it into view |
+| UI / tabs (binary)        | `apply(Ready)` creates a tab; two sequential opens create two tabs; an error with an open tab keeps the tab; tab switch restores the per-document selection / scroll; closing the active tab picks a neighbour; closing an earlier inactive tab shifts the active index; closing the last tab returns to the empty state; every usable ZIP entry becomes a tab synchronously; each pending tab lazy-loads on activation; a pre-opened favourite is the ready active tab                                                                                                                                                                                                                                 |
+| UI / file panel (binary)  | Cmd/Ctrl+B toggles the panel; `group_documents` nests ZIP entries under their archive by `Arc` identity; panel switch / close reuse the tab lifecycle                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| UI / filter (binary)      | Cmd/Ctrl+L opens the bar; a valid predicate populates `filter_rows`; a parse error is shown and installs nothing; clearing restores the document; vertical navigation skips hidden rows; the status label reports the filtered count; Tab and Cmd/Ctrl+End walk the visible rows; the filter field supports Home/End caret movement, Shift+Home selection, Cmd/Ctrl+A + typing, and mouse click / drag selection                                                                                                                                                                                                                                                                                        |
+| Grid geometry (binary)    | `rect_contains` inclusive bounds for the copy flash; `should_highlight` column-scope gate                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Text edit (binary)        | `TextEdit`: insert / replace-selection / backspace / delete / caret movement / selection / select-all / word movement / multibyte boundaries                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| UI / sort (binary)        | a plain header click cycles sort none→asc→desc→none (with the resulting permutation asserted); sorting composes with an active filter                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| UI / inspector (binary)   | Cmd/Ctrl+I and the toolbar button toggle the panel; it scans the selected column; moving right rescans the new column; exact distinct and frequent ranking are reported                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| UI / diagnostics (binary) | Cmd/Ctrl+D toggles the panel; the panel reads the active document's warnings; clicking a row warning moves the cursor to that record; a warning hidden by the active filter reports instead of moving; a header-level warning reports that there is no row; opening the panel kicks a background UTF-8 scan that names the offending column; changing document drops the cached report                                                                                                                                                                                                                                                                                                                  |
+| Performance (ignored)     | `measure_large_fixture`, `measure_filter_large_fixture`, `measure_sort_large_fixture` (require `fixtures/large.csv`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 In addition, `src/selection.rs` carries 32 unit tests for the
 selection type itself (`cargo test --release --lib selection`): the
@@ -1891,44 +1971,50 @@ stick) is the safer trade.
 
 ## Important Dependencies
 
-| Dependency          | Version | Responsibility                                  | Why it is here                         | Architectural constraint                             |
-|---------------------|---------|-------------------------------------------------|----------------------------------------|------------------------------------------------------|
-| `gpui`              | 0.2.2   | UI framework                                     | The product is a GPUI app              | All UI code lives in `src/ui/`; cannot use it from `anvil_core`. The generic entry keeps only `font-kit`; target entries add `x11` + `wayland` on Linux and `windows-manifest` on Windows |
-| `rfd`               | 0.17    | Native file-open dialog                          | Click-to-open affordance               | Only used in `view.rs::pick_file`; sync API. On Linux a target-specific entry selects the pure-Rust `xdg-portal` backend so the build script does not panic |
-| `memchr`            | 2       | SIMD-accelerated `memchr` for byte scanning      | Indexer needs `\n` searches            | Used in `delimit.rs` and `indexing.rs`; tiny API     |
-| `memmap2`           | 0.9     | Memory-mapped file handle                        | Bounded memory + random access         | Wrapped in `MmapSource`; `unsafe` mmap is centralised |
-| `zip`               | 2.4     | ZIP reading / writing                            | Required archive format                | `deflate` and `bzip2` features only; encryption not supported |
-| `tempfile`          | 3       | Auto-cleaned temporary directories              | Temp-file extraction for ZIP entries   | `Arc<TempDir>` lifecycle is part of `OpenedSource`   |
-| `thiserror`         | 1       | Error enum derive                                | Typed errors                           | None                                                  |
-| `arboard`           | 3       | Cross-platform clipboard (text only)             | Cmd/Ctrl+C clipboard copy              | `default-features = false` to skip image support; used only by the `anvil` binary |
-| `crc32fast` (dev)   | 1       | CRC32                                            | Build hand-crafted ZIPs in tests       | Test-only                                           |
-| `gpui` (dev)        | 0.2.2   | Headless UI test harness (`test-support`)        | UI focus / keyboard regression tests   | Dev-only; release builds keep the minimal `gpui` surface. Pulls in a large transitive tree (reqwest, git2, image, …) so `cargo test` is heavier than `cargo build` |
-| `candle-core` / `candle-transformers` (optional) | 0.11 | Tensor + model runtime | The Tier 2 backends run locally with no Python or ONNX runtime | Compiled only with `nl-model` or `nl-gliner`; absent from the default build |
-| `tokenizers` / `gliner-tokenizers` (optional) | 0.23 / 0.22 | Tokenisation for the Tier 2 backends | Model input | `gliner-tokenizers` renames the same crate at 0.22 because `gliner-rs` pins that version; both stay optional |
-| `ureq` (optional) | 2 | Model download | First-use fetch from a pinned revision | Reached only by the explicit setup path, never by normal rendering |
-| `gliner-rs` (optional) | =0.2.3 | GLiNER extraction backend | `nl-gliner` label extraction | Pinned exactly; also compiles upstream CLI dependencies |
-| `serde_json` (optional) | 1 | Parse GLiNER extraction output | Validate model output before it becomes a query | `nl-gliner` only |
+| Dependency                                       | Version     | Responsibility                                                    | Why it is here                                                 | Architectural constraint                                                                                                                                    |
+| ------------------------------------------------ | ----------- | ----------------------------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gpui-kit`                                       | =0.7.0      | Runtime facade, themed components, assets and native window setup | Coherent native investigation workspace                        | Single direct UI dependency; all framework/component/assets imports use `gpui_kit`. Lockfile runtime is `gpui-pre` 0.3.7; data modules remain GUI-free      |
+| `rfd`                                            | 0.17        | Native file-open dialog                                           | Click-to-open affordance                                       | Only used in `view.rs::pick_file`; sync API. On Linux a target-specific entry selects the pure-Rust `xdg-portal` backend so the build script does not panic |
+| `memchr`                                         | 2           | SIMD-accelerated `memchr` for byte scanning                       | Indexer needs `\n` searches                                    | Used in `delimit.rs` and `indexing.rs`; tiny API                                                                                                            |
+| `memmap2`                                        | 0.9         | Memory-mapped file handle                                         | Bounded memory + random access                                 | Wrapped in `MmapSource`; `unsafe` mmap is centralised                                                                                                       |
+| `zip`                                            | 2.4         | ZIP reading / writing                                             | Required archive format                                        | `deflate` and `bzip2` features only; encryption not supported                                                                                               |
+| `tempfile`                                       | 3           | Auto-cleaned temporary directories                                | Temp-file extraction for ZIP entries                           | `Arc<TempDir>` lifecycle is part of `OpenedSource`                                                                                                          |
+| `thiserror`                                      | 1           | Error enum derive                                                 | Typed errors                                                   | None                                                                                                                                                        |
+| `arboard`                                        | 3           | Cross-platform clipboard (text only)                              | Cmd/Ctrl+C clipboard copy                                      | `default-features = false` to skip image support; used only by the `anvil` binary                                                                           |
+| `crc32fast` (dev)                                | 1           | CRC32                                                             | Build hand-crafted ZIPs in tests                               | Test-only                                                                                                                                                   |
+| `gpui-kit` (dev)                                 | =0.7.0      | Matching headless UI harness (`test-support`)                     | UI regression tests                                            | Same facade/runtime as release; use `TestAppContext` and `#[gpui_kit::test]`                                                                                |
+| `candle-core` / `candle-transformers` (optional) | 0.11        | Tensor + model runtime                                            | The Tier 2 backends run locally with no Python or ONNX runtime | Compiled only with `nl-model` or `nl-gliner`; absent from the default build                                                                                 |
+| `tokenizers` / `gliner-tokenizers` (optional)    | 0.23 / 0.22 | Tokenisation for the Tier 2 backends                              | Model input                                                    | `gliner-tokenizers` renames the same crate at 0.22 because `gliner-rs` pins that version; both stay optional                                                |
+| `ureq` (optional)                                | 2           | Model download                                                    | First-use fetch from a pinned revision                         | Reached only by the explicit setup path, never by normal rendering                                                                                          |
+| `gliner-rs` (optional)                           | =0.2.3      | GLiNER extraction backend                                         | `nl-gliner` label extraction                                   | Pinned exactly; also compiles upstream CLI dependencies                                                                                                     |
+| `serde_json` (optional)                          | 1           | Parse GLiNER extraction output                                    | Validate model output before it becomes a query                | `nl-gliner` only                                                                                                                                            |
 
 Notes:
 
-- `gpui` is built with `default-features = false`. The generic
-  entry keeps only `font-kit`; target-specific entries re-add the
-  platform features the release binary needs (`x11` + `wayland` on
-  Linux, `windows-manifest` on Windows). This avoids pulling in GPUI's
-  HTTP / media / refineable features we do not use. If further
-  features are added the `Cargo.toml` change must be reviewed.
-- The dev-dependency enables `test-support` so `TestAppContext` is
-  available in `#[gpui::test]` tests. Feature unification is per
-  build; `cargo build --release` does not enable it (verified: the
-  release build finishes without recompiling `gpui`). The cost is
-  paid only by `cargo test`.
-- The default build has no `serde`, no `tokio`, no `log` and no
-  `tracing`. `serde_json` arrives only with the optional `nl-gliner`
-  feature. The architecture is deliberately small.
+- Kit replaces the old direct `gpui` 0.2.2 dependencies and their
+  target-specific feature entries. Platform setup now comes through Kit's
+  facade/default platform stack; do not restore a second runtime.
+- The matching Kit dev-dependency enables `test-support`, exposing
+  `TestAppContext` and `#[gpui_kit::test]`. Dependency/backend changes
+  require fresh build/test/native evidence; old 0.2.2 results do not
+  validate the new runtime.
+- Optional local-model dependencies remain feature-gated. Kit's
+  transitive tree includes serialization, async and logging crates;
+  the old claim that the default dependency graph has none is no longer
+  accurate. Data modules still do not import GUI APIs.
 
 ## Current Limitations / Technical Debt
 
 ### Cross-platform build and Linux GUI backend
+
+**Redesign status:** the current dependency is Kit 0.7.0 with
+`gpui-pre` 0.3.7; Kit owns platform feature setup. Final redesigned-shell
+build/test/probe and native evidence remain to be recorded by the parent
+iteration. Linux/macOS native redesign workflows are not signed off.
+
+**Historical backend fixes (pre-Kit):** the following records the old
+GPUI 0.2.2 configuration and CI evidence, not current Cargo feature
+entries or proof of Kit runtime validation.
 
 `.github/workflows/ci.yml` builds, tests and probes on Linux, macOS
 and Windows. `cargo test` enables GPUI's dev-only `test-support`
@@ -1969,8 +2055,8 @@ On Windows, the release binary failed to start with
 `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139). GPUI's default feature set
 includes `windows-manifest`, which embeds
 `resources/windows/gpui.manifest.xml` (the common-controls v6 binding);
-the project's global `default-features = false` dropped it. A
-`[target.'cfg(target_os = "windows")'.dependencies]` entry now enables
+the project's old global `default-features = false` dropped it. A
+`[target.'cfg(target_os = "windows")'.dependencies]` entry then enabled
 `font-kit` + `windows-manifest` for the Windows release binary. The
 Windows CI leg is the verification: it runs the release `anvil --probe`
 after building and testing.
@@ -2009,8 +2095,10 @@ takes precedence over the existing generative backend.
   into `ui/view/{inspector,cell_detail,sort}.rs`; the follow-up moved
   the tab strip, file panel, and grid/scrollbar rendering into
   `ui/view/{tab_strip,file_panel,grid_area}.rs`. `view.rs` now owns the
-  `MainView` state, open orchestration, the toolbar, status bar and
-  centre/overlay composition. Further extraction is optional.
+  `MainView` state, open orchestration, status bar and centre composition.
+  The Kit redesign adds `shell.rs`, `workspace.rs` and `archive_dialog.rs`
+  for chrome, resizable geometry and modal lifecycle. Further extraction
+  is optional; historical line counts are not current sizing guidance.
 
 - Selection (click / shift-click / click-and-drag with edge
   auto-scroll), keyboard navigation (arrow keys, Page Up/Down,
@@ -2038,14 +2126,14 @@ takes precedence over the existing generative backend.
   not light up unrelated columns on a match row.
 - The filter and search inputs are real editable fields
   (`ui::text_edit::TextEdit` with caret, selection, mouse click/drag,
-  and word movement). The only remaining editing gaps are caret blink
-  and in-field horizontal scroll when the text is wider than the field.
-- The file panel is fixed on the left and a fixed width; it cannot
-  be dragged, moved to the right, or collapsed to an icon rail. It
-  shows a flat two-level tree (archive → entry) rather than nested
-  directories, and there is no tab reordering. Long labels are
-  truncated with an ellipsis but there is no tooltip. Recorded as a
-  follow-up.
+  and word movement). Editing gaps include native IME/composition,
+  caret blink and in-field horizontal scroll when text exceeds the field.
+  Retaining `TextEdit` during the Kit redesign is intentional.
+- The Files panel stays on the left but is now resizable through Kit;
+  it cannot be moved to the right or collapsed to an icon rail. It
+  shows a flat two-level tree (archive → entry), not nested directories,
+  and there is no tab reordering. Long navigation labels are elided with
+  full-name tooltips and separate focusable selection/close Buttons.
 - Every usable ZIP entry gets a tab eagerly. A ZIP with hundreds of
   entries therefore creates hundreds of (initially unloaded) tabs.
   Lazy loading keeps memory bounded to the tabs the user actually
@@ -2069,8 +2157,10 @@ takes precedence over the existing generative backend.
   jumps the grid to the offending record on click. Richer warning
   types (very-long records) and per-row grid highlighting are
   outstanding. Milestone 4.
-- No progress UI for extraction / indexing. Milestone 5.
-- No themes, no light mode. Milestone 5.
+- Extraction/indexing progress UI is implemented (see Loading progress).
+- Slate/Warm themes and a light/dark toggle are implemented; persisted
+  appearance preference is not. Native visual acceptance of the redesign
+  remains open, including minimum-size and both-appearance review.
 - UI coverage is now eighty-three UI regression tests (focus, copy,
   drag, auto-scroll, search bar, search options, filter/search text
   editing, filter autocomplete, bar dismissal via Esc and ×, sort,
@@ -2182,21 +2272,21 @@ change architecture and update this file.
     silently disables every grid shortcut. The UI regression tests
     in `src/ui/view.rs` fail if this regresses.
 12. **Display and copy are byte-faithful.** A value rendered in the
-grid, shown in the inspector, or copied to the clipboard is the exact
-cell value: no trimming, no numeric reformatting, no truncation, and
-no lossy decoding. Cells that are not valid UTF-8 go through
-`parser::exact_string`, which returns valid UTF-8 borrowed and
-otherwise escapes (`\\` for a backslash, `\xNN` per invalid byte).
-`Cell::as_str` and `Cell::into_string` are lossy and are internal-only:
-never use them for display or clipboard. This covers the grid, the
-inspector, the clipboard, `--probe` sample rows and the header row
-(`ParseMeta.headers` is built with `exact_string`). Grid ellipsis
-(`truncate()`) is a layout concern and never changes the underlying
-value. The full-cell panel uses `exact_string_capped`, which returns
-the same escaped form for at most the first 32 KiB so a multi-MB cell
-cannot force the UI to shape megabytes of text; the panel reports the
-cap. See ADR 0003; this invariant has regression tests in
-`tests/core.rs` and `schema::stats`.
+    grid, shown in the inspector, or copied to the clipboard is the exact
+    cell value: no trimming, no numeric reformatting, no truncation, and
+    no lossy decoding. Cells that are not valid UTF-8 go through
+    `parser::exact_string`, which returns valid UTF-8 borrowed and
+    otherwise escapes (`\\` for a backslash, `\xNN` per invalid byte).
+    `Cell::as_str` and `Cell::into_string` are lossy and are internal-only:
+    never use them for display or clipboard. This covers the grid, the
+    inspector, the clipboard, `--probe` sample rows and the header row
+    (`ParseMeta.headers` is built with `exact_string`). Grid ellipsis
+    (`truncate()`) is a layout concern and never changes the underlying
+    value. The full-cell panel uses `exact_string_capped`, which returns
+    the same escaped form for at most the first 32 KiB so a multi-MB cell
+    cannot force the UI to shape megabytes of text; the panel reports the
+    cap. See ADR 0003; this invariant has regression tests in
+    `tests/core.rs` and `schema::stats`.
 
 ## Planned Architectural Evolution
 
@@ -2210,9 +2300,9 @@ restructuring. Specifically:
   normalization, fuzzy column matching, `between` ranges, and more
   operator synonyms. It also recognizes row-scope phrasing such as
   `any column is empty`, `at least one column is blank`, `every column
-  is filled`, and `no column is empty` (which flips to `all notempty`),
+is filled`, and `no column is empty` (which flips to `all notempty`),
   in either column-first or row-first form (`any row that has an empty
-  column`, `rows with no blank cells`), emitting `FilterExpr::AnyColumn`
+column`, `rows with no blank cells`), emitting `FilterExpr::AnyColumn`
   / `AllColumn` without touching the per-column value samples. The
   row-first matcher requires an `<empty-word> <column-word>` ending so
   ordinary `rows with amount over 100` still falls through. `Cmd/Ctrl+Shift+L` opens the Ask bar
@@ -2255,7 +2345,7 @@ restructuring. Specifically:
 - **Search (Milestone 2).** `query::search` (in
   `anvil_core::query`) owns the streaming search:
   `pub fn search(doc: &ParsedDocument, needle: &str, opts:
-  &SearchOptions) -> Vec<u64>` returns the matching record indexes in
+&SearchOptions) -> Vec<u64>` returns the matching record indexes in
   record order, walking each record's bytes through `Cells::new`
   (which handles quoting / escapes) and matching with
   `memchr::memmem::Finder`. Case-insensitive matching is the default
@@ -2263,12 +2353,12 @@ restructuring. Specifically:
   of the cell. `SearchOptions { case_sensitive, column, max_matches }`
   carries the toggle / scope / cap. `MainView` owns
   `search_open / search_query / search_matches / search_active /
-  search_generation / search_case_sensitive / search_column /
-  search_task / search_focus_handle / focus_search_on_next_frame`,
+search_generation / search_case_sensitive / search_column /
+search_task / search_focus_handle / focus_search_on_next_frame`,
   mirrored per tab on `DocumentSnapshot`. `MainView::search_options()`
   is the single source of truth for the options, used by both the
   background search and the grid highlight pass so they cannot
-drift. Cmd/Ctrl+F opens the bar (the grid's
+  drift. Cmd/Ctrl+F opens the bar (the grid's
   `Action::OpenSearch` arm); every typed character spawns a
   background `cx.spawn` task that runs `query::search`; the task
   carries the generation so obsolete runs are discarded by an
@@ -2280,12 +2370,12 @@ drift. Cmd/Ctrl+F opens the bar (the grid's
   is visible. Match rows are tinted `BG_MATCH`; the active row uses
   the stronger `BG_MATCH_ACTIVE`; the literal matched substring
   inside each cell is drawn with a brighter `BG_MATCH_TEXT`
-  background so the user can see *where* in the row the match is.
+  background so the user can see _where_ in the row the match is.
   The byte ranges come from `anvil_core::find_ranges`, called per
   visible cell of a match row. The bar's focus handle is
   independent of the grid's, so typed characters route through
   `on_search_key_down` rather than moving the cursor. Cmd/Ctrl+F is
-  a no-op when the bar is already open; when the *filter* bar is open
+  a no-op when the bar is already open; when the _filter_ bar is open
   (and focused, or with focus on the grid) it switches to search,
   closing the filter bar first. Cmd/Ctrl+L performs the symmetric
   switch from search to filter via `MainView::switch_to_search` /
@@ -2323,7 +2413,7 @@ drift. Cmd/Ctrl+F opens the bar (the grid's
   requires every cell; evaluation reuses one prepared predicate and the
   `Cell` borrow, short-circuiting on the first match / mismatch.
   `parse` turns a one-line single predicate (`<column> <op>
-  [value]`, where column is a header name, a 0-based index, or `#N`)
+[value]`, where column is a header name, a 0-based index, or `#N`)
   into a `Filter`. `FilterExpr` is an AND/OR/NOT tree: `parse_expr` is
   a recursive-descent parser over a small tokenizer (`(`, `)`, unquoted
   case-insensitive `AND`/`OR`/`NOT`, and words; quoted values may
@@ -2379,27 +2469,27 @@ drift. Cmd/Ctrl+F opens the bar (the grid's
 - **Type inference and statistics (Milestone 3).**
   `anvil_core::schema::infer` samples each column (bounded to 2048
   rows) and returns `ColumnProfile { name, column_type, non_empty,
-  numeric_fraction, .. }`; `schema::infer_column_rows` does the same
+numeric_fraction, .. }`; `schema::infer_column_rows` does the same
   over an explicit filtered/sorted row set so the inspector's type is
   scoped like its stats. `schema::stats` builds a full `ColumnStats`
   per column. Both currently run inside the tasks that need them (sort
   and inspector); caching the profiles on the document at open, and
   adding date/UUID/email/URL classification, remain optional
   follow-ups.
-- **Column inspector (Milestone 3, landed).** A right-side
-  `flex_shrink_0` panel (`theme::INSPECTOR_WIDTH`) sits beside the
-  grid body. `Cmd/Ctrl+I` and the toolbar **Inspector** button toggle
+- **Column inspector (Milestone 3, landed).** The shared right-side
+  Kit resizable auxiliary slot hosts Column alongside the grid.
+  `Cmd/Ctrl+I` and the toolbar **Columns** button toggle
   it; `MainView::kick_inspector` runs `column_stats` on the background
   executor, guarded by `inspector_generation`, and rescans only when
   the selected column changes (so vertical navigation is free). It
   follows the selection and reports exact vs approximate distinct,
   min/max, longest/shortest, samples, and frequent values. The grid's
   synchronously-computed viewport means the panel narrows the grid in
-  the same frame it opens, with no scroll-math changes. Stats scan the
-  whole document, not the
-  filtered/sorted view (a follow-up).
-- **Diagnostics (Milestone 4, landed).** A right-side
-  `flex_shrink_0` panel (`theme::DIAGNOSTICS_WIDTH`) lists the active
+  the same frame it opens through shared workspace geometry. Stats and
+  inferred type use the current filtered/sorted row-reference view when
+  active, otherwise the whole document.
+- **Diagnostics (Milestone 4, landed).** The shared right-side
+  Kit resizable auxiliary slot lists the active
   document's immutable `ParseMeta.warnings`; Cmd/Ctrl+D and the
   toolbar **Diagnostics** button toggle it. Warnings need no
   background work; the panel also kicks an `encoding::scan` on the

@@ -5,6 +5,9 @@
 //! and `CellDetail` type live on `MainView` in `view.rs`; only the
 //! methods are split out here.
 
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable};
+
 use super::*;
 
 impl MainView {
@@ -23,6 +26,8 @@ impl MainView {
         if self.model.is_none() {
             return;
         }
+        self.inspector_open = false;
+        self.diagnostics_open = false;
         self.cell_detail_open = true;
         self.kick_cell_detail(cx);
     }
@@ -96,71 +101,109 @@ impl MainView {
     /// The full-cell panel: the cursor cell's exact value, capped and
     /// labelled when the cap is hit.
     pub(super) fn render_cell_detail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .child(div().text_color(theme::TEXT_STRONG).child("Cell"))
-            .child(
-                div()
-                    .id("cell-detail-close")
-                    .cursor_pointer()
-                    .px_1()
-                    .text_color(theme::TEXT_DIM)
-                    .hover(|s| s.text_color(theme::WARN))
-                    .on_click(cx.listener(|this, _, _, cx| this.close_cell_detail(cx)))
-                    .child("×"),
-            );
-        let body: Vec<AnyElement> = match &self.cell_detail {
-            Some(detail) => vec![
-                div()
-                    .text_color(theme::TEXT_STRONG)
-                    .child(format!(
-                        "{} (row {}, col {})",
-                        detail.label,
-                        detail.record + 1,
-                        detail.column + 1
-                    ))
-                    .into_any_element(),
-                div()
-                    .text_xs()
-                    .text_color(theme::TEXT_DIM)
-                    .child(if detail.truncated {
+        let colors = theme::palette(cx);
+        let header = panel::header(
+            colors,
+            IconName::FileText,
+            "Cell",
+            Button::new("cell-detail-close")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .accessibility_label("Close cell")
+                .tooltip("Close cell")
+                .on_click(cx.listener(|this, _, _, cx| this.close_cell_detail(cx))),
+        );
+        let content: Vec<AnyElement> = match &self.cell_detail {
+            Some(detail) => {
+                let mut out = vec![
+                    panel::title_block(
+                        cx,
+                        colors,
+                        detail.label.clone(),
                         format!(
-                            "showing first {} of {} (capped)",
-                            archive_picker::format_size(CELL_DETAIL_CAP as u64),
-                            archive_picker::format_size(detail.total_bytes)
+                            "Row {} · Column {}",
+                            format_count(detail.record + 1),
+                            format_count((detail.column + 1) as u64)
+                        ),
+                    )
+                    .into_any_element(),
+                    panel::caption_owned(
+                        colors,
+                        if detail.truncated {
+                            format!(
+                                "Preview capped at {} of {} bytes",
+                                format_count(CELL_DETAIL_CAP as u64),
+                                format_count(detail.total_bytes)
+                            )
+                        } else {
+                            format!("{} bytes, exact value", format_count(detail.total_bytes))
+                        },
+                    )
+                    .into_any_element(),
+                ];
+                // The value itself: the whole point of the panel, so it gets
+                // the surface, the monospace face and the room.
+                out.push(
+                    div()
+                        .id("cell-detail-body")
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .mx(px(panel::BODY_PAD_X))
+                        .overflow_y_scroll()
+                        .rounded(cx.theme().radius_tokens().sm)
+                        .bg(theme::blend(colors.panel, colors.canvas, 0.6))
+                        .border_1()
+                        .border_color(colors.border)
+                        .child(
+                            div()
+                                .p(px(8.))
+                                .min_w_0()
+                                .whitespace_normal()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_xs()
+                                .line_height(px(17.))
+                                .text_color(if detail.text.is_empty() {
+                                    colors.empty_foreground
+                                } else {
+                                    colors.foreground
+                                })
+                                .child(if detail.text.is_empty() {
+                                    "Empty value, 0 bytes".to_string()
+                                } else {
+                                    detail.text.clone()
+                                }),
                         )
-                    } else {
-                        archive_picker::format_size(detail.total_bytes)
-                    })
-                    .into_any_element(),
-                div()
-                    .id("cell-detail-body")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(div().text_color(theme::TEXT).child(detail.text.clone()))
-                    .into_any_element(),
-            ],
-            None => vec![div()
-                .text_color(theme::TEXT_DIM)
-                .child("Reading cell…")
-                .into_any_element()],
+                        .into_any_element(),
+                );
+                out
+            }
+            None => vec![panel::empty_state(
+                colors,
+                if self.model.is_some() {
+                    "Reading cell"
+                } else {
+                    "No document open"
+                },
+                if self.model.is_some() {
+                    "The exact value of the cursor cell appears here."
+                } else {
+                    "Open a data file to inspect a cell's value."
+                },
+            )],
         };
         div()
-            .flex_shrink_0()
-            .w(theme::CELL_DETAIL_WIDTH)
+            .w_full()
+            .min_w_0()
             .h_full()
+            .font_family(cx.theme().font_family.clone())
+            .text_sm()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3()
-            .bg(theme::BG_PANEL)
-            .border_l_1()
-            .border_color(theme::BORDER)
+            .bg(colors.panel)
             .child(header)
-            .children(body)
+            .child(panel::body("cell-detail-scroll", content))
             .into_any_element()
     }
 }

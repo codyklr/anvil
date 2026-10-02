@@ -10,6 +10,9 @@
 
 use anvil_core::WarningKind;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable};
+
 use super::*;
 
 impl MainView {
@@ -18,125 +21,144 @@ impl MainView {
     /// header-level warning (`record_index == None`) is informational
     /// only and not clickable.
     pub(super) fn render_diagnostics(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::palette(cx);
         let warnings = self
             .model
             .as_ref()
             .map(|m| m.doc.meta.warnings.as_slice())
             .unwrap_or(&[]);
 
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .px_3()
-            .h(theme::HEADER_HEIGHT)
-            .border_b_1()
-            .border_color(theme::BORDER)
-            .text_color(theme::TEXT_STRONG)
-            .child("Diagnostics")
-            .child(
-                div()
-                    .id("diagnostics-close")
-                    .cursor_pointer()
-                    .text_color(theme::TEXT_DIM)
-                    .hover(|s| s.text_color(theme::WARN))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diagnostics(cx)))
-                    .child("×"),
-            );
+        let header = panel::header(
+            colors,
+            IconName::TriangleAlert,
+            "Diagnostics",
+            Button::new("diagnostics-close")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .accessibility_label("Close diagnostics")
+                .tooltip("Close diagnostics")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_diagnostics(cx))),
+        );
 
-        let warnings_body: AnyElement = if warnings.is_empty() {
-            div()
-                .p_3()
-                .text_color(theme::TEXT_DIM)
-                .child("no parse warnings")
-                .into_any_element()
+        let mut content: Vec<AnyElement> = vec![panel::title_block(
+            cx,
+            colors,
+            "Parse warnings".to_string(),
+            format!(
+                "{} warning{} in {}",
+                format_count(warnings.len() as u64),
+                plural(warnings.len() as u64),
+                self.model
+                    .as_ref()
+                    .map(|m| format_count(m.row_count()))
+                    .unwrap_or_else(|| "0 rows".into())
+            ),
+        )
+        .into_any_element()];
+
+        if warnings.is_empty() {
+            content.push(panel::caption(colors, "None found").into_any_element());
         } else {
-            let mut rows: Vec<AnyElement> = Vec::with_capacity(warnings.len());
             for (index, warning) in warnings.iter().enumerate() {
-                let navigable = warning.record_index.is_some();
-                let index_label = match warning.record_index {
-                    Some(record) => format!("row {}", record + 1),
-                    None => "header".to_string(),
-                };
-                let mut row = div()
-                    .id(("diagnostic-row", index))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(theme::BORDER)
-                    .when(navigable, |this| {
-                        this.cursor_pointer().hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::WARN)
-                                    .child(warning_kind_label(warning.kind)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::TEXT_DIM)
-                                    .child(index_label),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if navigable {
-                                theme::TEXT
-                            } else {
-                                theme::TEXT_DIM
-                            })
-                            .child(warning.note.clone()),
-                    );
-                if navigable {
-                    row = row.on_click(
-                        cx.listener(move |view, _, _, cx| view.jump_to_warning(index, cx)),
-                    );
-                }
-                rows.push(row.into_any_element());
+                content.push(self.warning_row(cx, colors, warning, index));
             }
-            div().flex().flex_col().children(rows).into_any_element()
-        };
+        }
 
-        let body: AnyElement = div()
-            .flex()
-            .flex_col()
-            .child(section_heading("parse warnings"))
-            .child(warnings_body)
-            .child(section_heading("encoding"))
-            .child(self.render_encoding_section())
-            .into_any_element();
+        content.push(panel::section(colors, "Encoding").into_any_element());
+        content.extend(self.encoding_content(cx));
 
         div()
-            .flex_shrink_0()
-            .w(theme::DIAGNOSTICS_WIDTH)
+            .w_full()
+            .min_w_0()
             .h_full()
+            .font_family(cx.theme().font_family.clone())
+            .text_sm()
             .flex()
             .flex_col()
-            .bg(theme::BG_PANEL)
-            .border_l_1()
-            .border_color(theme::BORDER)
+            .bg(colors.panel)
             .child(header)
+            .child(panel::body("diagnostics-body", content))
+            .into_any_element()
+    }
+
+    /// One parse warning. Navigable rows are one clickable unit: the whole
+    /// row is the hit area, and the row number doubles as the affordance.
+    fn warning_row(
+        &self,
+        cx: &mut Context<Self>,
+        colors: theme::Palette,
+        warning: &anvil_core::ParseWarning,
+        index: usize,
+    ) -> AnyElement {
+        let navigable = warning.record_index.is_some();
+        let location = match warning.record_index {
+            Some(record) => format!("Row {}", format_count(record + 1)),
+            None => "Header".to_string(),
+        };
+        div()
+            .id(("diagnostic-row", index))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .mx(px(panel::BODY_PAD_X))
+            .my(px(1.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded(cx.theme().radius_tokens().sm)
+            .bg(if navigable {
+                theme::blend(colors.panel, colors.canvas, 0.6)
+            } else {
+                colors.panel
+            })
+            .border_1()
+            .border_color(if navigable {
+                colors.border
+            } else {
+                colors.panel
+            })
+            .cursor(if navigable {
+                gpui_kit::CursorStyle::PointingHand
+            } else {
+                gpui_kit::CursorStyle::Arrow
+            })
+            .when(navigable, |row| {
+                row.hover(|style| style.bg(theme::blend(colors.panel, colors.foreground, 0.06)))
+            })
+            .on_click(cx.listener(move |view, _, _, cx| view.jump_to_warning(index, cx)))
             .child(
                 div()
-                    .id("diagnostics-body")
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(body),
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(colors.foreground)
+                            .child(warning_kind_label(warning.kind)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .font_family(panel::mono(cx))
+                            .text_color(if navigable {
+                                colors.primary
+                            } else {
+                                colors.faint_foreground
+                            })
+                            .child(location),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(colors.muted_foreground)
+                    .child(warning.note.clone()),
             )
             .into_any_element()
     }
@@ -145,47 +167,55 @@ impl MainView {
     /// row per column with non-UTF-8 cells, or a clean/scanning status.
     /// These findings are column-level, so unlike parse warnings they
     /// have no row to navigate to.
-    fn render_encoding_section(&self) -> AnyElement {
+    fn encoding_content(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let colors = theme::palette(cx);
         let Some(report) = self.encoding_report.as_ref() else {
             let text = if self.encoding_task.is_some() {
-                "scanning…"
+                "Scanning for non-UTF-8 values..."
+            } else if self.model.is_some() {
+                "Encoding has not been scanned"
             } else {
-                "not scanned"
+                "No document to scan"
             };
-            return div()
-                .px_3()
-                .py_2()
-                .text_xs()
-                .text_color(theme::TEXT_DIM)
-                .child(text)
-                .into_any_element();
+            return vec![panel::caption(colors, text).into_any_element()];
         };
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        if report.bom {
-            rows.push(encoding_row(
-                "UTF-8 BOM",
-                "first header cell includes the BOM",
-            ));
-        }
-        for column in &report.columns {
-            rows.push(encoding_row(
-                &column.name,
-                &format!("{} non-UTF-8 cell(s)", column.invalid_cells),
-            ));
-        }
-        if rows.is_empty() {
+        if report.has_invalid_utf8() {
             rows.push(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(theme::TEXT_DIM)
-                    .child("clean UTF-8")
+                panel::caption_owned(
+                    colors,
+                    format!(
+                        "{} invalid cells, shown as reversible escapes",
+                        format_count(report.total_invalid_cells())
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        if report.bom {
+            rows.push(
+                panel::metric(cx, colors, "UTF-8 BOM", "present in first header")
                     .into_any_element(),
             );
         }
-        div().flex().flex_col().children(rows).into_any_element()
+        for column in &report.columns {
+            rows.push(
+                panel::metric(
+                    cx,
+                    colors,
+                    &column.name,
+                    &format!("{} invalid", format_count(column.invalid_cells)),
+                )
+                .into_any_element(),
+            );
+        }
+        if rows.is_empty() {
+            rows.push(
+                panel::caption(colors, "All scanned values are valid UTF-8").into_any_element(),
+            );
+        }
+        rows
     }
 
     /// Move the selection to the warning's row and scroll it into view.
@@ -237,58 +267,13 @@ impl MainView {
     }
 }
 
-/// A small section heading inside the diagnostics panel.
-fn section_heading(title: &str) -> AnyElement {
-    div()
-        .px_3()
-        .py_1()
-        .text_xs()
-        .text_color(theme::TEXT_STRONG)
-        .bg(theme::BG_TOOLBAR)
-        .border_b_1()
-        .border_color(theme::BORDER)
-        .child(title.to_string())
-        .into_any_element()
-}
-
-/// One encoding finding: the column/BOM name on the left, the detail on
-/// the right. Encoding findings are column-level and not navigable.
-fn encoding_row(name: &str, detail: &str) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .px_3()
-        .py_2()
-        .border_b_1()
-        .border_color(theme::BORDER)
-        .child(
-            div()
-                .flex_1()
-                .truncate()
-                .text_xs()
-                .text_color(theme::WARN)
-                .child(name.to_string()),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(theme::TEXT_DIM)
-                .child(detail.to_string()),
-        )
-        .into_any_element()
-}
-
 /// Short human label for a warning kind, as shown in the panel.
 fn warning_kind_label(kind: WarningKind) -> &'static str {
     match kind {
-        WarningKind::InconsistentColumnCount => "row width",
-        WarningKind::EmptyHeader => "empty header",
-        WarningKind::DuplicateHeader => "duplicate header",
-        WarningKind::UnterminatedQuote => "unterminated quote",
-        WarningKind::VeryLongRecord => "very long record",
+        WarningKind::InconsistentColumnCount => "Row width",
+        WarningKind::EmptyHeader => "Empty header",
+        WarningKind::DuplicateHeader => "Duplicate header",
+        WarningKind::UnterminatedQuote => "Unterminated quote",
+        WarningKind::VeryLongRecord => "Very long record",
     }
 }

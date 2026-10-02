@@ -3,6 +3,10 @@
 //! Extracted verbatim from `view.rs` (behaviour-neutral split).
 
 use super::*;
+use gpui_kit::component::ActiveTheme;
+
+/// Width of the soft fade painted at a horizontal scroll boundary.
+const EDGE_FADE_WIDTH: f32 = 28.;
 
 impl MainView {
     pub(super) fn render_grid(
@@ -13,6 +17,7 @@ impl MainView {
         let Some(model) = self.model.clone() else {
             return div().into_any_element();
         };
+        let colors = theme::palette(cx);
 
         // A document just became ready: move keyboard focus onto the
         // grid so arrow navigation and Cmd/Ctrl+C work without a click.
@@ -20,8 +25,8 @@ impl MainView {
         if self.focus_grid_on_next_frame {
             self.focus_grid_on_next_frame = false;
             let focus_handle = self.focus_handle.clone();
-            cx.defer_in(window, move |_view, window, _cx| {
-                window.focus(&focus_handle);
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&focus_handle, cx);
             });
         }
 
@@ -52,12 +57,16 @@ impl MainView {
         let sort_indicator = self
             .sort_spec
             .map(|spec| (spec.column, spec.order == SortOrder::Descending));
-        let header = grid::render_header(
-            &model,
+        let header_ctx = grid::HeaderContext {
             scroll_x,
             viewport_w,
-            self.search_column,
-            sort_indicator,
+            scoped_column: self.search_column,
+            sort: sort_indicator,
+            colors: theme::palette(cx),
+        };
+        let header = grid::render_header(
+            &model,
+            &header_ctx,
             {
                 let entity = entity.clone();
                 move |col, ev, app_cx| {
@@ -92,7 +101,8 @@ impl MainView {
         let list = uniform_list(
             "anvil-grid",
             row_count,
-            cx.processor(move |this, range: Range<usize>, _window, _cx| {
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                let colors = theme::palette(cx);
                 let Some(model) = this.model.clone() else {
                     return Vec::new();
                 };
@@ -108,6 +118,7 @@ impl MainView {
                 let entity = entity.clone();
                 let warning_rows = model.warnings.clone();
                 let row_ctx = grid::RowContext {
+                    colors,
                     selection: &selection,
                     scroll_x,
                     viewport_w,
@@ -181,7 +192,8 @@ impl MainView {
             }),
         )
         .size_full()
-        .track_scroll(self.v_scroll.clone());
+        .font_family(cx.theme().mono_font_family.clone())
+        .track_scroll(&self.v_scroll);
 
         // Overlay canvas: records the scroll area's window-space bounds
         // and installs a global mouse-move listener. The listener sees
@@ -229,17 +241,32 @@ impl MainView {
         .left(px(0.))
         .size_full();
 
+        // Fade the column edge where the viewport cuts the data. Without it
+        // a half-drawn column reads as clipped text; with it, the same edge
+        // reads as "there is more to the right". Only drawn when there is
+        // actually more to reach.
+        let more_right = scroll_x + viewport_w < model.layout.total - 0.5;
+        let more_left = scroll_x > 0.5;
+        let edge = texture::edge_fade(colors.surface, true);
+        let edge_left = texture::edge_fade(colors.surface, false);
+
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .overflow_hidden()
+            .bg(colors.surface)
+            .font_family(cx.theme().font_family.clone())
+            .text_color(cx.theme().foreground)
+            .cursor_default()
             .child(header)
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .overflow_hidden()
+                    .bg(colors.surface)
                     .key_context("Grid")
                     // Test-only: lets UI tests look up the grid's pixel
                     // bounds to synthesise mouse coordinates. A no-op in
@@ -257,7 +284,7 @@ impl MainView {
                     // is still over the grid (bubble) or has left it
                     // (capture); stop the auto-scroll loop too.
                     .on_mouse_up(
-                        gpui::MouseButton::Left,
+                        gpui_kit::MouseButton::Left,
                         cx.listener(|view, _, _, cx| {
                             view.drag_selecting = false;
                             view.stop_auto_scroll();
@@ -265,7 +292,7 @@ impl MainView {
                         }),
                     )
                     .on_mouse_up_out(
-                        gpui::MouseButton::Left,
+                        gpui_kit::MouseButton::Left,
                         cx.listener(|view, _, _, cx| {
                             view.drag_selecting = false;
                             view.stop_auto_scroll();
@@ -273,9 +300,41 @@ impl MainView {
                         }),
                     )
                     .child(auto_scroll_overlay)
-                    .child(list),
+                    .child(list)
+                    .when(more_left, |viewport| {
+                        viewport.child(
+                            texture::scrim(edge_left)
+                                .left(px(0.))
+                                .top(px(0.))
+                                .bottom(px(0.))
+                                .w(px(EDGE_FADE_WIDTH))
+                                .bg(edge_left),
+                        )
+                    })
+                    .when(more_right, |viewport| {
+                        viewport.child(
+                            texture::scrim(edge)
+                                .right(px(0.))
+                                .top(px(0.))
+                                .bottom(px(0.))
+                                .w(px(EDGE_FADE_WIDTH))
+                                .bg(edge),
+                        )
+                    }),
             )
             .child(self.render_h_scrollbar(cx))
+            .when(self.focus_handle.is_focused(window), |grid| {
+                // An overlay keeps focus decoration out of viewport geometry.
+                grid.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .size_full()
+                        .border_1()
+                        .border_color(colors.focus_ring),
+                )
+            })
             .into_any_element()
     }
 
@@ -318,36 +377,49 @@ impl MainView {
         }
     }
 
+    /// The horizontal scrollbar.
+    ///
+    /// It overlays the bottom edge of the grid rather than taking a row of
+    /// its own: the data viewport is the scarce resource, and a 12 px band
+    /// below it is chrome the user did not ask for. The thumb is thin and
+    /// low-contrast until it is under the pointer, so it stays out of the
+    /// way of the last visible row.
     pub(super) fn render_h_scrollbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::palette(cx);
         let (viewport, total) = match &self.model {
             Some(model) => (self.viewport_w, model.layout.total),
             None => (0.0, 0.0),
         };
         if total <= viewport || viewport <= 0.0 {
-            return div().h(px(0.));
+            return div().h(px(0.)).into_any_element();
         }
         let frac = (viewport / total).clamp(0.05, 1.0);
         let thumb_w = frac * viewport;
         let max_scroll = (total - viewport).max(1.0);
         let thumb_left = (self.scroll_x / max_scroll).clamp(0.0, 1.0) * (viewport - thumb_w);
         let entity = cx.entity();
+        let thumb_bg = theme::blend(colors.surface, colors.muted_foreground, 0.42);
+        let thumb_bg_hover = theme::blend(colors.surface, colors.muted_foreground, 0.72);
 
         div()
+            .id("anvil-h-scroll")
             .relative()
             .h(px(12.))
             .w_full()
-            .bg(theme::BG_PANEL)
+            .flex_shrink_0()
             .border_t_1()
-            .border_color(theme::BORDER)
+            .border_color(colors.row_border)
+            .bg(colors.surface)
             .child(
                 div()
                     .absolute()
-                    .top(px(2.))
+                    .top(px(4.))
                     .left(px(thumb_left))
-                    .h(px(8.))
+                    .h(px(4.))
                     .w(px(thumb_w))
                     .rounded_full()
-                    .bg(theme::BORDER_STRONG)
+                    .bg(thumb_bg)
+                    .hover(|style| style.bg(thumb_bg_hover))
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -401,6 +473,7 @@ impl MainView {
                         .size_full(),
                     ),
             )
+            .into_any_element()
     }
 
     pub(super) fn on_grid_scroll(
