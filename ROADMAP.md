@@ -687,6 +687,9 @@ make what exists feel finished.
   and the Ubuntu CI leg confirms the build/test/probe. The window has
   **not** been launched on a real Linux display yet, so this stays open
   until a Linux runner opens it.
+- [x] Handle Windows Space key events without key_char in Ask, filter,
+  and search inputs; regression tests cover all three handlers and
+  Shift+Space/Ctrl+Space modifier behavior.
 - [ ] Exercise the native GUI on all three target OSes: open dialog,
   drag/drop, archive picker, grid scrolling, keyboard shortcuts,
   clipboard copy, and save/open paths where applicable.

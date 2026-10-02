@@ -15,6 +15,16 @@ use gpui::{
 
 use super::theme;
 
+/// Windows reports Space as a named key without printable `key_char`.
+/// Prefer supplied text so other backends still insert it exactly once.
+pub(super) fn printable_key_text(keystroke: &gpui::Keystroke) -> Option<&str> {
+    let text = keystroke
+        .key_char
+        .as_deref()
+        .or_else(|| (keystroke.key == "space").then_some(" "))?;
+    (!text.is_empty() && text.chars().all(|c| !c.is_control())).then_some(text)
+}
+
 /// Shape `text` with the window's current text style and return the
 /// caret byte index nearest to window-space x `point_x`, using the
 /// recorded bounds of the editable field. Out-of-range x clamps to the
@@ -125,4 +135,39 @@ pub(super) fn editable_text_area(
                 .bg(theme::TEXT_STRONG),
         )
         .child(bounds_recorder)
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::printable_key_text;
+    use gpui::{Keystroke, Modifiers};
+
+    #[test]
+    fn windows_space_without_key_char_is_printable() {
+        let key = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "space".into(),
+            key_char: None,
+        };
+        assert_eq!(printable_key_text(&key), Some(" "));
+    }
+
+    #[test]
+    fn supplied_text_is_preserved_and_control_keys_are_ignored() {
+        let mut key = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "space".into(),
+            key_char: Some(" ".into()),
+        };
+        assert_eq!(printable_key_text(&key), Some(" "));
+        key.key_char = Some("Ã©".into());
+        assert_eq!(printable_key_text(&key), Some("Ã©"));
+        for text in ["", "\t", "\n"] {
+            key.key_char = Some(text.into());
+            assert_eq!(printable_key_text(&key), None);
+        }
+        key.key = "enter".into();
+        key.key_char = None;
+        assert_eq!(printable_key_text(&key), None);
+    }
 }

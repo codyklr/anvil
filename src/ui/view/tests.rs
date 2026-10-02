@@ -9,6 +9,44 @@ use std::sync::Mutex;
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
 
+#[gpui::test]
+async fn windows_space_inserts_in_ask_filter_and_search(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| MainView::new(cx));
+    inject(cx, &view);
+    cx.update_window_entity(&view, |view, window, cx| {
+        let mut event = gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers::default(),
+                key: "space".into(),
+                key_char: None,
+            },
+            is_held: false,
+        };
+        view.ask_open = true;
+        view.filter_open = true;
+        view.search_open = true;
+        view.ask_input.insert("US");
+        view.filter_input.insert("a contains");
+        view.search_query.insert("hello");
+        view.on_ask_key_down(&event, window, cx);
+        view.on_filter_key_down(&event, window, cx);
+        view.on_search_key_down(&event, window, cx);
+        assert_eq!(view.ask_input.text(), "US ");
+        assert_eq!(view.filter_input.text(), "a contains ");
+        assert_eq!(view.search_query.text(), "hello ");
+        event.keystroke.modifiers.shift = true;
+        view.on_ask_key_down(&event, window, cx);
+        assert_eq!(view.ask_input.text(), "US  ");
+        event.keystroke.modifiers.control = true;
+        view.on_ask_key_down(&event, window, cx);
+        view.on_filter_key_down(&event, window, cx);
+        view.on_search_key_down(&event, window, cx);
+        assert_eq!(view.ask_input.text(), "US  ");
+        assert_eq!(view.filter_input.text(), "a contains ");
+        assert_eq!(view.search_query.text(), "hello ");
+    });
+}
+
 /// Test helper: append a loaded tab for `doc` and make it active.
 /// Mirrors the direct-file arm of `apply` without going through
 /// the background-task machinery.

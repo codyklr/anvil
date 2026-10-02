@@ -7701,3 +7701,50 @@ None.
 ### Issues / technical debt discovered
 
 None new.
+
+
+---
+
+## 2026-10-02 — Iteration 19: Windows Space in text inputs
+
+### Implemented
+
+- Fixed Ask, filter, and search ignoring Space on Windows. GPUI reports
+  the named space key without key_char; a shared printable-text helper
+  supplies one literal space while preserving supplied text. Existing
+  modifier guards and input refresh behavior are unchanged.
+
+### Verified
+
+- cargo fmt --check, cargo build --release, cargo test --release, and
+  cargo clippy --release --all-targets succeeded on Windows. Clippy has
+  no project warnings; Cargo notes an upstream proc-macro-error2 future
+  incompatibility warning. Initial cold compilation exceeded two time
+  limits; the longer run completed.
+- Native GUI typing was not manually exercised. The fix is being submitted on
+  fix/windows-space-input through a PR; merge is gated on CI.
+
+### Tests added/changed
+
+- Two printable-text helper tests cover Windows Space without key_char,
+  supplied spaces/Unicode, and rejected empty/control text.
+- A headless UI regression drives Windows-shaped Space events through
+  all three handlers, plus Shift+Space and Ctrl+Space modifier checks.
+
+### Roadmap changes
+
+- Added a completed Milestone 5 Windows Space regression task; broader
+  native cross-platform GUI verification remains open.
+
+### Architecture changes
+
+- Documented shared printable-text resolution and modifier guards.
+
+### Issues / technical debt discovered
+
+- No new application debt. Manual Windows GUI verification remains open.
+
+### Next recommended task
+
+- Manually type multi-word phrases in Ask, filter, and search on Windows
+  as part of the existing native GUI verification task.
