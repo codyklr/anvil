@@ -7567,7 +7567,8 @@ results.
 - The NL `ModelBackend` test that shells out to `sh` has a broken-pipe
   race on Linux (`src/query/nl.rs:1816`). It is out of scope
   (Milestone 6) and was left untouched, but it makes CI intermittently
-  red.
+  red. **(Resolved in Iteration 18: `run_command` ignores `BrokenPipe`
+  while writing the prompt, with a deterministic regression test.)**
 
 ---
 
@@ -7640,3 +7641,63 @@ model location.
 
 - If future configuration (recent files, preferences) is added it must go
   through `anvil_core::paths`, not `dirs`-style platform directories.
+
+---
+
+## 2026-10-01 — Iteration 18: stop the NL backend test flaking on Linux
+
+### Context
+
+The post-merge `master` CI run after PR #4 failed on Ubuntu at the Test
+step, not the build: `query::nl::tests::
+interpret_validates_model_output_through_the_filter_parser` panicked with
+``could not write to `sh`: Broken pipe (os error 32)``. The same test had
+already flaked once before. A re-run passed, confirming timing rather
+than logic.
+
+### Root cause
+
+`query::nl::run_command` writes the prompt to the child's stdin. The test
+backend is `sh -c "printf ..."`, which exits without reading stdin, so the
+write can race the child's exit and hit `EPIPE`. Linux tends to lose that
+race; macOS/Windows scheduling usually hides it. Nothing about the
+platform build was wrong.
+
+### Implemented
+
+- `run_command` now treats `ErrorKind::BrokenPipe` while writing the
+  prompt as non-fatal: the backend's stdout is still captured, and a
+  backend that produced nothing still fails the existing "returned no
+  output" check. Other write errors are still surfaced.
+- Added `run_command_tolerates_a_backend_that_closes_stdin`, which uses
+  `sh -c "exec 0<&-; printf ..."` with a 1 MB prompt so the write
+  deterministically runs into the closed reader.
+
+### Verified
+
+- The new test was written first and confirmed to fail without the guard
+  (`Broken pipe (os error 32)`), then passes with it.
+- `cargo fmt --check`, `cargo build --release`, `cargo clippy --release
+  --all-targets` clean.
+- `cargo test --release` — **481 passed, 7 ignored** (216 library, 178
+  binary with 1 ignored, 86 core with 6 ignored, 1 style guard), up from
+  480.
+- `cargo check --release --features nl-gliner` and `--features nl-model`
+  succeed.
+
+### Tests added / changed
+
+- `src/query/nl.rs`: `run_command_tolerates_a_backend_that_closes_stdin`.
+
+### Roadmap changes
+
+None directly; the out-of-scope NL debt note in Iteration 16 is annotated
+as resolved.
+
+### Architecture changes
+
+None.
+
+### Issues / technical debt discovered
+
+None new.

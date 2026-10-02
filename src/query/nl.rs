@@ -1138,11 +1138,20 @@ fn run_command(program: &str, args: &[String], prompt: &str) -> Result<String, M
             message: format!("could not start `{program}`: {err}"),
         })?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .map_err(|err| ModelError {
-                message: format!("could not write to `{program}`: {err}"),
-            })?;
+        match stdin.write_all(prompt.as_bytes()) {
+            Ok(()) => {}
+            // The backend may close stdin without reading the prompt (for
+            // example a command that ignores its input and prints a fixed
+            // answer). That is not fatal: its stdout is still captured
+            // below, and a backend that produced nothing still fails the
+            // "returned no output" check. Only surface other errors.
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(err) => {
+                return Err(ModelError {
+                    message: format!("could not write to `{program}`: {err}"),
+                });
+            }
+        }
         // Dropping stdin closes it so the child sees EOF.
     }
     let output = child.wait_with_output().map_err(|err| ModelError {
@@ -1788,6 +1797,23 @@ mod tests {
         assert_eq!(strip_fences("`country == US`"), "country == US");
         assert_eq!(strip_fences("\"country == US\""), "country == US");
         assert_eq!(strip_fences("```text\ncountry == US\n```"), "country == US");
+    }
+
+    /// Regression for a race that made CI intermittently red on Linux: a
+    /// backend that closes stdin without reading the prompt must not turn
+    /// the `BrokenPipe` from the write into an error, because its stdout
+    /// is still the answer. The oversized prompt guarantees the write runs
+    /// into the closed reader instead of racing the child's exit.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_tolerates_a_backend_that_closes_stdin() {
+        let args = vec![
+            "-c".to_string(),
+            "exec 0<&-; printf 'country == US\\n'".to_string(),
+        ];
+        let prompt = "p".repeat(1_000_000);
+        let text = super::run_command("sh", &args, &prompt).expect("complete");
+        assert_eq!(text, "country == US");
     }
 
     #[cfg(unix)]
