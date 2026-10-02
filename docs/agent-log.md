@@ -106,8 +106,8 @@ still pass after `cargo fmt`.
   1. Memory-mapped representation for direct files.
   2. Decompress-to-temp + mmap strategy for ZIP entries.
   3. Generation-counter cancellation rationale.
-  These can be filed when the next architectural decision lands
-  (likely during Milestone 2's search/filter design).
+     These can be filed when the next architectural decision lands
+     (likely during Milestone 2's search/filter design).
 
 ### Next recommended task (smallest Milestone 2 slice)
 
@@ -368,7 +368,7 @@ output.
 - `./target/release/anvil --probe fixtures/large.csv` —
   1,000,000 rows, 20 columns, 0 warnings, ~500 ms probe time.
   Throughput test `cargo test --release --test core -- --ignored
-  measure_large --nocapture` reports **165.4 MiB / 1,000,000 rows
+measure_large --nocapture` reports **165.4 MiB / 1,000,000 rows
   in 250 ms (661 MiB/s)** — slightly above the Milestone 1
   baseline (654 MiB/s), no regression.
 - `./target/release/anvil --probe fixtures/archive.zip` — same
@@ -505,7 +505,7 @@ Milestone 2 task that touches new surface area:
    Keep the existing handlers; just relocate them.
 2. Add `arboard`-free `query::search` to `anvil_core`:
    `pub fn search(doc: &ParsedDocument, needle: &str, opts:
-   SearchOptions) -> Vec<u64>` returning matching record indexes.
+SearchOptions) -> Vec<u64>` returning matching record indexes.
    Streaming over the mmap; case sensitivity / column scope as
    options.
 3. Wire `Cmd/Ctrl+F` to open a search bar overlay with an input
@@ -536,7 +536,7 @@ focus model showed the real cause: `on_key_down` only fires for
 elements in the **focused** element's path, and the grid div had
 `key_context("Grid")` and an `on_key_down` listener but **no
 `FocusHandle` and no `.track_focus(...)`**. The grid was therefore
-never focusable, and *no* grid keyboard event ever reached
+never focusable, and _no_ grid keyboard event ever reached
 `MainView::on_grid_key_down` — this silently broke Cmd/Ctrl+C, arrow
 navigation, Page Up/Down, Home/End, and Esc. The previous agent log
 had ticked the arrow-key/Home/End tasks and explicitly deferred
@@ -717,7 +717,7 @@ interim UX feature; it does not change the data side.
   tests plus `rect_contains_respects_inclusive_bounds` and
   `rect_contains_is_false_when_none`.
 - The copy UI test now also asserts `copy_flash_rect ==
-  Some(((0,0), (0,0)))` after Cmd/Ctrl+C.
+Some(((0,0), (0,0)))` after Cmd/Ctrl+C.
 - `cargo clippy --release --all-targets` — clean.
 - `cargo fmt --check` — clean.
 - `./target/release/anvil` — launches and runs 5 s without panic
@@ -787,96 +787,96 @@ what was missing was holding the button and dragging across cells.
 ### Implemented
 
 - `MainView.drag_selecting: bool`, armed by a grid cell mouse-down and
-disarmed on mouse-up. It prevents a drag that began outside the grid
-from selecting cells it passes over.
+  disarmed on mouse-up. It prevents a drag that began outside the grid
+  from selecting cells it passes over.
 - `grid::render_row` gained a `mouse_move` handler generic; every cell
-now carries `.on_mouse_move(...)` in addition to `.on_mouse_down(...)`.
+  now carries `.on_mouse_move(...)` in addition to `.on_mouse_down(...)`.
 - In `view.rs`, the cell mouse-move closure ignores events unless
-`MouseMoveEvent::dragging()` is true and `drag_selecting` is set, then
-calls `Selection::extend_to(pos)` and `cx.notify()`.
+  `MouseMoveEvent::dragging()` is true and `drag_selecting` is set, then
+  calls `Selection::extend_to(pos)` and `cx.notify()`.
 - The grid container carries `on_mouse_up` (bubble, pointer over the
-grid) and `on_mouse_up_out` (capture, pointer has left the grid) to
-disarm `drag_selecting`.
+  grid) and `on_mouse_up_out` (capture, pointer has left the grid) to
+  disarm `drag_selecting`.
 - **Design choice: per-cell hitboxes rather than coordinate
-arithmetic.** Each cell is its own GPUI hitbox, so whichever cell the
-pointer is over reports its own `(row, col)`. This avoids the
-`ColumnLayout`/`scroll_x`/vertical-scroll mapping that a single
-full-grid mouse listener would need, and it composes with
-`uniform_list` virtualization for free. The trade-off is a one-event
-lag from GPUI's hover hit test, imperceptible for a real drag.
+  arithmetic.** Each cell is its own GPUI hitbox, so whichever cell the
+  pointer is over reports its own `(row, col)`. This avoids the
+  `ColumnLayout`/`scroll_x`/vertical-scroll mapping that a single
+  full-grid mouse listener would need, and it composes with
+  `uniform_list` virtualization for free. The trade-off is a one-event
+  lag from GPUI's hover hit test, imperceptible for a real drag.
 - `render_row`'s argument list had reached 8 and tripped clippy
-`too_many_arguments`; the per-frame inputs are now bundled into a
-`grid::RowContext<'a>` (`selection`, `scroll_x`, `viewport_w`,
-`copy_flash`) passed by reference. This was the follow-up flagged in
-the copy-flash entry.
+  `too_many_arguments`; the per-frame inputs are now bundled into a
+  `grid::RowContext<'a>` (`selection`, `scroll_x`, `viewport_w`,
+  `copy_flash`) passed by reference. This was the follow-up flagged in
+  the copy-flash entry.
 - A test-only `.debug_selector("anvil-grid-list")` on the grid
-container (a no-op in release) lets the UI test derive cell pixel
-centres from the measured grid bounds plus `ROW_HEIGHT`,
-`ROW_NUMBER_WIDTH`, and the computed column widths.
+  container (a no-op in release) lets the UI test derive cell pixel
+  centres from the measured grid bounds plus `ROW_HEIGHT`,
+  `ROW_NUMBER_WIDTH`, and the computed column widths.
 
 ### Verified
 
 - Reproduced the gap as a test first: `drag_select_builds_rectangle`
-fails when the cell `.on_mouse_move` wiring is removed (selection
-stays one cell) and passes with it. Re-verified after the
-`RowContext` refactor.
+  fails when the cell `.on_mouse_move` wiring is removed (selection
+  stays one cell) and passes with it. Re-verified after the
+  `RowContext` refactor.
 - `cargo test --release` — 82 passed (25 lib + 5 binary + 52
-integration), 0 failed, 1 ignored.
+  integration), 0 failed, 1 ignored.
 - `cargo test --release --bin anvil` — 5 pass: two focus/copy tests,
-the new drag test, and the two `rect_contains` unit tests.
+  the new drag test, and the two `rect_contains` unit tests.
 - The drag test also copies the dragged block and asserts the TSV
-(`1\t2\n4\t5\n`), so drag-select + copy is covered end-to-end.
+  (`1\t2\n4\t5\n`), so drag-select + copy is covered end-to-end.
 - `cargo clippy --release --all-targets` — clean (the
-`too_many_arguments` warning is resolved by `RowContext`).
+  `too_many_arguments` warning is resolved by `RowContext`).
 - `cargo fmt --check` — clean.
 - `cargo build --release` and `./target/release/anvil` — launch and
-run 5 s without panic.
+  run 5 s without panic.
 
 ### Tests added / changed
 
 - 1 new UI test: `drag_select_builds_rectangle`.
 - No data-side tests changed; `Selection::extend_to` was already
-covered.
+  covered.
 
 ### Roadmap changes
 
 - Milestone 2 Selection model: "Click-and-drag range selection"
-ticked (the last unchecked selection item).
+  ticked (the last unchecked selection item).
 
 ### Architecture changes
 
 - `ARCHITECTURE.md` state table: added `drag_selecting`.
 - Selection model → Grid integration: documented the drag-select
-mechanism and why per-cell hitboxes are used.
+  mechanism and why per-cell hitboxes are used.
 - Grid Rendering → Row retrieval: documented `RowContext`.
 - Functional gaps and Planned Evolution updated (drag-select wired;
-edge auto-scroll still outstanding).
+  edge auto-scroll still outstanding).
 - Testing: added the drag test, its mutation check, and a test-table
-row.
+  row.
 
 ### Issues / technical debt discovered
 
 - **No drag auto-scroll.** Dragging past the top/bottom edge does not
-scroll the list, so a selection cannot be extended beyond currently
-visible rows in one gesture. This is the main functional gap in
-drag-select and is recorded in the roadmap and architecture open
-loops. Implementing it needs the pointer position mapped to the list
-bounds and a scroll tick while the pointer is outside — likely a small
-`cx.spawn` loop using `UniformListScrollHandle::scroll_to_item`.
+  scroll the list, so a selection cannot be extended beyond currently
+  visible rows in one gesture. This is the main functional gap in
+  drag-select and is recorded in the roadmap and architecture open
+  loops. Implementing it needs the pointer position mapped to the list
+  bounds and a scroll tick while the pointer is outside — likely a small
+  `cx.spawn` loop using `UniformListScrollHandle::scroll_to_item`.
 - GPUI delivers mouse moves to the hovered hitbox using the hit test
-from the previous frame, so drag-select lags a single mouse event. In
-practice mouse moves are continuous; only synthetic single-jump tests
-notice. The test moves twice to the target to be deterministic.
+  from the previous frame, so drag-select lags a single mouse event. In
+  practice mouse moves are continuous; only synthetic single-jump tests
+  notice. The test moves twice to the target to be deterministic.
 - `view.rs` is now ~1090 lines. The `commands` extraction is more
-overdue than ever.
+  overdue than ever.
 
 ### Open loops
 
 - Drag auto-scroll at viewport edges (recorded).
 - Non-contiguous multi-select and select-all are recorded in
-`ROADMAP.md` Future Ideas, not started.
+  `ROADMAP.md` Future Ideas, not started.
 - Configurable copy format (TSV/CSV/Markdown/JSON) recorded in Future
-Ideas; current Cmd/Ctrl+C is TSV only.
+  Ideas; current Cmd/Ctrl+C is TSV only.
 
 ### Next recommended task
 
@@ -905,8 +905,8 @@ only extend to currently visible rows. This iteration closes it.
   2. install a global `window.on_mouse_event` mouse-move listener that
      stores `MainView.pointer_pos` and, while `drag_selecting`, calls
      `auto_scroll_step`.
-  Per-cell `on_mouse_move` cannot see the pointer once it leaves the
-  grid, so a global listener is required for edge auto-scroll.
+     Per-cell `on_mouse_move` cannot see the pointer once it leaves the
+     grid, so a global listener is required for edge auto-scroll.
 - `MainView::auto_scroll_step`: when the pointer is above/below
   `list_bounds` (pure `auto_scroll_direction` helper), it extends the
   selection to the row at that edge and asks the list to pin the next
@@ -928,30 +928,30 @@ only extend to currently visible rows. This iteration closes it.
 ### Verified
 
 - Reproduced the gap as a test first: `drag_past_bottom_edge_starts_auto_scroll`
-fails when the global listener's `auto_scroll_step` call is removed
-(selection stays at row 0) and passes with it.
+  fails when the global listener's `auto_scroll_step` call is removed
+  (selection stays at row 0) and passes with it.
 - `cargo test --release` — 84 passed (25 lib + 7 binary + 52
-integration), 0 failed, 1 ignored.
+  integration), 0 failed, 1 ignored.
 - `cargo test --release --bin anvil` — 7 pass: the four UI tests plus
-three unit tests.
+  three unit tests.
 - `cargo clippy --release --all-targets` — clean.
 - `cargo fmt --check` — clean.
 - `cargo build --release`, `./target/release/anvil` (runs 5 s, no
-panic), and `anvil --probe fixtures/large.csv` (351 ms) all fine, so
-the overlay canvas does not disturb the open/render path or
-throughput.
+  panic), and `anvil --probe fixtures/large.csv` (351 ms) all fine, so
+  the overlay canvas does not disturb the open/render path or
+  throughput.
 
 ### Tests added / changed
 
 - `auto_scroll_direction_detects_edges` — pure above / on-edge /
-inside / below cases.
+  inside / below cases.
 - `drag_past_bottom_edge_starts_auto_scroll` — 1000-row document,
-synthesised drag past the bottom edge, asserts the selection extended
-past the first visible row and `base_handle.offset().y < 0` (the list
-actually scrolled). Also asserts mouse-up clears `drag_selecting` and
-stops the task.
+  synthesised drag past the bottom edge, asserts the selection extended
+  past the first visible row and `base_handle.offset().y < 0` (the list
+  actually scrolled). Also asserts mouse-up clears `drag_selecting` and
+  stops the task.
 - Test helper `large_document(rows)` and `inject_doc(cx, view, doc)`;
-`inject` now delegates to `inject_doc(sample_document())`.
+  `inject` now delegates to `inject_doc(sample_document())`.
 - No data-side tests changed.
 
 ### Roadmap changes
@@ -961,13 +961,13 @@ stops the task.
 ### Architecture changes
 
 - `ARCHITECTURE.md` state table: added `list_bounds`, `pointer_pos`,
-`auto_scroll_task`.
+  `auto_scroll_task`.
 - Selection model → Grid integration: documented the auto-scroll
-mechanism (overlay canvas, global listener, tick loop).
+  mechanism (overlay canvas, global listener, tick loop).
 - Open loops narrowed to "no proximity margin / no acceleration"; the
-old "does not auto-scroll" loop is removed.
+  old "does not auto-scroll" loop is removed.
 - Functional gaps, Planned Evolution, and Testing updated; test group
-table row expanded.
+  table row expanded.
 
 ### Issues / technical debt discovered
 
@@ -1109,34 +1109,34 @@ The agent-log handoff recommended `query::search` + `Cmd/Ctrl+F` as
 the next vertical slice. This iteration lands the entire basic-search
 feature end-to-end:
 
-* `anvil_core::query::search` (pure, GPUI-free) with `SearchOptions`
+- `anvil_core::query::search` (pure, GPUI-free) with `SearchOptions`
   (case-sensitive / column-scope / max-matches);
-* `commands::Action::OpenSearch` and `Action::NextMatch` bindings;
-* A search-bar overlay with a dedicated focus handle, character
+- `commands::Action::OpenSearch` and `Action::NextMatch` bindings;
+- A search-bar overlay with a dedicated focus handle, character
   input, Backspace, Enter / Shift+Enter, and Esc;
-* Background search task on `cx.background_executor` with
+- Background search task on `cx.background_executor` with
   generation-counter cancellation;
-* Match highlighting in the grid (`BG_MATCH` / `BG_MATCH_ACTIVE`);
-* F3 / Shift-F3 cycle matches from anywhere via the grid's
+- Match highlighting in the grid (`BG_MATCH` / `BG_MATCH_ACTIVE`);
+- F3 / Shift-F3 cycle matches from anywhere via the grid's
   `Action::NextMatch` arm;
-* Search state is cleared on every `OpenOutcome` so opening a new
+- Search state is cleared on every `OpenOutcome` so opening a new
   document cannot carry stale matches.
 
 ### Implemented
 
 - New module `src/query.rs` exposing
   `pub fn search(doc: &ParsedDocument, needle: &str, opts:
-  &SearchOptions) -> Vec<u64>`. Walks each record's bytes through
+&SearchOptions) -> Vec<u64>`. Walks each record's bytes through
   `Cells::new` (which handles quoting / escapes) and matches with
   `memchr::memmem::Finder`. Case-insensitive matching (the default)
   uses an ASCII-lowercased needle and a sliding-window lowercase over
   the cell bytes. `SearchOptions { case_sensitive, column,
-  max_matches }` carries the toggle / scope / cap. Per-record decode
+max_matches }` carries the toggle / scope / cap. Per-record decode
   only, no `Vec<Vec<String>>` materialisation.
 - `src/lib.rs`: re-exports `SearchOptions` and `search` as
   `anvil_core::{SearchOptions, search_records}`.
 - `src/ui/theme.rs`: `BG_MATCH = #4a3a00` and `BG_MATCH_ACTIVE =
-  #6b5400`.
+#6b5400`.
 - `src/ui/grid.rs`:
   - `RowContext` gains `search_matches: &[u64]` (sorted record
     indexes) and `search_active: i64`. Matched rows tint the row
@@ -1202,7 +1202,7 @@ feature end-to-end:
   pre-`1.98` future-incompat notes are unchanged).
 - `cargo fmt --check` — clean.
 - `cargo test --release --test core -- --ignored measure_large
-  --nocapture` — 165.4 MiB / 1,000,000 rows in 128 ms (1292 MiB/s),
+--nocapture` — 165.4 MiB / 1,000,000 rows in 128 ms (1292 MiB/s),
   20 cols. Within noise of the pre-search baseline (~650 MiB/s;
   variance across cold/warm cache dominates).
 - `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
@@ -1285,7 +1285,7 @@ feature end-to-end:
     `search_matches`, `search_active`, `search_generation`,
     `search_task`, `search_focus_handle`,
     `focus_search_on_next_frame`.
-  - "What is *current* vs *planned*" updated: `query::search` is
+  - "What is _current_ vs _planned_" updated: `query::search` is
     listed as Current; `query::filter` and `query::sort` remain
     Planned.
   - Recognised-keys table extended with F3 / Shift-F3, Esc (closes
@@ -1395,7 +1395,7 @@ diagnosis from the search-bar slice's render path was straightforward:
   child of the center area (`.absolute().top(px(0.))`).
 - The grid (header + uniform_list) lived in the same `.relative()`
   parent and painted from the top of the parent's bounds.
-- Therefore the search bar *overlapped* the top of the grid: 36 px
+- Therefore the search bar _overlapped_ the top of the grid: 36 px
   tall bar + 24 px grid header = the search bar covered the grid
   header and 12 px of the first row of the uniform_list.
 - When a search match landed at row 0, the row pinned to the top of
@@ -1446,8 +1446,7 @@ None. The bug was a layout defect, not a missing roadmap task.
 - `ARCHITECTURE.md` Planned Evolution → Search paragraph: noted that
   the bar sits as a normal-flow child so the grid (and its sticky
   header) shift down by the bar's height rather than sliding under
-  it, and that the active-match row stays fully visible even at row
-  0.
+  it, and that the active-match row stays fully visible even at row 0.
 
 ### Issues / technical debt discovered
 
@@ -1477,14 +1476,14 @@ predicate evaluator and a row-permutation grid path.
 
 The search slice from 2026-10-07 highlighted the row (yellow tint
 across the whole row) and used a brighter tint for the active row,
-but the user could not tell *which cell* in the row contained the
-match, let alone *where* inside the cell. The user explicitly asked
+but the user could not tell _which cell_ in the row contained the
+match, let alone _where_ inside the cell. The user explicitly asked
 for substring-level highlighting so the search hit is unambiguous.
 
 ### Implemented
 
 - New data-side helper `anvil_core::query::find_ranges(haystack,
-  needle, case_sensitive) -> Vec<Range<usize>>` that returns the
+needle, case_sensitive) -> Vec<Range<usize>>` that returns the
   byte ranges of every occurrence of `needle` inside `haystack`.
   Case-sensitive path uses `memchr::memmem::find_iter`; the
   case-insensitive path lowercases the haystack once (an owned
@@ -1493,7 +1492,7 @@ for substring-level highlighting so the search hit is unambiguous.
   cells of match rows.
 - `theme::BG_MATCH_TEXT = #c69400` — a bright yellow, distinct from
   the row tints `BG_MATCH (#4a3a00)` and `BG_MATCH_ACTIVE
-  (#6b5400)` so the literal matched substring pops visually.
+(#6b5400)` so the literal matched substring pops visually.
 - `RowContext` extended with `search_query: &str` and
   `search_options: SearchOptions` so the renderer knows what to
   highlight and whether the search is case-sensitive.
@@ -1654,7 +1653,7 @@ and a flat tab strip on top of it.
   the optional `Arc<ArchiveSource>` / entry name for ZIP-backed tabs,
   and the per-document UI state: `selection`, `scroll_x`, `v_scroll`,
   `search_open / search_query / search_matches / search_active /
-  search_generation`, `copy_flash_rect / copy_flash_generation`. Also
+search_generation`, `copy_flash_rect / copy_flash_generation`. Also
   exposes `tab_label()` (basename for direct files, `archive:entry`
   for ZIP entries, truncated at 40 chars with an ellipsis).
 - `MainView` gains `documents: Vec<DocumentSnapshot>` and
@@ -1847,7 +1846,7 @@ the tab is first activated.
   - New `loading: bool` so repeated `switch_to` calls do not spawn
     duplicate extraction tasks.
   - `from_doc` now takes the id; new `pending_entry(id, archive,
-    entry_name)` builds an unloaded ZIP tab; `is_loaded()` helper.
+entry_name)` builds an unloaded ZIP tab; `is_loaded()` helper.
   - `tab_label()` shows the entry basename for ZIP tabs (the archive
     name moved out of the strip) and "loading…" only as a fallback.
 - `install_archive_tabs(source, loaded_entry, loaded_doc, cx)`:
@@ -1994,7 +1993,7 @@ tab strip scroll.
   consecutive snapshots sharing an archive by `Arc` identity. Direct
   files are top-level; ZIP entries nest under their archive header.
   Returns `(Option<Arc<ArchiveSource>>, Vec<(tab_index, label,
-  loaded)>)` in tab order.
+loaded)>)` in tab order.
 - `render_file_panel` — left-hand panel, `theme::FILE_PANEL_WIDTH`
   wide, with:
   - a header showing the open count and a × that hides the panel;
@@ -2172,7 +2171,7 @@ UI (`src/ui/view.rs`, `src/ui/commands.rs`):
 - `cargo clippy --release --all-targets` — clean.
 - `cargo fmt --check` — clean.
 - `cargo test --release --test core -- --ignored measure_filter
-  --nocapture` — **1,000,000 rows filtered in 33 ms, 99,479 matches
+--nocapture` — **1,000,000 rows filtered in 33 ms, 99,479 matches
   (~10%)** for `country == US`. Milestone 2 budget is < 2 s.
 - `./target/release/anvil --probe fixtures/large.csv` — 1,000,000
   rows, 20 cols, ~350 ms.
@@ -2312,7 +2311,7 @@ UI (`src/ui/view.rs`):
 - `run_action` handles `Action::NextCell` via a new
   `move_cell_selection`.
 - `move_cell_selection` delegates to `Selection::move_cell` when there
-  is no filter, and walks the *visible* cells (position -> record
+  is no filter, and walks the _visible_ cells (position -> record
   mapping, wrapping) when a filter is active.
 - `move_selection`'s filtered branch now uses `saturating_add` for the
   row/column arithmetic so Cmd/Ctrl+Home/End work while filtered and
@@ -2588,7 +2587,7 @@ New GPUI-free model (`src/ui/text_edit.rs`, 18 unit tests):
 
 - `TextEdit { text, caret, anchor }` with `insert` (replaces the
   selection), `backspace` / `delete`, `move_left/right/home/end/
-  word_left/word_right`, `set_caret(index, extend)`, `select_all`,
+word_left/word_right`, `set_caret(index, extend)`, `select_all`,
   `selection()` / `selected_text()` / `has_selection()`. Every
   mutation clamps byte offsets to UTF-8 char boundaries, so multibyte
   text cannot be split. `From<&str>` / `From<String>` build an editor
@@ -2636,10 +2635,10 @@ Filter bar (`src/ui/view.rs`):
   caret-at-end construction, append, replace-selection, backspace
   (char / selection / start no-op), delete (char / selection),
   selection collapse on movement, shift-extension, Home/End, select-all
-  + collapse, word movement across operator tokens, char-boundary
-  clamping, and multibyte backspace. One expectation was corrected
-  during development (word-left from between `==` and `US` lands before
-  `==`, not after `country`).
+  - collapse, word movement across operator tokens, char-boundary
+    clamping, and multibyte backspace. One expectation was corrected
+    during development (word-left from between `==` and `US` lands before
+    `==`, not after `country`).
 - `src/ui/view.rs`: 3 UI tests — `filter_keyboard_caret_and_selection`
   (Home/End/Shift+Home), `filter_select_all_typing_and_backspace`
   (Cmd/Ctrl+A + typing replaces, select-all + Backspace clears), and
@@ -2666,7 +2665,7 @@ Filter bar (`src/ui/view.rs`):
     `StyledText` + shaped-line rendering, the bounds-recording canvas,
     the mouse/key routing, and the current scope/limitations.
   - Testing section: UI regression tests 42 → 45, a `Text edit
-    (binary)` row, and the coverage paragraph updated.
+(binary)` row, and the coverage paragraph updated.
   - Functional gaps note that the search bar has not been migrated and
     that there is no caret blink or in-field horizontal scroll.
 - `README.md`: binary test count 69 → 90.
@@ -2957,7 +2956,7 @@ Data side:
 
 - `src/schema.rs` (new): `ColumnType` (Integer / Float / Boolean /
   Text / Empty), `ColumnProfile { name, column_type, sampled_rows,
-  non_empty, numeric_fraction }`, and `infer(doc) -> Vec<ColumnProfile>`.
+non_empty, numeric_fraction }`, and `infer(doc) -> Vec<ColumnProfile>`.
   Samples up to `INFER_SAMPLE_ROWS` (2048) per column, treating a
   column as numeric once `numeric_fraction >= 0.9`.
 - `src/query/sort.rs` (new): `SortOrder`, `SortKind`, `SortSpec`, and
@@ -3672,7 +3671,7 @@ needed.
 - `cargo fmt --check` — clean.
 - `anvil --probe` on a generated 2 MiB-record CSV reports
   `1 warnings — [very long record] record is 2097155 bytes (limit
-  1048576)`.
+1048576)`.
 - `anvil --probe fixtures/large.csv` — 1,000,000 rows, 0 warnings (no
   false positives on ordinary rows).
 
@@ -3769,7 +3768,7 @@ iterations plus the stale error-variant note in ARCHITECTURE.
 - `cargo fmt --check` — clean.
 - `anvil --probe` on the 2 MiB-record CSV still reports
   `1 warnings — [very long record] record is 2097155 bytes (limit
-  1048576)`; `fixtures/large.csv` reports 0 warnings.
+1048576)`; `fixtures/large.csv` reports 0 warnings.
 
 ### Tests added / changed
 
@@ -3803,7 +3802,7 @@ None — this was debt, not a roadmap task.
   architecture consultation (cache derived data on `GridModel`, mirror
   `ColumnLayout`).
 - Severity ordering (`UnterminatedQuote > VeryLongRecord >
-  InconsistentColumnCount`) is a heuristic; the panel still exposes the
+InconsistentColumnCount`) is a heuristic; the panel still exposes the
   full per-row warning list, so no information is lost.
 - `IndexOptions` currently has a single field. It is a small, honest
   seam for the Milestone 5 config file rather than a general options
@@ -3925,7 +3924,7 @@ encoding-diagnostics group.
 ### Implemented
 
 - **`MainView` state (`src/ui/view.rs`)**: `encoding_report:
-  Option<Arc<EncodingReport>>`, `encoding_generation: u64`,
+Option<Arc<EncodingReport>>`, `encoding_generation: u64`,
   `encoding_task: Option<Task<()>>`.
 - **`invalidate_encoding`** is called from `load_active`, so switching
   tabs / opening a document drops a stale report and discards an
@@ -3937,8 +3936,8 @@ encoding-diagnostics group.
   called from `toggle_diagnostics` (open), `apply`, `switch_to`, and the
   lazy-load-ready path.
 - **`render_diagnostics` (`src/ui/view/diagnostics.rs`)** now has two
-  sections: *parse warnings* (unchanged, still click-to-navigate) and
-  *encoding*. The encoding section shows `scanning…`/`not scanned`,
+  sections: _parse warnings_ (unchanged, still click-to-navigate) and
+  _encoding_. The encoding section shows `scanning…`/`not scanned`,
   a `UTF-8 BOM present` notice, one row per column with non-UTF-8 cells
   (`<name> — N non-UTF-8 cell(s)`), or `clean UTF-8`. The panel header
   is now `Diagnostics` since it covers both kinds of finding.
@@ -4140,7 +4139,7 @@ extraction with a generic `AnvilError::Other` string.
   files but every candidate is encrypted, instead of the generic
   `NoUsableEntries`.
 - **`ui::archive_picker`** gains `SkippedEntry` and `skipped_entries`, and
-  the toolbar **Archive…** overlay now renders a *skipped entries* section:
+  the toolbar **Archive…** overlay now renders a _skipped entries_ section:
   each rejected entry's name and reason, capped at 40 rows with an
   "…and N more" summary so a noisy archive stays readable.
 - Removed an orphaned doc comment above `should_highlight` in
@@ -4244,9 +4243,9 @@ could "settle".
 
 - Added `MainView::grid_viewport_width`, which computes the columns-area
   width synchronously as `window width - ROW_NUMBER_WIDTH - (each open
-  panel's theme width)`. The file panel, inspector, and diagnostics
+panel's theme width)`. The file panel, inspector, and diagnostics
   panels are all `flex_shrink_0` with fixed widths, so this matches the
-  measured layout exactly — but is correct on the *same* render a panel
+  measured layout exactly — but is correct on the _same_ render a panel
   is toggled.
 - `render_grid` now uses that value; `grid_bounds` is still recorded for
   drag auto-scroll, which genuinely needs the on-screen rectangle.
@@ -4423,7 +4422,7 @@ typed text. I diagnosed both before editing.
   the grid (e.g. after clicking a cell), the filter bar was impossible to
   dismiss — only Esc while the bar itself held focus worked.
 - **Caret:** `ui::input::shape_input_line` shaped with
-  `window.text_style()`, which during render is the *default* 1rem style,
+  `window.text_style()`, which during render is the _default_ 1rem style,
   while the bars render text at `text_sm` (0.875rem). The caret x was
   therefore computed at 16px against 14px glyphs, and the error grew with
   text length — exactly the reported "gets farther away the more we type".
@@ -4519,7 +4518,7 @@ documented recovery.
   caret and the byte range a suggestion should replace. `candidates`
   returns case-insensitive prefix-filtered, deduped, capped suggestions.
 - **`src/schema/stats.rs`**: `sample_distinct(doc, column, max_rows,
-  max_distinct)` — a bounded, first-seen-order distinct-value sampler for
+max_distinct)` — a bounded, first-seen-order distinct-value sampler for
   the value slot.
 - **`src/ui/text_edit.rs`**: `TextEdit::replace_range(range, text)` to
   replace the partial token and move the caret/anchor.
@@ -4701,7 +4700,7 @@ how a column label or value has to round-trip through the parser:
 - **`src/query/suggest.rs` — candidate matching**: replaced prefix-only
   `push_matching` with a ranked matcher (`match_rank`: whole-string prefix
   > word prefix > substring) and stable best-first ordering, so values
-  surface when typing a later word or a mid-string fragment.
+  > surface when typing a later word or a mid-string fragment.
 - **`src/ui/view.rs` / `src/ui/view/filter.rs`**: `FilterSuggestion`
   carries a `quote` flag; a multi-word (or quoted) column suggestion is
   inserted wrapped in double quotes (with `\"` escaping) so it stays one
@@ -4771,7 +4770,7 @@ therefore still read as an index (`#2` → column 2) or errored
 ### Implemented
 
 - **`src/query/filter.rs` — `resolve_column`**: the exact header match is
-  now checked first for *all* tokens, then `#N`/`colN`/numeric are the
+  now checked first for _all_ tokens, then `#N`/`colN`/numeric are the
   fallbacks. So a header named `#2` resolves to itself, while `#N` still
   means "index N" when no header matches (the common case).
 
@@ -4797,7 +4796,7 @@ therefore still read as an index (`#2` → column 2) or errored
 
 ### Issues / technical debt discovered
 
-- None new. If a file has a header named `#2` *and* the user wants index
+- None new. If a file has a header named `#2` _and_ the user wants index
   2, they must use the plain numeric form `2`; documented behaviour.
 
 ### Open loops
@@ -5167,7 +5166,7 @@ the Ask bar, and `FilterExpr::Not` are deliberately not in this slice.
     operators stay confident).
   - Conjunction handling for `and` / `or`; a bare value after a
     conjunction reuses the previous column (`status is failed or
-    refunded`).
+refunded`).
   - `clean` is true only when at least one predicate was produced, no
     tokens were left unmatched, every column resolved, and every value
     bound confidently: this is the ADR escalation contract.
@@ -5389,7 +5388,7 @@ an off-by-default cargo feature, wired into the Ask bar.
   391 passed (172 lib + 142 binary + 76 core + 1 style), 0 failed.
 - Feature build: `cargo build --release --features nl-model` clean
   (about 2.5 minutes from a warm dep cache); `cargo test --release
-  --features nl-model` 391 passed.
+--features nl-model` 391 passed.
 - `cargo clippy --release --all-targets` clean with and without the
   feature; `cargo fmt --check` clean.
 - New UI test `ask_escalates_to_tier2_when_rules_are_unclean` injects a
@@ -5496,7 +5495,7 @@ consulted, and its raw output was not a clean expression.
 
 - **ChatML prompt** (`src/nlmodel.rs`): the instruction is now wrapped in
   the SmolLM2 template (`<|im_start|>system ... <|im_start|>user ...
-  <|im_start|>assistant`) and encoded with `add_special_tokens = false`,
+<|im_start|>assistant`) and encoded with `add_special_tokens = false`,
   because the model's BOS is `<|im_start|>` and the template already
   contains it.
 - **Stricter instruction + examples** (`anvil_core::model_prompt`): the
@@ -5549,7 +5548,7 @@ whether SmolLM2-360M was the right model and what to look for.
   ambiguous and error instead of being guessed.
 - **Prompt quotes spaced names** (`anvil_core::model_prompt`): column names
   that are not plain identifiers are listed quoted (`- "Last Name"
-  (text)`), and the rules say to keep quotes exactly.
+(text)`), and the rules say to keep quotes exactly.
 - **Architecture auto-detection** (`src/nlmodel.rs`): the GGUF
   `general.architecture` metadata picks the loader, so Llama (SmolLM2) and
   Qwen2 (Qwen2.5) models both work through one `Weights` enum.
@@ -5625,7 +5624,7 @@ the operators needed to express coherent queries, giving the example
 - `cargo test --release`: 183 lib tests plus all integration suites pass.
 - `cargo test --release --features nl-gliner`: 192 lib tests pass.
 - `cargo clippy --release` and `cargo clippy --release --features
-  nl-gliner`: clean (only the pre-existing `block` / `proc-macro-error2`
+nl-gliner`: clean (only the pre-existing `block` / `proc-macro-error2`
   future-incompat notices).
 - The real 296 MB GLiNER checkpoint was **not** downloaded here, so the
   end-to-end model path and the ignored `real_model_filter_smoke` remain
@@ -5699,12 +5698,12 @@ is blank" still failed.
   "showing"/"listing"), matches a scope prefix (`any`/`some`/`a`,
   `at least [one|1]`, `all`/`every`, `no`) followed by a column word,
   then matches the comparison to the end of the phrase. `no column is
-  empty` flips the inner operator (`Empty` -> `NonEmpty`), so it becomes
+empty` flips the inner operator (`Empty` -> `NonEmpty`), so it becomes
   `all notempty`. Row-scope values never consult the per-column sample
   callback. Anything that does not match falls through unchanged, so
   `any amount over 100` still resolves `amount`.
 - **GLiNER (`src/gliner.rs`)**: added a third classification, `filter
-  scope` (`one column` / `any column` / `all columns`), appended after
+scope` (`one column` / `any column` / `all columns`), appended after
   the column and comparison specs. `decode` reads it leniently (missing
   or unknown -> single column) and builds `AnyColumn` / `AllColumn`,
   skipping `resolve_column` and per-column binding. The operator
@@ -5718,7 +5717,7 @@ is blank" still failed.
 - `cargo test --release`: 186 lib tests plus all integration suites pass.
 - `cargo test --release --features nl-gliner`: 199 lib tests pass.
 - `cargo clippy --release` and `cargo clippy --release --features
-  nl-gliner`: clean.
+nl-gliner`: clean.
 - The real GLiNER checkpoint still is not installed, so the end-to-end
   model path remains unverified; `real_model_filter_smoke` stays ignored.
 
@@ -5936,7 +5935,7 @@ where the code contradicted that.
   `cell.as_str().trim()`, so `" 42 "` was reported as `42`. Values that
   differ only in padding are now counted as distinct values (the counts
   map and the HLL sketch are keyed by the exact value). `min`/`max`
-  *ordering* still compares the trimmed value, and a whitespace-only
+  _ordering_ still compares the trimmed value, and a whitespace-only
   cell still counts as empty, so the inspector keeps agreeing with the
   filter `empty` operator; both deviations are recorded in `ROADMAP.md`.
 - **Invalid UTF-8 must stay visible** (`src/parser/mod.rs`): added
@@ -6180,7 +6179,7 @@ global (not per-tab) transient state, like `filter_open`.
 ### Issues / technical debt discovered
 
 - `Selection` is a rectangle in raw record-index space. The grid and
-  the copy path now walk the visible display order, but a *dragged*
+  the copy path now walk the visible display order, but a _dragged_
   range under an active sort still spans a record-index interval that
   may not be contiguous on screen. Fixing that needs a display-space
   selection model and is out of scope here. **(Resolved in Iteration
@@ -6658,7 +6657,7 @@ with a deterministic tiebreak, starting from a failing test.
 
 First part of Iteration 8 (data fidelity). Text sorting and the
 inspector's `min`/`max` compared a trimmed, case-insensitive form, so
-`Apple`/`apple` and ` 42 `/`42` compared equal even though the fidelity
+`Apple`/`apple` and `42`/`42` compared equal even though the fidelity
 rule treats them as distinct values.
 
 ### Implemented
@@ -7069,7 +7068,7 @@ only ever been verified on macOS, where the failure does not occur.
 
 - Reproduced the root cause: `rfd` 0.17.2's `build.rs` panics with
   `You need to choose at least one backend: gtk3 or xdg-portal features
-  for x86_64-linux` when neither backend feature is enabled and
+for x86_64-linux` when neither backend feature is enabled and
   `CARGO_CFG_TARGET_OS == "linux"`. macOS and Windows take a different
   branch of the build script, so the earlier macOS-only verification
   never hit it.
@@ -7319,7 +7318,7 @@ the window itself remains unlaunched here.
 
 - `gpui 0.2.2`'s `test-support` feature enables both `wayland` and `x11`;
   the project's release build used `default-features = false, features =
-  ["font-kit"]`.
+["font-kit"]`.
 - On Linux, `gpui::platform::current_platform` returns
   `HeadlessClient` unless one of those features is compiled in:
   `guess_compositor()` hardcodes the wayland/x11 display probes to `None`
@@ -7332,7 +7331,7 @@ the window itself remains unlaunched here.
 
 - `Cargo.toml`: the Linux target table now also selects
   `gpui = { default-features = false, features = ["font-kit", "x11",
-  "wayland"] }`, mirroring what `test-support` already enabled for
+"wayland"] }`, mirroring what `test-support` already enabled for
   `cargo test`. Both backends are kept because a Linux desktop may run
   either server (and a Wayland session would otherwise fall back to
   headless). macOS/Windows resolution is untouched: the table is
@@ -7344,7 +7343,7 @@ the window itself remains unlaunched here.
 ### Verified
 
 - `cargo tree --target x86_64-unknown-linux-gnu -e normal,features -i
-  gpui` (release/normal edges only) shows `font-kit`, `x11` and `wayland`
+gpui` (release/normal edges only) shows `font-kit`, `x11` and `wayland`
   for Linux; the same command for `aarch64-apple-darwin` shows only
   `font-kit`, confirming macOS is unchanged.
 - `cargo fmt --check` — clean.
@@ -7537,10 +7536,10 @@ Iteration 14.
 ### Verified
 
 - macOS resolution unchanged: `cargo tree --target aarch64-apple-darwin
-  -e normal,features -i gpui` still shows only `font-kit`;
+-e normal,features -i gpui` still shows only `font-kit`;
   `Cargo.lock` is unchanged; `cargo fmt --check`, `cargo build
-  --release`, `cargo test --release` and `cargo clippy --release
-  --all-targets` pass.
+--release`, `cargo test --release` and `cargo clippy --release
+--all-targets` pass.
 - The Windows fix is verified by this PR's Windows CI leg, which runs
   `target\release\anvil.exe --probe fixtures/large.csv` after build and
   test.
@@ -7605,7 +7604,7 @@ violated that principle.
 ### Verified
 
 - `cargo fmt --check`, `cargo build --release`, `cargo clippy --release
-  --all-targets` are clean.
+--all-targets` are clean.
 - `cargo test --release` — **480 passed, 7 ignored** (215 library with 3
   new `paths` unit tests, 178 binary with 1 ignored, 86 core with 6
   ignored, 1 style guard), up from 477.
@@ -7678,10 +7677,9 @@ platform build was wrong.
 - The new test was written first and confirmed to fail without the guard
   (`Broken pipe (os error 32)`), then passes with it.
 - `cargo fmt --check`, `cargo build --release`, `cargo clippy --release
-  --all-targets` clean.
+--all-targets` clean.
 - `cargo test --release` — **481 passed, 7 ignored** (216 library, 178
-  binary with 1 ignored, 86 core with 6 ignored, 1 style guard), up from
-  480.
+  binary with 1 ignored, 86 core with 6 ignored, 1 style guard), up from 480.
 - `cargo check --release --features nl-gliner` and `--features nl-model`
   succeed.
 
@@ -7701,7 +7699,6 @@ None.
 ### Issues / technical debt discovered
 
 None new.
-
 
 ---
 
@@ -7748,3 +7745,282 @@ None new.
 
 - Manually type multi-word phrases in Ask, filter, and search on Windows
   as part of the existing native GUI verification task.
+
+## 2026-10-02 — Iteration 20: dithered menu chrome, and the texture lag fix
+
+### Context
+
+The user wanted a dithered main menu area and reported the current
+shell as "insanely laggy". The lag was `ui/texture.rs`: the welcome,
+error and loading surfaces painted their dithered fields through a
+`canvas` whose paint callback ran on every repaint (hover, cursor
+blink, animation), walked every lattice cell of the whole region and
+submitted one `paint_quad` per surviving dot. Measured on the
+1200x700 welcome region (release): grain 26,154 dots / 939 us +
+stipple 25,782 dots / 768 us of compute, i.e. ~52k quad submissions
+plus 1.7 ms of UI-thread hashing per repaint - and multiples of that
+in dev builds. The menu chrome itself had no texture at all.
+
+### Implemented
+
+- `ui/texture.rs` rework:
+  - `grain` is now a GPU `checkerboard` `Background` (2 px pitch,
+    5% alpha): evaluated in the WGSL shader, so it repaints for
+    free. Signature changed from `grain(step, strength, color, seed)`
+    to `grain(size, alpha, color)`; the three call sites updated.
+  - `stipple` keeps the radial halftone but the halo is capped at
+    `MAX_REACH` (260 px) and only the lattice cells inside the
+    halo's bounding box are walked. The math is factored into a pure
+    `stipple_dots(width, height, shape, step, seed)` returning
+    origin-relative offsets, so it is unit-testable and the paint
+    callback only submits quads.
+  - New `chrome_dither(color)`: a GPU `pattern_slash` overlay
+    (~3 px diagonal period, peaking near 7% alpha) for the menu
+    chrome.
+- `view/shell.rs`: the title bar and command bar each carry a
+  `chrome_dither` overlay div (handler-free, so it never intercepts
+  a click, hover or the Windows title-bar drag). Welcome surface
+  updated to the new grain and a 6 px stipple step.
+- `view.rs`: error and loading placeholders updated to the new grain.
+
+### Verified
+
+- cargo build --release, cargo test --release (213 lib + 212 bin
+  incl. the shell tests that render the dithered title bar, command
+  bar and welcome surface + 86 core), cargo fmt, cargo clippy
+  --release: all clean, no new warnings.
+- New `stipple_dots(1200x700)` measurement: 1,916 dots in 128 us
+  (release) - ~27x fewer quads and ~13x less compute than the old
+  field, and the cost is now constant in window size (a 4000x3000
+  region produces the same halo as a 700x700 one; asserted in tests).
+- Native window launched on Windows and captured; pixel analysis of
+  the screenshot confirms all three layers paint: the title bar and
+  command bar oscillate 24<->36 luminance with the ~3 px slash
+  period, the welcome canvas alternates 18.4<->29.4 every 2 px
+  (checkerboard grain over canvas #0D131C), and primary-coloured
+  stipple dots appear inside the bounded halo. The app was killed
+  after capture.
+
+### Tests added/changed
+
+- Five new tests in `ui/texture.rs`: halo bounded in region size,
+  dot determinism (same seed identical, different seed differs),
+  window-sized compute cost (dots < 6000, < 50 ms even in debug),
+  and GPU pattern backgrounds paint non-transparent.
+
+### Roadmap changes
+
+- None: this is part of the in-progress `redesign/gpui-kit` slice;
+  its native visual acceptance checklist item stays open (only the
+  welcome screen and menu chrome were inspected, in Slate only).
+
+### Architecture changes
+
+- ARCHITECTURE.md: documented the material language (GPU pattern
+  dither/grain, bounded CPU stipple) in the shell section.
+- docs/ui-design.md: new "Material language" section with the
+  do-not-unbound-the-halo constraint.
+
+### Issues / technical debt discovered
+
+- The dither strength (0.10 alpha) is a one-line tweak if it reads
+  too strong; it was chosen to peak near 7% effective alpha.
+- Anvil Warm (light) appearance was not pixel-verified; the dither
+  colour is foreground-derived so it inverts automatically, but
+  native inspection is still owed by the open visual-acceptance
+  task.
+- The change sits uncommitted in the working tree on
+  `redesign/gpui-kit` alongside the rest of that in-progress
+  redesign; it was not committed separately because the touched
+  files already carry the uncommitted redesign work.
+
+### Next recommended task
+
+- Continue the redesign's native visual acceptance: Anvil Warm,
+  populated grid, query bars, dialogs, panel switching, divider
+  resizing and the 900x480 minimum, recording evidence per
+  docs/ui-design.md.
+
+## 2026-10-02 - Iteration 21: canonical design system and composed Home
+
+### Implemented
+
+- Audited existing docs, Kit APIs, source and dirty redesign before changing
+  presentation. Wrote `docs/design/ANVIL_DESIGN_SYSTEM.md` and
+  `HOME_WORKSPACE_SPEC.md` first, then reconciled them with implementation.
+- Established cool-metal/copper identity through the existing Kit theme,
+  including Button-specific overrides, focus, opaque data/value wells and
+  shared inspector type/geometry tokens. Kept search/selection cool.
+- Home now has an aligned opening lane, one genuine native Open action and
+  a cached abstract folded-material field: 4x4 Bayer thresholds, 6 px lattice,
+  bounded 520x420 geometry, fewer than 4000 quads. No idle timer or dot-list
+  allocation/generation per paint. Removed full-canvas Home grain after review.
+- Reduced chrome texture strength. Added stateless external-path drag-over
+  boundary/entrance lift using verified GPUI styling APIs.
+- Native review found Warm gutter blend inputs reversed and modal overlays
+  fully opaque; corrected the blend and added translucent scrim alpha. A
+  new contrast test caught 4.336:1 muted gutter text at the first calibration;
+  reduced the gutter tint to 0.045 and verified the >=4.5:1 gate passes.
+- Preserved existing uncommitted work and the entire backend/data workflow.
+  Added bounded Windows capture helper `tools/design-review.ps1`.
+
+### Verified
+
+- Final `cargo fmt`, `cargo fmt --check`, `cargo build --release`,
+  `cargo test --release` and `cargo clippy --release --all-targets` succeeded.
+  Release suite: 519 passed, 7 ignored; no project Clippy warnings.
+- Large CSV probe: 1,000,000 rows / 20 columns, 0 warnings, valid UTF-8,
+  184 ms on the recorded run. Multi-ZIP probe discovers both candidate paths.
+  Probe timing is not a before/after performance or GPU frame-time claim.
+- Launched and inspected native Windows Home/grid in Slate/Warm, typed BRL
+  into Find (143088 matches), navigated a cell, switched Column/Diagnostics,
+  and opened/dismissed shortcuts. Captures are under `tools/shots/design-*`.
+- Requested 1200x800 and 900x480 native sizes; the minimum capture is
+  916x488 including OS non-client extent. Home actions and the grid plus
+  auxiliary pane remain reachable. Final gutter tint adjustment is test-
+  verified; the preceding captures use 0.07 rather than 0.045.
+- Picker automation was attempted but the capture helper foregrounds the
+  main window and did not capture the native dialog; this is NOT picker
+  acceptance. Native external drop/abort, archive recovery and divider
+  dragging were not exercised. No macOS/Linux or screen-reader/frame testing.
+
+### Tests added/changed
+
+- Theme tests: copper button states and opaque data/well/gutter text meet
+  > =4.5:1 WCAG contrast; state fills are opaque; modal scrim is translucent;
+  > identity and informational/selection colors remain distinct.
+- Texture tests: Bayer threshold completeness, deterministic cached field,
+  fixed lattice pitch, geometry bounds and <4000 quad budget.
+- Real Kit Root tests: Home Open label and >=120x32 geometry at both window
+  sizes/modes; absent false archive action; appearance preserves document Arc.
+  No ignored test was added for unsupported headless native-picker APIs.
+
+### Roadmap changes
+
+- Added staged D1-D9 design migration under Milestone 5, marking specs,
+  tokens/primitives, Home, shared theme migration and scoped Windows/build
+  evidence complete. Full visual/platform acceptance remains unchecked.
+
+### Architecture changes
+
+- Documented cached Bayer field, shared material tokens, stateless drag styling
+  and canonical specs. Reconciled stale chrome/help/material prose in
+  architecture/UI notes; GPU patterns avoid CPU enumeration, not all GPU cost.
+
+### Issues / technical debt discovered
+
+- Persisted recents, persisted appearance/reduced effects, optional motion,
+  accessibility/scaling, native drop/picker/archive/resizing and macOS/Linux
+  acceptance remain explicitly staged; no fake recent rows or settings shipped.
+- Work remains uncommitted on pre-existing `redesign/gpui-kit`; no branch,
+  commit or PR was created because it would bundle substantial user-owned work.
+
+### Next recommended task
+
+- Exercise real native drop/leave/abort, picker cancellation, archive chooser
+  recovery and divider resizing against the new material system; record GPU
+  frame latency. Then implement bounded portable recent-source persistence
+  as its own vertical slice before adding real Home history.
+
+## 2026-10-02 - Iteration 22: recognizable dithered anvil artwork
+
+### Implemented
+
+- Replaced Home's abstract folds with an isometric anvil inspired by the
+  user's supplied blocky reference: broad head, narrow waist and base.
+- Eight convex faces use different Bayer-screen densities for depth; retained
+  copper tint, 6 px lattice, cached 520x420 geometry, positioning and <4000
+  quad budget. No image dependency, idle task or per-paint geometry allocation.
+
+### Verified
+
+- `cargo fmt --check`, `cargo build --release`, `cargo test --release` and
+  `cargo clippy --release --all-targets` passed. Twelve targeted texture tests
+  passed, including the new silhouette regression.
+- Launched native Windows and viewed normal-size Slate/Warm captures;
+  both show the recognizable anvil. Latest minimum capture showed stale
+  pre-resize contents clipped by the smaller native window, so it is not
+  minimum-layout acceptance. Headless Home geometry tests still pass at
+  both sizes; native resize acceptance remains open.
+
+### Tests added/changed
+
+- `anvil_has_a_broad_head_narrow_waist_and_solid_base` checks representative
+  face tones, negative space around the waist and that dots stay in the mask.
+- Existing cache/determinism/lattice/bounds/quad-budget tests remain passing.
+
+### Roadmap / architecture changes
+
+- Recorded artwork refinement under Milestone 5. Updated canonical design
+  specs, architecture and UI notes from abstract folds to anvil faces.
+
+### Issues / next recommended task
+
+- No backend or interaction behavior changed. Resolve native resize evidence
+  separately; other previously recorded design acceptance remains open.
+- Changes remain uncommitted alongside the user-owned redesign; no PR created.
+
+## 2026-10-02 - Iteration 23: balance the Home anvil proportions
+
+### Implemented
+
+- Centered head, waist and pedestal on local x=260; moved the waist beneath
+  the head and made left/right head overhangs equal at 98 px.
+- Shortened the head's length/depth, reduced head thickness from 76 to 60 px,
+  broadened the front face and reduced base thickness from 42 to 36 px.
+  Retained isometric face shading, copper Bayer treatment and cached bounds.
+
+### Verified
+
+- Release build, full release tests, Clippy all-targets and format check pass.
+  Thirteen targeted texture tests pass. Native Windows normal-size Slate/Warm
+  screenshots reviewed; the silhouette is visibly more centered on its waist.
+- No performance claim beyond the existing tested cache/quad/bounds contract.
+
+### Tests added/changed
+
+- Added `anvil_masses_share_a_center_and_equal_head_overhang` to check shared
+  geometric centers and equal overhangs. Updated representative face probes.
+
+### Roadmap / architecture changes
+
+- Annotated the existing Home artwork item and specified balanced proportions
+  in `HOME_WORKSPACE_SPEC.md`. No rendering architecture changed.
+
+### Issues / next recommended task
+
+- No backend or opening behavior changed; native resizing/scaling acceptance
+  remains the next evidence task. No commit/PR created amid user-owned work.
+
+## 2026-10-02 - Iteration 24: README cleanup and redesign PR preparation
+
+### Implemented
+
+- At the user's request, removed all temporary `.shots/` and `tools/`
+  screenshots, capture/debug scripts and logs before staging the redesign.
+- Captured a fresh native Slate Home, cropped away surrounding desktop and
+  retained only `docs/images/home-workspace.png` for the README.
+- Updated README workspace/features, canonical design links, implementation
+  limits and the implemented help shortcut. Added ignore rules for future
+  capture/log output; canonical specs mark deleted capture paths as historical.
+- Updated the CI Linux dependency comment for the Kit runtime.
+
+### Verified
+
+- Reviewed the retained image, README image path and untracked-file list;
+  no temporary captures/scripts/logs remain in the proposed change set.
+- Final Windows format check, full release tests and all-target Clippy pass;
+  preceding release build/probes/native review remain documented above.
+- Independent source review found no high-confidence merge blockers; native
+  cross-platform, resize/drop/accessibility and GPU acceptance remain open.
+
+### Roadmap / architecture changes
+
+- No feature acceptance was promoted. Documentation/assets cleanup only.
+  User authorized the full redesign commit, PR and merge once CI is green.
+
+### Handoff
+
+- Submit the coherent redesign through a conventional feature branch into
+  `master`; wait for the three-platform CI matrix, then merge and fast-forward
+  local `master`. Native acceptance gaps must remain explicit in the PR.

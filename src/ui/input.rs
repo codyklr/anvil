@@ -1,23 +1,117 @@
 //! Shared render + hit-test helpers for the editable text fields.
 //!
-//! GPUI 0.2.2 has no `TextInput` element, so the search and filter bars
-//! render their own editable areas. This module holds the pieces both
-//! share: shaping a single line for caret placement and pointer
-//! hit-testing, and the `div` that draws the text, the selection
-//! highlight, the caret, and a bounds-recording `canvas`.
+//! Query bars retain their tested `TextEdit` model rather than adopting
+//! Kit's retained input state. This module shares their compact field frame,
+//! shaping for caret placement and pointer hit-testing, and the text,
+//! selection, caret, and bounds-recording canvas.
 
-use std::ops::Range;
-
-use gpui::{
-    canvas, div, prelude::*, px, rems, AnyElement, App, Bounds, Div, HighlightStyle, Hsla, Pixels,
-    SharedString, StyledText, Window,
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::{
+    canvas, div, prelude::*, px, rems, AnyElement, App, Bounds, BoxShadow, Div, FocusHandle,
+    HighlightStyle, Hsla, Pixels, SharedString, StyledText, Window,
 };
 
-use super::theme;
+use super::{text_edit::TextEdit, theme};
+
+/// Height of a query bar. One row: label, field, live feedback, controls.
+pub(super) const BAR_HEIGHT: f32 = 40.;
+
+/// A shared label lane keeps the query editors and their feedback aligned.
+pub(super) fn query_label(label: &'static str, cx: &App) -> Div {
+    div()
+        .w(px(46.))
+        .flex_shrink_0()
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
+        .text_color(theme::palette(cx).muted_foreground)
+        .child(label)
+}
+
+/// The container for a query bar.
+///
+/// Find, Filter, Ask and Go to row are the same control with different
+/// verbs, so they share one frame: a single 40 px row sitting above the
+/// grid, a hairline under it, and a soft shadow so it reads as a surface
+/// floating over the data rather than as another chrome band.
+///
+/// The caller adds focus, key handling and children; this owns the frame so
+/// the four bars cannot drift apart.
+pub(super) fn query_bar(colors: theme::Palette) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(px(BAR_HEIGHT))
+        .px(px(8.))
+        .flex_shrink_0()
+        .bg(colors.panel)
+        .shadow(vec![BoxShadow {
+            offset: gpui_kit::point(px(0.), px(1.)),
+            blur_radius: px(6.),
+            spread_radius: px(0.),
+            color: colors.shadow,
+            inset: false,
+        }])
+        .border_b_1()
+        .border_color(colors.border)
+}
+
+/// A vertical hairline that separates the field's controls from the
+/// window-level ones.
+pub(super) fn query_rule(colors: theme::Palette) -> Div {
+    div().w(px(1.)).h(px(16.)).mx(px(2.)).bg(colors.border)
+}
+
+/// Frame the existing editor without changing its text-origin hit testing.
+/// Padding belongs here; the inner canvas still records only the text bounds.
+pub(super) fn query_field(
+    editor: impl IntoElement,
+    focus: &FocusHandle,
+    invalid: bool,
+    window: &Window,
+    cx: &App,
+) -> Div {
+    let colors = theme::palette(cx);
+    let focused = focus.is_focused(window);
+    let focus = focus.clone();
+    div()
+        .flex_1()
+        .min_w_0()
+        .h_6()
+        .flex()
+        .items_center()
+        .px_2()
+        .bg(colors.surface)
+        .border_1()
+        .border_color(if focused {
+            cx.theme().ring
+        } else if invalid {
+            colors.danger
+        } else {
+            colors.border
+        })
+        .rounded(cx.theme().radius_tokens().sm)
+        .cursor_text()
+        .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
+            window.focus(&focus, cx);
+        })
+        .child(editor)
+}
+
+pub(super) fn query_feedback(text: String, color: Hsla) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .text_xs()
+        .text_color(color)
+        .child(text)
+}
 
 /// Windows reports Space as a named key without printable `key_char`.
 /// Prefer supplied text so other backends still insert it exactly once.
-pub(super) fn printable_key_text(keystroke: &gpui::Keystroke) -> Option<&str> {
+pub(super) fn printable_key_text(keystroke: &gpui_kit::Keystroke) -> Option<&str> {
     let text = keystroke
         .key_char
         .as_deref()
@@ -64,7 +158,7 @@ fn input_font_size(window: &Window) -> Pixels {
 /// Shape a single line at the field's rendered font size. The result is
 /// cached by the text system, so calling this once per frame and once
 /// per mouse event is cheap.
-fn shape_input_line(window: &mut Window, text: &str) -> gpui::ShapedLine {
+fn shape_input_line(window: &mut Window, text: &str) -> gpui_kit::ShapedLine {
     let style = window.text_style().clone();
     let font_size = input_font_size(window);
     let runs = [style.to_run(text.len())];
@@ -73,32 +167,48 @@ fn shape_input_line(window: &mut Window, text: &str) -> gpui::ShapedLine {
         .shape_line(SharedString::from(text.to_string()), font_size, &runs, None)
 }
 
-/// The inner editable area: text (with a selection highlight), a 1px
+/// Frame-local presentation of an existing editor; no retained input state.
+pub(super) struct InputPresentation<'a> {
+    pub(super) edit: &'a TextEdit,
+    pub(super) focus: &'a FocusHandle,
+    pub(super) placeholder: &'a str,
+    pub(super) debug_id: &'static str,
+}
+
+/// The inner editable area: text (with a selection highlight), a focused
 /// caret, and a hitbox-free `canvas` that reports the area's window
 /// bounds through `on_bounds` each frame. The caller attaches its own
 /// mouse handlers (the filter and search fields route to different
 /// `MainView` methods) and wraps this in the bar's flex row.
 pub(super) fn editable_text_area(
     window: &mut Window,
-    text: &str,
-    selection: Range<usize>,
-    caret: usize,
-    placeholder: &str,
-    debug_id: &'static str,
+    cx: &App,
+    presentation: InputPresentation<'_>,
     on_bounds: impl Fn(Bounds<Pixels>, &mut App) + 'static,
 ) -> Div {
-    let caret_x = text_caret_x(window, text, caret);
+    let InputPresentation {
+        edit,
+        focus,
+        placeholder,
+        debug_id,
+    } = presentation;
+    let colors = theme::palette(cx);
+    let text = edit.text();
+    let selection = edit.selection();
+    let caret_x = focus
+        .is_focused(window)
+        .then(|| text_caret_x(window, text, edit.caret()));
 
     let text_content: AnyElement = if text.is_empty() {
         div()
-            .text_color(theme::TEXT_DIM)
+            .text_color(colors.muted_foreground)
             .child(placeholder.to_string())
             .into_any_element()
     } else if selection.is_empty() {
         StyledText::new(text.to_string()).into_any_element()
     } else {
         let highlight = HighlightStyle {
-            background_color: Some(Hsla::from(theme::BG_SELECTED)),
+            background_color: Some(colors.selection),
             ..Default::default()
         };
         StyledText::new(text.to_string())
@@ -118,29 +228,137 @@ pub(super) fn editable_text_area(
     div()
         .relative()
         .flex_1()
+        .min_w_0()
         .overflow_hidden()
         // Keep this in sync with `input_font_size`, which shapes the
         // caret and hit-tests pointer clicks.
         .text_sm()
-        .text_color(theme::TEXT_STRONG)
+        .text_color(colors.strong_foreground)
         .debug_selector(move || debug_id.to_string())
         .child(text_content)
-        .child(
-            div()
-                .absolute()
-                .left(px(f32::from(caret_x)))
-                .top_0()
-                .bottom_0()
-                .w(px(1.5))
-                .bg(theme::TEXT_STRONG),
-        )
+        .when_some(caret_x, |area, caret_x| {
+            area.child(
+                div()
+                    .absolute()
+                    .left(caret_x)
+                    .top_0()
+                    .bottom_0()
+                    .w(px(1.5))
+                    .bg(colors.strong_foreground)
+                    .debug_selector(move || format!("{debug_id}-caret")),
+            )
+        })
         .child(bounds_recorder)
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    use gpui_kit::{Context, FocusHandle, MouseButton, MouseDownEvent, Render, TestAppContext};
+
+    struct EditorHarness {
+        focus: FocusHandle,
+        edit: TextEdit,
+        bounds: Option<Bounds<Pixels>>,
+    }
+
+    impl Render for EditorHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let entity = cx.entity();
+            let editor = editable_text_area(
+                window,
+                cx,
+                InputPresentation {
+                    edit: &self.edit,
+                    focus: &self.focus,
+                    placeholder: "Query",
+                    debug_id: "query-inner",
+                },
+                move |bounds, cx| {
+                    entity.update(cx, |view, _| view.bounds = Some(bounds));
+                },
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, _| {
+                    let bounds = this.bounds.expect("text bounds");
+                    let ix =
+                        text_index_at_point(window, this.edit.text(), bounds, event.position.x);
+                    this.edit.set_caret(ix, false);
+                }),
+            );
+            div()
+                .p_3()
+                .text_sm()
+                .track_focus(&self.focus)
+                .child(query_field(editor, &self.focus, false, window, cx))
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn query_caret_follows_focus_without_changing_the_editor(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            gpui_kit::init(cx);
+            let mut edit = TextEdit::from("héllo");
+            edit.select_all();
+            EditorHarness {
+                focus: cx.focus_handle().tab_stop(true),
+                edit,
+                bounds: None,
+            }
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-inner-caret").is_none());
+
+        cx.update_window_entity(&view, |view, window, cx| window.focus(&view.focus, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-inner-caret").is_some());
+
+        cx.update_window_entity(&view, |_, window, cx| window.blur(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("query-inner-caret").is_none());
+        cx.update_window_entity(&view, |view, _, _| {
+            assert_eq!(view.edit.text(), "héllo");
+            assert_eq!(view.edit.selection(), 0.."héllo".len());
+            assert_eq!(view.edit.caret(), "héllo".len());
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn query_frame_preserves_text_origin_and_restores_editor_focus(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            gpui_kit::init(cx);
+            EditorHarness {
+                focus: cx.focus_handle().tab_stop(true),
+                edit: "héllo".into(),
+                bounds: None,
+            }
+        });
+        cx.run_until_parked();
+        let position = cx.update_window_entity(&view, |view, window, _| {
+            let bounds = view.bounds.expect("text bounds");
+            // A UTF-8 byte boundary measured from the inner text origin,
+            // not from the padded frame, must round-trip through hit testing.
+            gpui_kit::point(
+                bounds.origin.x + text_caret_x(window, view.edit.text(), 3),
+                bounds.center().y,
+            )
+        });
+        cx.simulate_mouse_down(position, MouseButton::Left, gpui_kit::Modifiers::none());
+        cx.simulate_mouse_up(position, MouseButton::Left, gpui_kit::Modifiers::none());
+        cx.run_until_parked();
+        cx.update_window_entity(&view, |view, window, _| {
+            assert_eq!(view.edit.caret(), 3);
+            assert!(view.focus.is_focused(window));
+        });
+    }
 }
 
 #[cfg(test)]
 mod keyboard_tests {
     use super::printable_key_text;
-    use gpui::{Keystroke, Modifiers};
+    use gpui_kit::{Keystroke, Modifiers};
 
     #[test]
     fn windows_space_without_key_char_is_printable() {

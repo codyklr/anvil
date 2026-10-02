@@ -5,6 +5,11 @@
 //! module holds the filter half of its inherent methods. Data-side
 //! parsing/evaluation lives in `anvil_core::query::filter`.
 
+use gpui_kit::component::{
+    button::{Button, ButtonVariants},
+    Disableable, IconName, Sizable,
+};
+
 use super::*;
 
 impl MainView {
@@ -388,6 +393,7 @@ impl MainView {
     /// through `render_overlay` so it paints above the grid. `None` when
     /// the popup is closed or there is nothing to show.
     pub(super) fn render_filter_suggestions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let colors = theme::palette(cx);
         if !self.filter_popup_open || self.filter_suggestions.is_empty() {
             return None;
         }
@@ -402,14 +408,13 @@ impl MainView {
                     .debug_selector(move || format!("filter-suggestion-{ix}"))
                     .px_3()
                     .py_1()
-                    .cursor_pointer()
-                    .when(ix == selected, |s| s.bg(theme::BG_SELECTED))
+                    .when(ix == selected, |s| s.bg(colors.selection))
                     .text_color(if ix == selected {
-                        theme::TEXT_STRONG
+                        colors.strong_foreground
                     } else {
-                        theme::TEXT
+                        colors.foreground
                     })
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    .hover(|s| s.bg(colors.hover))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.accept_filter_suggestion(ix, cx)),
                     )
@@ -421,15 +426,16 @@ impl MainView {
             div()
                 .id("filter-suggestions")
                 .absolute()
-                .top(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .left(px(64.))
-                .w(px(320.))
-                .max_h(px(200.))
+                // Match the editor lane: band inset + label width + row gap.
+                .top(gpui_kit::rems(2.25))
+                .left(gpui_kit::rems(6.25))
+                .w_80()
+                .max_h_48()
                 .overflow_y_scroll()
                 .track_scroll(&self.filter_suggestion_scroll)
-                .bg(theme::BG_PANEL)
+                .bg(colors.panel)
                 .border_1()
-                .border_color(theme::BORDER_STRONG)
+                .border_color(colors.border_strong)
                 .rounded_sm()
                 .children(rows)
                 .into_any_element(),
@@ -444,20 +450,21 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let colors = theme::palette(cx);
         if !self.filter_open {
             return None;
         }
-        let input = self.filter_input.text().to_string();
-        let (status_text, status_color) = self.filter_status_text();
-        let selection = self.filter_input.selection();
+        let (status_text, status_color) = self.filter_status_text(cx);
 
         let text_area = input::editable_text_area(
             window,
-            &input,
-            selection,
-            self.filter_input.caret(),
-            "column op value, e.g. country == US AND amount > 100",
-            "anvil-filter-input",
+            cx,
+            input::InputPresentation {
+                edit: &self.filter_input,
+                focus: &self.filter_focus_handle,
+                placeholder: "column op value, e.g. country == US AND amount > 100",
+                debug_id: "anvil-filter-input",
+            },
             {
                 let entity = cx.entity();
                 move |bounds, app_cx| {
@@ -468,76 +475,93 @@ impl MainView {
             },
         )
         .on_mouse_down(
-            gpui::MouseButton::Left,
+            gpui_kit::MouseButton::Left,
             cx.listener(Self::filter_mouse_down),
         )
         .on_mouse_move(cx.listener(Self::filter_mouse_move))
         .on_mouse_up(
-            gpui::MouseButton::Left,
+            gpui_kit::MouseButton::Left,
             cx.listener(|this, _ev: &MouseUpEvent, _window, cx| this.filter_mouse_up(cx)),
         );
 
         Some(
-            div()
-                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .bg(theme::BG_PANEL)
-                .border_b_1()
-                .border_color(theme::BORDER_STRONG)
+            input::query_bar(colors)
+                .min_w_0()
                 .key_context("Filter")
-                .track_focus(&self.filter_focus_handle)
-                .on_key_down(cx.listener(Self::on_filter_key_down))
+                .track_focus(&self.filter_focus_handle.clone().tab_stop(true))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if this.filter_focus_handle.is_focused(window)
+                        || event.keystroke.key == "escape"
+                    {
+                        this.on_filter_key_down(event, window, cx);
+                    }
+                }))
+                .child(input::query_label("Filter", cx))
+                .child(input::query_field(
+                    text_area,
+                    &self.filter_focus_handle,
+                    self.filter_error.is_some(),
+                    window,
+                    cx,
+                ))
+                .child(input::query_feedback(status_text, status_color))
+                .child(input::query_rule(colors))
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Filter:"),
+                    Button::new("filter-apply")
+                        .small()
+                        .primary()
+                        .icon(IconName::Check)
+                        .label("Apply")
+                        .tooltip("Apply expression · Enter")
+                        .loading(self.filter_applied.is_some() && self.filter_rows.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.apply_filter_input(cx))),
                 )
-                .child(text_area)
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(status_text),
+                    Button::new("filter-clear")
+                        .small()
+                        .ghost()
+                        .label("Clear")
+                        .disabled(self.filter_applied.is_none() && self.filter_input.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_filter(cx))),
                 )
                 .child(
-                    // Explicit close affordance; Esc works too, and
-                    // `Action::Escape` closes the bar from the grid.
-                    div()
-                        .id("filter-close")
+                    Button::new("filter-close")
+                        .small()
+                        .ghost()
                         .debug_selector(|| "filter-close".to_string())
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .px_1()
-                        .text_color(theme::TEXT_DIM)
-                        .hover(|s| s.text_color(theme::WARN))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_filter(cx)))
-                        .child("×"),
+                        .icon(IconName::Close)
+                        .accessibility_label("Close Filter")
+                        .tooltip("Close Filter · Esc · Keeps the applied filter")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_filter(cx))),
                 )
                 .into_any_element(),
         )
     }
 
-    /// Status suffix for the filter bar: a parse error, a "filtering…"
-    /// note, the row count, or "none".
-    pub(super) fn filter_status_text(&self) -> (String, gpui::Rgba) {
+    /// Status suffix for the filter bar: a parse error, a "filtering..."
+    /// note, the row count, or the shortcut hint.
+    pub(super) fn filter_status_text(&self, cx: &gpui_kit::App) -> (String, gpui_kit::Hsla) {
+        let colors = theme::palette(cx);
         if let Some(error) = &self.filter_error {
-            return (error.clone(), theme::WARN);
+            return (error.clone(), colors.danger);
         }
         match (&self.filter_applied, &self.filter_rows) {
-            (Some(_), Some(rows)) if rows.is_empty() => ("no matches".to_string(), theme::WARN),
+            (Some(_), Some(rows)) if rows.is_empty() => {
+                ("no rows match".to_string(), colors.warning)
+            }
             (Some(_), Some(rows)) => (
-                format!("{} rows", format_count(rows.len() as u64)),
-                theme::TEXT_DIM,
+                format!(
+                    "{} of {} rows",
+                    format_count(rows.len() as u64),
+                    format_count(self.model.as_ref().map(|m| m.row_count()).unwrap_or(0))
+                ),
+                colors.muted_foreground,
             ),
-            (Some(_), None) => ("filtering…".to_string(), theme::TEXT_DIM),
-            (None, _) => ("none".to_string(), theme::TEXT_DIM),
+            (Some(_), None) => ("filtering...".to_string(), colors.muted_foreground),
+            (None, _) => (
+                "Enter applies, Tab completes".to_string(),
+                colors.muted_foreground,
+            ),
         }
     }
 }

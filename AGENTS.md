@@ -201,6 +201,35 @@ in a later iteration.
 
 ---
 
+## UI Design Conventions
+
+Read [docs/ui-design.md](docs/ui-design.md) before changing presentation.
+The GPUI Kit redesign is an investigation workspace, not a spreadsheet
+rewrite. Preserve these boundaries:
+
+- Use `gpui-kit = "=0.7.0"` as the single direct UI dependency and import
+  framework/component/assets APIs through `gpui_kit`. The lockfile uses
+  `gpui-pre` 0.3.7; do not mix in a second GPUI runtime or invent APIs.
+- Prefer Kit Buttons, menus, dialogs, native-aware TitleBar and resizable
+  primitives for shell controls. Keep platform window behavior intact.
+- Keep raw color definitions in `src/ui/theme.rs`; consume the active Kit
+  theme or semantic `Palette` snapshots, never inline renderer hex colors.
+  Review both Anvil Slate (dark) and Anvil Warm (light).
+- Keep one right-hand auxiliary surface at a time (Column, Diagnostics,
+  or Cell). Pane layout and grid viewport calculations must share the
+  geometry in `view/workspace.rs`; never infer widths from stale bounds.
+- Retain the custom virtualized grid and its physical metrics: 22 px rows,
+  12 px monospace data text using Kit's mono family. Preserve the bounded
+  text cache, byte fidelity, row-reference queries and asynchronous scans.
+- Query bars intentionally retain `TextEdit` and shared `ui/input.rs`
+  rendering/hit-testing. A styling migration does not imply native IME or
+  composition support; any input-model replacement is a separate slice.
+- Distinguish implementation from evidence. Inspect the native window at
+  normal and 900 x 480 minimum sizes, in both appearances, and record
+  actual test/probe/manual results before claiming visual acceptance.
+
+---
+
 ## Performance Discipline
 
 Anvil is fundamentally a high-performance data viewer. Performance
@@ -307,8 +336,7 @@ numbered sequentially. Each ADR records:
 Do not create ADRs for trivial implementation choices. The
 generation counter for cancellation, the mmap-based data
 representation, and the per-row byte-offset index are good
-candidates for ADRs but were not yet recorded as such at Milestone
-1.
+candidates for ADRs but were not yet recorded as such at Milestone 1.
 
 ---
 
@@ -366,7 +394,7 @@ A candidate for a small ADR-style note in `ARCHITECTURE.md`:
 A candidate for a real `docs/adr/` entry:
 
 - Memory-mapped representation for direct files (random row access
-  + zero copy vs. tradeoffs like size and platform behaviour).
+  - zero copy vs. tradeoffs like size and platform behaviour).
 - Decompress-to-temp + mmap strategy for ZIP entries (vs. streaming
   into the indexer).
 

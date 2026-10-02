@@ -6,6 +6,11 @@
 //! used by the scope chip. The shared editable-field rendering lives
 //! in `super::input`.
 
+use gpui_kit::component::{
+    button::{Button, ButtonVariants},
+    Disableable, IconName, Selectable, Sizable,
+};
+
 use super::*;
 
 impl MainView {
@@ -405,13 +410,12 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let colors = theme::palette(cx);
         if !self.search_open {
             return None;
         }
-        let query = self.search_query.text().to_string();
-        let (status_text, status_color) = self.search_status_text();
+        let (status_text, status_color) = self.search_status_text(cx);
         let case_active = self.search_case_sensitive;
-        let selection = self.search_query.selection();
         let scope_label = self.search_column.map(|col| {
             let headers = self
                 .model
@@ -421,138 +425,124 @@ impl MainView {
             search_column_label(headers, col)
         });
 
+        let editor = input::editable_text_area(
+            window,
+            cx,
+            input::InputPresentation {
+                edit: &self.search_query,
+                focus: &self.search_focus_handle,
+                placeholder: "Search values…",
+                debug_id: "anvil-search-input",
+            },
+            {
+                let entity = cx.entity();
+                move |bounds, app_cx| {
+                    entity.update(app_cx, |view, _| view.search_text_bounds = Some(bounds));
+                }
+            },
+        )
+        .on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(Self::search_mouse_down),
+        )
+        .on_mouse_move(cx.listener(Self::search_mouse_move))
+        .on_mouse_up(
+            gpui_kit::MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, cx| this.search_mouse_up(cx)),
+        );
+
         Some(
-            div()
-                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .bg(theme::BG_PANEL)
-                .border_b_1()
-                .border_color(theme::BORDER_STRONG)
+            input::query_bar(colors)
+                .min_w_0()
                 .key_context("Search")
-                .track_focus(&self.search_focus_handle)
-                .on_key_down(cx.listener(Self::on_search_key_down))
+                .track_focus(&self.search_focus_handle.clone().tab_stop(true))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    // Buttons own their keyboard activation; only the editor edits text.
+                    if this.search_focus_handle.is_focused(window)
+                        || event.keystroke.key == "escape"
+                    {
+                        this.on_search_key_down(event, window, cx);
+                    }
+                }))
+                .child(input::query_label("Find", cx))
+                .child(input::query_field(
+                    editor,
+                    &self.search_focus_handle,
+                    false,
+                    window,
+                    cx,
+                ))
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Find:"),
-                )
-                .child(
-                    input::editable_text_area(
-                        window,
-                        &query,
-                        selection,
-                        self.search_query.caret(),
-                        "type to search…",
-                        "anvil-search-input",
-                        {
-                            let entity = cx.entity();
-                            move |bounds, app_cx| {
-                                entity.update(app_cx, |view, _| {
-                                    view.search_text_bounds = Some(bounds);
-                                });
-                            }
-                        },
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(Self::search_mouse_down),
-                    )
-                    .on_mouse_move(cx.listener(Self::search_mouse_move))
-                    .on_mouse_up(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _ev: &MouseUpEvent, _window, cx| {
-                            this.search_mouse_up(cx)
-                        }),
-                    ),
-                )
-                .child(
-                    // `Aa`: toggle byte-exact (case-sensitive) search.
-                    div()
-                        .id("search-case-toggle")
-                        .flex_shrink_0()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(theme::BORDER_STRONG)
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(if case_active {
-                            theme::TEXT_STRONG
-                        } else {
-                            theme::TEXT_DIM
-                        })
-                        .bg(if case_active {
-                            theme::BG_SELECTED
-                        } else {
-                            theme::BG_PANEL
-                        })
-                        .hover(|s| s.bg(theme::BG_ROW_HOVER))
+                    Button::new("search-case-toggle")
+                        .small()
+                        .ghost()
+                        .icon(IconName::CaseSensitive)
+                        .accessibility_label("Match case")
+                        .tooltip("Match case exactly")
+                        .selected(case_active)
+                        .toggled(case_active)
                         .on_click(
                             cx.listener(|this, _, _, cx| this.toggle_search_case_sensitive(cx)),
-                        )
-                        .child("Aa"),
+                        ),
                 )
-                .when_some(scope_label, |this, label| {
-                    this.child(
-                        // Column-scope chip, set by clicking a header.
+                .child(
+                    Button::new("search-previous")
+                        .small()
+                        .ghost()
+                        .icon(IconName::ChevronUp)
+                        .accessibility_label("Previous match")
+                        .tooltip("Previous match · Shift+Enter / Shift+F3")
+                        .disabled(self.search_matches.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| this.advance_match(-1, cx))),
+                )
+                .child(
+                    Button::new("search-next")
+                        .small()
+                        .ghost()
+                        .icon(IconName::ChevronDown)
+                        .accessibility_label("Next match")
+                        .tooltip("Next match · Enter / F3")
+                        .disabled(self.search_matches.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| this.advance_match(1, cx))),
+                )
+                // The match counter sits with the navigation controls it
+                // drives, not on a row of its own far from them.
+                .child(input::query_feedback(status_text, status_color))
+                .child(input::query_rule(colors))
+                .when_some(scope_label, |row, label| {
+                    row.child(
                         div()
-                            .id("search-scope-chip")
-                            .flex_shrink_0()
                             .flex()
-                            .flex_row()
                             .items_center()
                             .gap_1()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(theme::BG_SELECTED)
-                            .text_xs()
-                            .text_color(theme::TEXT_STRONG)
-                            .child(format!("in {label}"))
+                            .flex_shrink_0()
+                            .child(div().text_xs().text_color(colors.foreground).child(label))
                             .child(
-                                div()
-                                    .id("search-scope-clear")
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(theme::WARN))
+                                Button::new("search-scope-clear")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Close)
+                                    .accessibility_label("Search all columns")
+                                    .tooltip("Remove column scope")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.clear_search_column(cx)),
-                                    )
-                                    .child("×"),
+                                    ),
                             ),
                     )
                 })
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(status_text),
-                )
-                .child(
-                    // Explicit close affordance: Esc also works, but a
-                    // visible × means the bar is always dismissable
-                    // without knowing the shortcut.
-                    div()
-                        .id("search-close")
+                    Button::new("search-close")
+                        .small()
+                        .ghost()
                         .debug_selector(|| "search-close".to_string())
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .px_1()
-                        .text_color(theme::TEXT_DIM)
-                        .hover(|s| s.text_color(theme::WARN))
+                        .icon(IconName::Close)
+                        .accessibility_label("Close Find")
+                        .tooltip("Close Find · Esc")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.close_search();
                             this.focus_grid_on_next_frame = true;
                             cx.notify();
-                        }))
-                        .child("×"),
+                        })),
                 )
                 .into_any_element(),
         )
@@ -561,15 +551,26 @@ impl MainView {
     /// Status-bar text + colour for the search bar: "N matches", "no
     /// matches", or "searching…" depending on whether a task is in
     /// flight.
-    pub(super) fn search_status_text(&self) -> (String, gpui::Rgba) {
+    pub(super) fn search_status_text(&self, cx: &gpui_kit::App) -> (String, gpui_kit::Hsla) {
+        let colors = theme::palette(cx);
+        if self.search_query.is_empty() {
+            return (
+                if self.search_column.is_some() {
+                    "scoped to one column".to_string()
+                } else {
+                    "searching all columns".to_string()
+                },
+                colors.muted_foreground,
+            );
+        }
         if !self.search_query.is_empty() && self.search_matches.is_empty() {
             // The empty match list could be either "still searching" or
             // "no matches". We treat an in-flight search task (or a
             // generation mismatch) as "searching…".
             if self.search_task.is_some() {
-                return ("searching…".to_string(), theme::TEXT_DIM);
+                return ("searching…".to_string(), colors.muted_foreground);
             }
-            return ("no matches".to_string(), theme::WARN);
+            return ("no matches".to_string(), colors.warning);
         }
         let total = self.search_matches.len();
         let active = if self.search_active >= 0 {
@@ -577,7 +578,7 @@ impl MainView {
         } else {
             0
         };
-        (format!("{active} of {total}"), theme::TEXT_DIM)
+        (format!("{active} of {total}"), colors.muted_foreground)
     }
 }
 

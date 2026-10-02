@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use gpui::{
-    div, prelude::*, px, rgb, HighlightStyle, Hsla, IntoElement, MouseDownEvent, MouseMoveEvent,
-    Pixels, SharedString, StyledText,
+use gpui_kit::{
+    div, prelude::*, px, HighlightStyle, Hsla, IntoElement, MouseDownEvent, MouseMoveEvent, Pixels,
+    SharedString, StyledText,
 };
 
 use anvil_core::{
@@ -293,11 +293,20 @@ fn warning_glyph(kind: WarningKind) -> &'static str {
 
 /// Colour of the row-number gutter for a warning row. Quoting problems
 /// are errors; the rest are warnings.
-fn warning_color(kind: WarningKind) -> gpui::Rgba {
+fn warning_color(kind: WarningKind, colors: theme::Palette) -> Hsla {
     match kind {
-        WarningKind::UnterminatedQuote => theme::ERROR,
-        _ => theme::WARN,
+        WarningKind::UnterminatedQuote => colors.danger,
+        _ => colors.warning,
     }
+}
+
+/// Frame-local inputs for the horizontally virtualized header.
+pub struct HeaderContext {
+    pub scroll_x: f32,
+    pub viewport_w: f32,
+    pub scoped_column: Option<usize>,
+    pub sort: Option<(usize, bool)>,
+    pub colors: theme::Palette,
 }
 
 /// The sticky header row. Renders only the visible column headers.
@@ -312,44 +321,49 @@ fn warning_color(kind: WarningKind) -> gpui::Rgba {
 /// the same `entity.update` closure pattern as the per-cell handlers.
 pub fn render_header<F, G>(
     model: &GridModel,
-    scroll_x: f32,
-    viewport_w: f32,
-    scoped_column: Option<usize>,
-    sort: Option<(usize, bool)>,
+    ctx: &HeaderContext,
     on_header_click: F,
     on_resize_start: G,
 ) -> impl IntoElement
 where
-    F: Fn(usize, &MouseDownEvent, &mut gpui::App) + Clone + 'static,
-    G: Fn(usize, &MouseDownEvent, &mut gpui::App) + Clone + 'static,
+    F: Fn(usize, &MouseDownEvent, &mut gpui_kit::App) + Clone + 'static,
+    G: Fn(usize, &MouseDownEvent, &mut gpui_kit::App) + Clone + 'static,
 {
+    let HeaderContext {
+        scroll_x,
+        viewport_w,
+        scoped_column,
+        sort,
+        colors,
+    } = *ctx;
     let vis = model.layout.visible(scroll_x, viewport_w);
     let pad = model.layout.offset_of(vis.start);
     let mut cells = Vec::with_capacity(vis.len());
     for col in vis {
-        let mut label = model.doc.meta.column_label(col);
-        if let Some((sort_col, descending)) = sort {
-            if sort_col == col {
-                label.push(' ');
-                label.push(if descending { '▼' } else { '▲' });
-            }
-        }
+        // The label is left alone: the sort direction is drawn as a caret
+        // beside it, so the name keeps its natural leading edge.
+        let label = model.doc.meta.column_label(col);
         let click = on_header_click.clone();
         let mut cell = div()
             .relative()
             .flex_shrink_0()
             .w(model.layout.width_of(col))
+            .h_full()
+            .line_height(theme::HEADER_HEIGHT)
             .px(theme::CELL_PAD_X)
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
             .truncate()
-            .cursor_pointer()
             .debug_selector(move || format!("header-cell-{col}"))
-            .text_color(theme::TEXT_STRONG)
-            .hover(|s| s.bg(theme::BG_ROW_HOVER));
+            .text_color(colors.foreground)
+            .hover(|s| s.bg(colors.hover));
         if scoped_column == Some(col) {
             // Persistent marker for the search column scope.
-            cell = cell.bg(theme::BG_MATCH_ACTIVE);
+            cell = cell.bg(colors.search_active);
         }
-        cell = cell.on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+        cell = cell.on_mouse_down(gpui_kit::MouseButton::Left, move |ev, _window, app_cx| {
             click(col, ev, app_cx);
         });
         // A thin drag handle on the column's right edge. It claims the
@@ -363,33 +377,61 @@ where
                 .h_full()
                 .w(px(5.))
                 .cursor_ew_resize()
-                .hover(|s| s.bg(theme::ACCENT))
+                .hover(|s| s.bg(colors.primary))
                 .debug_selector(move || format!("header-resize-{col}"))
-                .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+                .on_mouse_down(gpui_kit::MouseButton::Left, move |ev, _window, app_cx| {
                     app_cx.stop_propagation();
                     resize(col, ev, app_cx);
                 }),
         );
-        cells.push(cell.child(label));
+        // A direction caret rather than a trailing glyph, so a sorted column
+        // reads at a glance without disturbing the label's left edge.
+        let sorted = sort.map(|(sort_col, _)| sort_col == col).unwrap_or(false);
+        cells.push(
+            cell.child(div().flex_1().min_w_0().truncate().child(label))
+                .when(sorted, |header| {
+                    header.child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(6.))
+                            .text_color(colors.primary)
+                            .child(if sort.map(|(_, desc)| desc).unwrap_or(false) {
+                                "\u{25BE}"
+                            } else {
+                                "\u{25B4}"
+                            }),
+                    )
+                }),
+        );
     }
 
     div()
         .flex()
         .flex_row()
-        .items_center()
+        .items_stretch()
         .h(theme::HEADER_HEIGHT)
         .w_full()
-        .bg(theme::BG_HEADER)
+        .flex_shrink_0()
+        .bg(colors.header)
         .border_b_1()
-        .border_color(theme::BORDER_STRONG)
-        .text_xs()
+        .border_color(colors.border)
+        .text_size(px(11.))
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
         .child(
-            // Row-number gutter's header.
+            // Row-number gutter's header: quiet, and separated from the data
+            // by the same rule the rows use.
             div()
                 .flex_shrink_0()
                 .w(theme::ROW_NUMBER_WIDTH)
-                .px(theme::CELL_PAD_X)
-                .text_color(theme::TEXT_DIM)
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_end()
+                .pr(theme::CELL_PAD_X)
+                .bg(colors.gutter)
+                .border_r_1()
+                .border_color(colors.gutter_rule)
+                .text_color(colors.empty_foreground)
                 .child("#"),
         )
         .child(
@@ -408,10 +450,11 @@ where
 /// so `render_row` does not grow an unbounded argument list as more
 /// per-frame state is added.
 pub struct RowContext<'a> {
+    pub colors: theme::Palette,
     pub selection: &'a Selection,
     pub scroll_x: f32,
     pub viewport_w: f32,
-    /// Rectangle of the most recent copy, painted `theme::BG_COPIED`.
+    /// Rectangle of the most recent copy, painted `colors.copied`.
     pub copy_flash: Option<(CellPos, CellPos)>,
     /// Sorted list of record indexes that match the current search
     /// query. Empty when no search is active. Looked up by binary
@@ -455,9 +498,9 @@ fn should_highlight(options: &SearchOptions, column: usize) -> bool {
 /// Renders a single data row. `index` is the 0-based record index.
 ///
 /// `ctx.selection` is consulted to choose the per-cell background: cells
-/// inside the selection rectangle are filled with `theme::BG_SELECTED`.
+/// inside the selection rectangle are filled with `colors.selection`.
 /// `ctx.copy_flash` is the rectangle of the most recent copy; while set,
-/// those cells are filled with `theme::BG_COPIED` instead, which is the
+/// those cells are filled with `colors.copied` instead, which is the
 /// short green "copied" confirmation.
 ///
 /// `mouse_down` and `mouse_move` are wired on every visible cell.
@@ -478,9 +521,10 @@ pub fn render_row<F, G>(
     mouse_move: G,
 ) -> impl IntoElement
 where
-    F: Fn(&MouseDownEvent, u64, usize, &mut gpui::App) + Clone + 'static,
-    G: Fn(&MouseMoveEvent, u64, usize, &mut gpui::App) + Clone + 'static,
+    F: Fn(&MouseDownEvent, u64, usize, &mut gpui_kit::App) + Clone + 'static,
+    G: Fn(&MouseMoveEvent, u64, usize, &mut gpui_kit::App) + Clone + 'static,
 {
+    let colors = ctx.colors;
     let selection = ctx.selection;
     let scroll_x = ctx.scroll_x;
     let viewport_w = ctx.viewport_w;
@@ -531,17 +575,19 @@ where
         let down_handler = mouse_down.clone();
         let move_handler = mouse_move.clone();
         let mut cell_div = div()
+            .relative()
             .flex_shrink_0()
+            .h(theme::ROW_HEIGHT - px(1.))
             .w(model.layout.width_of(col))
             .px(theme::CELL_PAD_X)
             .truncate();
         if is_flashed {
-            cell_div = cell_div.bg(theme::BG_COPIED);
+            cell_div = cell_div.bg(colors.copied);
         } else if is_selected {
-            cell_div = cell_div.bg(theme::BG_SELECTED);
+            cell_div = cell_div.bg(colors.selection);
         }
         if bytes.is_empty() {
-            cell_div = cell_div.text_color(theme::TEXT_EMPTY).child("∅");
+            cell_div = cell_div.text_color(colors.empty_foreground).child("∅");
         } else {
             // Byte-exact text, served from the visible-range cache so a
             // scroll step only allocates for the cells that just came
@@ -559,7 +605,7 @@ where
                         cell_div = cell_div.child(text);
                     } else {
                         let highlight = HighlightStyle {
-                            background_color: Some(Hsla::from(theme::BG_MATCH_TEXT)),
+                            background_color: Some(colors.search_text),
                             ..Default::default()
                         };
                         let styled = StyledText::new(text)
@@ -573,12 +619,27 @@ where
                 cell_div = cell_div.child(text);
             }
         }
+        if selection.cursor() == Some(CellPos::new(row_position, col)) {
+            // The cursor is the cell you will act on next, so it gets a
+            // crisp accent frame drawn over the fill. Painting it over the
+            // cell (rather than as a border on it) keeps column widths and
+            // the text origin unchanged.
+            cell_div = cell_div.child(
+                div()
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .size_full()
+                    .border_1()
+                    .border_color(colors.selection_border),
+            );
+        }
         // Wire the click on the cell. The captured closure receives
         // the live `MouseDownEvent` (with the shift modifier) plus a
         // `&mut App` so the caller can route an `entity.update` back
         // to the `MainView` and mutate `selection`.
         cell_div = cell_div
-            .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, app_cx| {
+            .on_mouse_down(gpui_kit::MouseButton::Left, move |ev, _window, app_cx| {
                 down_handler(ev, row_position, col, app_cx);
             })
             .on_mouse_move(move |ev, _window, app_cx| {
@@ -595,7 +656,10 @@ where
     let row_selected = selection
         .normalize()
         .map(|(tl, br)| {
-            tl.column_index == 0 && br.column_index >= model.layout.widths.len().saturating_sub(1)
+            row_position >= tl.row
+                && row_position <= br.row
+                && tl.column_index == 0
+                && br.column_index >= model.layout.widths.len().saturating_sub(1)
         })
         .unwrap_or(false);
     let row_flashed = copy_flash
@@ -615,17 +679,17 @@ where
         row_search_match && search_active >= 0 && search_matches[search_active as usize] == index;
 
     let bg = if row_flashed {
-        theme::BG_COPIED
+        colors.copied
     } else if row_search_active {
-        theme::BG_MATCH_ACTIVE
+        colors.search_active
     } else if row_search_match {
-        theme::BG_MATCH
+        colors.search_match
     } else if row_selected {
-        theme::BG_SELECTED
+        colors.selection
     } else if index % 2 == 1 {
-        theme::BG_ROW_ALT
+        colors.row_alternate
     } else {
-        theme::BG
+        colors.surface
     };
 
     div()
@@ -635,16 +699,28 @@ where
         .h(theme::ROW_HEIGHT)
         .w_full()
         .bg(bg)
-        .border_b_1()
-        .border_color(rgb(0x2a2a2a))
+        .text_size(px(12.))
+        .line_height(px(20.))
+        .font_weight(gpui_kit::FontWeight::NORMAL)
+        .text_color(colors.foreground)
         .child(
+            // The gutter is its own surface with its own rule, so row numbers
+            // read as an index rather than as a data column.
             div()
                 .flex_shrink_0()
                 .w(theme::ROW_NUMBER_WIDTH)
+                .h_full()
                 .px(theme::CELL_PAD_X)
+                .flex()
+                .items_center()
+                .justify_end()
+                .bg(colors.gutter)
+                .border_r_1()
+                .border_color(colors.gutter_rule)
+                .text_size(px(11.))
                 .text_color(match row_warning {
-                    Some(kind) => warning_color(kind),
-                    None => theme::TEXT_DIM,
+                    Some(kind) => warning_color(kind, colors),
+                    None => colors.empty_foreground,
                 })
                 .child(match row_warning {
                     Some(kind) => format!("{} {}", warning_glyph(kind), index + 1),
@@ -818,9 +894,16 @@ mod tests {
         let model = GridModel::new(std::sync::Arc::new(doc));
 
         let first = model.cell_text(0, 0, b"alpha");
+        let cached = {
+            let cache = model.text_cache.lock().expect("cache lock");
+            assert_eq!(cache.len(), 1);
+            cache[&(0, 0)].clone()
+        };
         let second = model.cell_text(0, 0, b"alpha");
         assert_eq!(first.as_ref(), "alpha");
-        assert_eq!(first.as_ref(), second.as_ref());
+        assert_eq!(first, cached);
+        assert_eq!(second, cached);
+        assert_eq!(model.text_cache.lock().expect("cache lock").len(), 1);
 
         // Non-UTF-8 stays in the escaped form the grid shows.
         let expected = exact_string(&[0xff, 0x41]).into_owned();
@@ -836,6 +919,48 @@ mod tests {
             len <= CELL_TEXT_CACHE_CAP,
             "cache grew to {len}, cap is {CELL_TEXT_CACHE_CAP}"
         );
+    }
+
+    #[test]
+    fn render_row_caches_only_visible_columns_with_exact_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wide.csv");
+        let headers = (0..2000).map(|i| format!("c{i}")).collect::<Vec<_>>();
+        let values = vec![" 007 "; 2000];
+        std::fs::write(
+            &path,
+            format!("{}\n{}\n", headers.join(","), values.join(",")),
+        )
+        .expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let mut model = GridModel::new(Arc::new(anvil_core::index_opened(opened)));
+        model.layout = Arc::new(ColumnLayout::from_widths(vec![100.0; 2000]));
+        let selection = Selection::empty();
+        let mut ctx = RowContext {
+            colors: theme::Palette::from_theme(&gpui_kit::component::Theme::default()),
+            selection: &selection,
+            scroll_x: 12_350.0,
+            viewport_w: 150.0,
+            copy_flash: None,
+            search_matches: &[],
+            search_active: -1,
+            search_query: "",
+            search_options: SearchOptions::default(),
+            warning_rows: &[],
+        };
+        assert_eq!(model.layout.visible(ctx.scroll_x, ctx.viewport_w), 123..125);
+        let _row = render_row(&model, 0, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        {
+            let cache = model.text_cache.lock().expect("cache lock");
+            assert_eq!(cache.len(), 2);
+            for column in 123..125 {
+                assert_eq!(cache[&(0, column)].as_ref(), " 007 ");
+            }
+        }
+        ctx.scroll_x += 200.0;
+        let _row = render_row(&model, 0, 0, &ctx, |_, _, _, _| {}, |_, _, _, _| {});
+        assert_eq!(model.text_cache.lock().expect("cache lock").len(), 4);
+        assert_eq!(f32::from(theme::ROW_HEIGHT), 22.0);
     }
 
     /// Smoke test: render_row with a populated search query and a
@@ -857,6 +982,7 @@ mod tests {
 
         let selection = Selection::empty();
         let ctx = RowContext {
+            colors: theme::Palette::from_theme(&gpui_kit::component::Theme::default()),
             selection: &selection,
             scroll_x: 0.0,
             viewport_w: 1000.0,
@@ -889,6 +1015,7 @@ mod tests {
 
         let selection = Selection::empty();
         let ctx = RowContext {
+            colors: theme::Palette::from_theme(&gpui_kit::component::Theme::default()),
             selection: &selection,
             scroll_x: 0.0,
             viewport_w: 1000.0,
@@ -917,6 +1044,7 @@ mod tests {
 
         let selection = Selection::empty();
         let ctx = RowContext {
+            colors: theme::Palette::from_theme(&gpui_kit::component::Theme::default()),
             selection: &selection,
             scroll_x: 0.0,
             viewport_w: 1000.0,

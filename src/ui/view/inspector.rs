@@ -4,84 +4,70 @@
 //! module is the view-side lifecycle. Methods moved verbatim out of
 //! `view.rs` (Iteration 10 refactor, no behaviour change).
 
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, IconName, Sizable};
+
 use super::*;
 
 impl MainView {
-    /// Right-side column-inspector panel. Shows the selected column's
-    /// inferred type and metrics, or a hint when nothing is selected.
+    /// Right-side column-inspector panel: the selected column's inferred
+    /// type, counts, exact extremes, samples and frequent values.
     pub(super) fn render_inspector(&self, cx: &mut Context<Self>) -> AnyElement {
-        let header = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .px_3()
-            .h(theme::HEADER_HEIGHT)
-            .border_b_1()
-            .border_color(theme::BORDER)
-            .text_color(theme::TEXT_STRONG)
-            .child("Column")
-            .child(
-                div()
-                    .id("inspector-close")
-                    .cursor_pointer()
-                    .text_color(theme::TEXT_DIM)
-                    .hover(|s| s.text_color(theme::WARN))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
-                    .child("×"),
-            );
+        let colors = theme::palette(cx);
+        let header = panel::header(
+            colors,
+            IconName::Inspector,
+            "Column",
+            Button::new("inspector-close")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Close)
+                .accessibility_label("Close column inspector")
+                .tooltip("Close column inspector")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx))),
+        );
 
-        let body: AnyElement = match &self.inspector_stats {
-            Some(stats) => render_column_stats(stats),
-            None => div()
-                .p_3()
-                .text_color(theme::TEXT_DIM)
-                .child(if self.inspector_column.is_some() {
-                    "computing…"
-                } else {
-                    "select a cell"
-                })
-                .into_any_element(),
-        };
-
-        // Make it obvious what the numbers describe when a filter or sort
-        // is active; the scan is scoped to the visible rows then.
-        let scope_label = match self.view_rows() {
+        // Make it obvious what the numbers describe when a filter or sort is
+        // active; the scan is scoped to the visible rows then.
+        let scope = match self.view_rows() {
             Some(rows) => format!(
-                "scoped to current view ({} of {} rows)",
+                "Filtered view · {} of {} rows",
                 format_count(rows.len() as u64),
                 format_count(self.model.as_ref().map(|m| m.row_count()).unwrap_or(0))
             ),
-            None => "whole document".to_string(),
+            None => "Whole document".to_string(),
+        };
+
+        let content: Vec<AnyElement> = match &self.inspector_stats {
+            Some(stats) => column_stats_content(cx, stats, &scope),
+            None if self.model.is_none() => vec![panel::empty_state(
+                colors,
+                "No document open",
+                "Open a data file to inspect its columns.",
+            )],
+            None if self.inspector_column.is_some() => vec![panel::empty_state(
+                colors,
+                "Scanning values",
+                "Reading the column in the background. The grid stays usable.",
+            )],
+            None => vec![panel::empty_state(
+                colors,
+                "No column selected",
+                "Select a cell to see its type, counts and values.",
+            )],
         };
 
         div()
-            .flex_shrink_0()
-            .w(theme::INSPECTOR_WIDTH)
+            .w_full()
+            .min_w_0()
             .h_full()
+            .font_family(cx.theme().font_family.clone())
+            .text_sm()
             .flex()
             .flex_col()
-            .bg(theme::BG_PANEL)
-            .border_l_1()
-            .border_color(theme::BORDER)
+            .bg(colors.panel)
             .child(header)
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme::TEXT_DIM)
-                    .child(scope_label),
-            )
-            .child(
-                div()
-                    .id("inspector-body")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(body),
-            )
+            .child(panel::body("inspector-body", content))
             .into_any_element()
     }
 
@@ -90,6 +76,8 @@ impl MainView {
     pub(super) fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
         self.inspector_open = !self.inspector_open;
         if self.inspector_open {
+            self.diagnostics_open = false;
+            self.close_cell_detail(cx);
             self.inspector_column = None;
             self.inspector_stats = None;
             self.kick_inspector(cx);
@@ -160,102 +148,135 @@ impl MainView {
     }
 }
 
-/// One label/value row in the column inspector.
-fn metric_row(label: &str, value: String) -> AnyElement {
-    div()
-        .flex()
-        .flex_row()
-        .gap_2()
-        .text_xs()
-        .child(
-            div()
-                .w(px(92.))
-                .flex_shrink_0()
-                .text_color(theme::TEXT_DIM)
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_color(theme::TEXT_STRONG)
-                .truncate()
-                .child(value),
-        )
-        .into_any_element()
-}
-
-/// The inspector body for a computed column: metrics plus samples and a
-/// frequent-values list.
-fn render_column_stats(stats: &ColumnStats) -> AnyElement {
+/// The inspector body for a computed column.
+///
+/// Ordered by what a reader checks first: what it is, how big it is, what
+/// the extremes are, then examples. Exact values go in recessed wells so
+/// they are never mistaken for the labels beside them.
+fn column_stats_content(cx: &gpui_kit::App, stats: &ColumnStats, scope: &str) -> Vec<AnyElement> {
+    let colors = theme::palette(cx);
+    let rows = format_count(stats.total_rows);
     let distinct = match stats.distinct {
-        DistinctCount::Exact(n) => format!("{} (exact)", format_count(n)),
-        DistinctCount::Approximate(n) => format!("{} (approx)", format_count(n)),
+        DistinctCount::Exact(n) => format_count(n),
+        DistinctCount::Approximate(n) => format!("~{}", format_count(n)),
     };
-    let option = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_string());
 
-    let mut rows: Vec<AnyElement> = vec![
-        metric_row("name", stats.name.clone()),
-        metric_row("type", format!("{:?}", stats.column_type)),
-        metric_row("rows", format_count(stats.total_rows)),
-        metric_row("non-empty", format_count(stats.non_empty)),
-        metric_row("empty", format_count(stats.empty)),
-        metric_row("distinct", distinct),
-        metric_row(
-            "duplicates",
-            stats
+    let mut out: Vec<AnyElement> = vec![
+        panel::title_block(cx, colors, stats.name.clone(), scope.to_string()).into_any_element(),
+        panel::section(colors, "Type").into_any_element(),
+        panel::metric(cx, colors, "Inferred", &format!("{:?}", stats.column_type))
+            .into_any_element(),
+        panel::section(colors, "Counts").into_any_element(),
+        panel::metric(cx, colors, "Rows", &rows).into_any_element(),
+        panel::metric(cx, colors, "Non-empty", &format_count(stats.non_empty)).into_any_element(),
+        panel::metric(cx, colors, "Empty", &format_count(stats.empty)).into_any_element(),
+        panel::metric(cx, colors, "Distinct", &distinct).into_any_element(),
+        panel::metric(
+            cx,
+            colors,
+            "Duplicates",
+            &stats
                 .duplicate_count
                 .map(format_count)
-                .unwrap_or_else(|| "-".to_string()),
-        ),
-        metric_row("min", option(&stats.min)),
-        metric_row("max", option(&stats.max)),
-        metric_row("longest", option(&stats.longest)),
-        metric_row("shortest", option(&stats.shortest)),
+                .unwrap_or_else(|| "Not available".to_string()),
+        )
+        .into_any_element(),
+        panel::section(colors, "Extremes").into_any_element(),
+        panel::data_well(
+            cx,
+            colors,
+            "Minimum",
+            stat_value(&stats.min),
+            stats.min.is_some(),
+        )
+        .into_any_element(),
+        panel::data_well(
+            cx,
+            colors,
+            "Maximum",
+            stat_value(&stats.max),
+            stats.max.is_some(),
+        )
+        .into_any_element(),
+        panel::data_well(
+            cx,
+            colors,
+            "Longest",
+            stat_value(&stats.longest),
+            stats.longest.is_some(),
+        )
+        .into_any_element(),
+        panel::data_well(
+            cx,
+            colors,
+            "Shortest",
+            stat_value(&stats.shortest),
+            stats.shortest.is_some(),
+        )
+        .into_any_element(),
     ];
 
-    if !stats.samples.is_empty() {
-        rows.push(metric_row("samples", stats.samples.join(", ")));
+    out.push(panel::section(colors, "Samples").into_any_element());
+    if stats.samples.is_empty() {
+        out.push(panel::caption(colors, "No non-empty values in this scope").into_any_element());
+    } else {
+        for sample in &stats.samples {
+            out.push(panel::data_well(cx, colors, "", sample, true).into_any_element());
+        }
     }
-    if !stats.frequent.is_empty() {
-        rows.push(
-            div()
-                .mt_2()
-                .text_xs()
-                .text_color(theme::TEXT_DIM)
-                .child("frequent values")
-                .into_any_element(),
+
+    out.push(panel::section(colors, "Frequent values").into_any_element());
+    if stats.frequent.is_empty() {
+        out.push(
+            panel::caption(
+                colors,
+                match stats.distinct {
+                    DistinctCount::Approximate(_) => {
+                        "Unavailable for an approximate distinct count"
+                    }
+                    DistinctCount::Exact(_) => "No non-empty values in this scope",
+                },
+            )
+            .into_any_element(),
         );
-        for value in &stats.frequent {
-            rows.push(
+    } else {
+        // Ranked rows: the value is the subject, the count is the measure.
+        for entry in &stats.frequent {
+            out.push(
                 div()
                     .flex()
                     .flex_row()
-                    .justify_between()
+                    .items_center()
                     .gap_2()
-                    .text_xs()
+                    .px(px(panel::BODY_PAD_X))
+                    .py(px(2.))
                     .child(
                         div()
                             .flex_1()
-                            .text_color(theme::TEXT)
+                            .min_w_0()
+                            .text_xs()
+                            .font_family(panel::mono(cx))
+                            .text_color(colors.foreground)
                             .truncate()
-                            .child(value.value.clone()),
+                            .child(entry.value.clone()),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(theme::TEXT_DIM)
-                            .child(format_count(value.count)),
+                            .text_xs()
+                            .font_family(panel::mono(cx))
+                            .text_color(colors.muted_foreground)
+                            .child(format_count(entry.count)),
                     )
                     .into_any_element(),
             );
         }
     }
 
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .children(rows)
-        .into_any_element()
+    out
+}
+
+/// The string behind an optional stat, or an empty string when absent.
+fn stat_value(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or("")
 }

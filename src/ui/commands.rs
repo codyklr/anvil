@@ -15,7 +15,7 @@
 //! variants and is a larger change; it can be layered on top of this
 //! module later without changing callers.
 
-use gpui::Keystroke;
+use gpui_kit::Keystroke;
 
 /// How many rows a Page Up / Page Down jump moves the cursor. Tied to a
 /// conservative estimate of the visible row count so the grid does not

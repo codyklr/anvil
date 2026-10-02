@@ -8,3 +8,10 @@
 # Only hand-authored fixtures are tracked (currently ask.csv).
 /fixtures/*
 !/fixtures/ask.csv
+
+# Local UI review output; keep intentional documentation images in docs/images.
+/.shots/
+/tools/shots/
+/tools/*.png
+/tools/*.log
+/tools/*.err

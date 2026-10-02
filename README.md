@@ -1,16 +1,25 @@
 # Anvil
 
 **A native desktop viewer for large delimited data.** Open a CSV, TSV or
-ZIP export of any size, get to first data instantly, and investigate what
-is actually inside it from the keyboard.
+ZIP export, then search, filter, sort, and investigate what is actually
+inside it without loading every cell into memory.
 
-Anvil is built in Rust on [GPUI](https://gpui.rs), the UI framework
-behind Zed. It is a single native binary with no runtime to install.
+Anvil is built in Rust on [GPUI Kit](https://crates.io/crates/gpui-kit),
+using the GPUI native UI runtime. It is a single native binary with no
+separate runtime to install. The redesigned shell uses Kit 0.7.0 while
+retaining Anvil's custom virtualized grid.
+
+![Anvil start workspace in Slate, with native file opening and a copper dithered anvil](docs/images/home-workspace.png)
+
+Open a file with **Cmd/Ctrl+O** or drop a CSV, TSV, or ZIP into the window.
+The quiet start workspace gives way to an opaque, information-dense grid;
+its copper controls and restrained materials continue through search,
+inspectors, and dialogs.
 
 ## What Anvil does
 
-Anvil is made for the workflow of *"a customer sent me a 200 MiB export
-and something is wrong with it."* You drag the file in, and within a few
+Anvil is made for the workflow of _"a customer sent me a 200 MiB export
+and something is wrong with it."_ You drag the file in, and within a few
 hundred milliseconds you are looking at a virtualized grid you can
 search, filter, sort and inspect down to the byte.
 
@@ -41,16 +50,44 @@ The design that makes that possible:
 
 ### Open and navigate
 
-| Capability | Detail |
-|---|---|
-| Formats | CSV, TSV, PSV, and other delimiter-separated text; ZIP archives |
-| Opening | Drag and drop, the native file dialog, or the toolbar |
-| Grid | Virtualized rows and columns, sticky headers, horizontal and vertical scrollbars |
-| Tabs | One per document; every usable ZIP entry becomes a tab |
-| File panel | Groups every open document and archive entry in one list (`Cmd/Ctrl+B`) |
-| Selection | Cell and range selection with shift-click and drag-select |
-| Copy | Selection to the clipboard as TSV (`Cmd/Ctrl+C`) |
-| Headers | Auto / On / Off, switchable per tab; forcing a mode re-indexes from the mapped source |
+| Capability | Detail                                                                                                                     |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Formats    | CSV, TSV, PSV, and other delimiter-separated text; ZIP archives                                                            |
+| Opening    | Drag and drop, the native file dialog, the window toolbar, or one positional startup path                                  |
+| Grid       | Virtualized rows and columns, sticky headers, horizontal and vertical scrollbars                                           |
+| Tabs       | One per document; every usable ZIP entry becomes a tab                                                                     |
+| File panel | Resizable sidebar groups open documents and archive entries (`Cmd/Ctrl+B`); full-name tooltips and separate close controls |
+| Selection  | Cell and range selection with shift-click and drag-select                                                                  |
+| Copy       | Selection to the clipboard as TSV (`Cmd/Ctrl+C`)                                                                           |
+| Headers    | Auto / On / Off, switchable per tab; forcing a mode re-indexes from the mapped source                                      |
+
+### Native investigation workspace
+
+- A quiet start workspace with a cached, ordered-dither anvil, a native
+  Open action, and keyboard shortcut cues. No animated background or
+  fabricated recent-file history.
+- Native-aware titlebar, Kit command buttons and a document menu for
+  Go to row, Reveal cell, header mode and archive browsing.
+- Resizable Files sidebar and one right-hand tool at a time: Column,
+  Diagnostics or Cell. The custom grid keeps 22 px rows and 12 px
+  monospace data text, with viewport geometry shared by pane layout.
+- **Anvil Slate / Anvil Warm** dark/light appearances, switchable from
+  the window toolbar. Dark is the startup default; appearance is not
+  persisted yet.
+- Archive selection and keyboard-shortcuts help use Kit dialogs. Open
+  help with the keyboard button in the window toolbar or **Cmd/Ctrl+?**
+  (**Cmd/Ctrl+Shift+/**).
+- Query fields retain Anvil's tested `TextEdit` behavior; this styling
+  redesign does not add native IME/composition support.
+
+Windows release builds, tests, and normal-size native UI review have passed.
+Native drag/drop, resize/scaling/accessibility acceptance, and the redesigned
+shell's macOS/Linux workflows are still tracked in [ROADMAP.md](ROADMAP.md).
+Appearance persistence and recent-file history are not implemented.
+
+Presentation contracts and migration details live in the
+[design system](docs/design/ANVIL_DESIGN_SYSTEM.md) and
+[Home workspace specification](docs/design/HOME_WORKSPACE_SPEC.md).
 
 ### Find and reshape
 
@@ -59,9 +96,9 @@ The design that makes that possible:
   between matches with `F3` / `Shift+F3`. Scope it to one column when
   needed.
 - **Filter** (`Cmd/Ctrl+L`) takes a real predicate language: `country ==
-  US`, `amount > 100`, `name contains "and"`, compound expressions with
+US`, `amount > 100`, `name contains "and"`, compound expressions with
   `AND`, `OR` and parentheses, and row-scope predicates such as `any
-  empty` (a row with a blank cell) or `all notempty`.
+empty` (a row with a blank cell) or `all notempty`.
 - **Autocomplete** suggests columns, operators and values from the
   document as you type.
 - **Sort** by clicking a column header; numeric, boolean and text
@@ -99,27 +136,32 @@ apply). See [Optional natural-language backends](#optional-natural-language-back
 
 ## Keyboard shortcuts
 
-| Shortcut | Action |
-|---|---|
-| `Cmd/Ctrl+C` | Copy the selection as TSV |
-| `Cmd/Ctrl+F` | Search bar |
-| `Cmd/Ctrl+L` | Filter bar |
-| `Cmd/Ctrl+Shift+L` | Ask bar |
-| `Cmd/Ctrl+I` | Column inspector |
-| `Cmd/Ctrl+D` | Diagnostics panel |
-| `Cmd/Ctrl+B` | File panel |
-| `F3` / `Shift+F3` | Next / previous search match |
-| `Cmd/Ctrl+Home` / `Cmd/Ctrl+End` | First / last row |
-| `Home` / `End` | First / last column |
-| `PageUp` / `PageDown` | Move 20 rows |
-| Arrows | Move the selection; hold `Shift` to extend it |
-| `Tab` / `Shift+Tab` | Next / previous cell, wrapping across rows |
-| `Escape` | Clear the selection, or close the open overlay |
+| Shortcut                         | Action                                                |
+| -------------------------------- | ----------------------------------------------------- |
+| `Cmd/Ctrl+O`                     | Open a data file                                      |
+| `Cmd/Ctrl+G`                     | Go to a display row                                   |
+| `Cmd/Ctrl+Enter`                 | Reveal the cursor cell in the Cell panel (grid focus) |
+| `Cmd/Ctrl+A`                     | Select all visible cells (grid focus)                 |
+| `Cmd/Ctrl+C`                     | Copy the selection as TSV                             |
+| `Cmd/Ctrl+F`                     | Search bar                                            |
+| `Cmd/Ctrl+L`                     | Filter bar                                            |
+| `Cmd/Ctrl+Shift+L`               | Ask bar                                               |
+| `Cmd/Ctrl+I`                     | Column inspector                                      |
+| `Cmd/Ctrl+D`                     | Diagnostics panel                                     |
+| `Cmd/Ctrl+B`                     | File panel                                            |
+| `F3` / `Shift+F3`                | Next / previous search match                          |
+| `Cmd/Ctrl+Home` / `Cmd/Ctrl+End` | First / last row                                      |
+| `Home` / `End`                   | First / last column                                   |
+| `PageUp` / `PageDown`            | Move 20 rows                                          |
+| Arrows                           | Move the selection; hold `Shift` to extend it         |
+| `Tab` / `Shift+Tab`              | Next / previous cell, wrapping across rows            |
+| `Escape`                         | Clear the selection, or close the open overlay        |
 
 ## Build and run
 
 ```sh
 cargo run --release --bin anvil                     # launch the GUI
+cargo run --release --bin anvil -- FILE             # launch and open one path
 cargo run --release --bin anvil -- --probe FILE     # headless open/index summary
 ```
 
@@ -131,12 +173,14 @@ without a GUI.
 ### Platform notes
 
 - **macOS / Windows:** the GUI uses the native GPUI backend.
-- **Linux:** the release binary enables both the X11 and Wayland GPUI
-  backends, so it can start on either display server. It needs the usual
-  native packages (`libxkbcommon`, `libxkbcommon-x11`, `libwayland`,
-  `freetype`); see `.github/workflows/ci.yml`. The Linux window has not
-  been launched by the project's macOS-only verification host, so GUI
-  behaviour on Linux is still unverified.
+- **Linux:** Kit supplies the native platform stack, including X11 and
+  Wayland support. Native packages include `libxkbcommon`,
+  `libxkbcommon-x11`, `libwayland` and `freetype`; see
+  `.github/workflows/ci.yml`. Native GUI behavior on Linux remains
+  unverified; older backend CI does not validate the redesigned shell.
+- The window opens at 1200 x 800 with a 900 x 480 minimum. Final native
+  redesign validation, including both appearances and minimum-size
+  workflows, remains open in the roadmap.
 
 Generate the test fixture set on demand with:
 
@@ -183,7 +227,10 @@ src/
   nlmodel.rs        Tier 2 generative model backend (optional feature)
   ui/               GPUI presentation (binary only)
     app.rs            window lifecycle
-    view.rs           toolbar + tabs + panels + grid + status
+    view.rs           document state + orchestration + composition
+    view/shell.rs     native titlebar + toolbar/menu + welcome + startup
+    view/workspace.rs resizable panes + shared grid viewport geometry
+    view/archive_dialog.rs Kit archive chooser lifecycle
     view/search.rs     search bar (state, render, editing)
     view/filter.rs     filter bar (apply, render, editing)
     view/ask.rs        Ask bar (preview, interpretation, apply)
@@ -194,7 +241,7 @@ src/
     commands.rs       keyboard chord -> action binding table
     grid.rs           column layout + row rendering helpers
     archive_picker.rs archive presentation helpers
-    theme.rs          palette + metrics
+    theme.rs          Slate/Warm Kit themes + semantic Palette + grid metrics
   main.rs           binary entry: GUI, `--probe`, `--ask-probe`, `--setup-ask-model`
   bin/gen_fixture.rs synthetic CSV + ZIP generator
 ```
@@ -235,7 +282,7 @@ the GUI every usable entry becomes its own tab immediately (the central
 directory already lists names and sizes). The entry the loader pre-opened
 is ready; the others extract and index lazily when their tab is first
 activated. Each entry is decompressed to a `tempfile`, then memory-mapped
-and indexed through the *same* path as a normal file. The temp directory
+and indexed through the _same_ path as a normal file. The temp directory
 is kept alive by an `Arc<TempDir>` inside `OpenedSource` and removed on
 drop.
 
@@ -359,6 +406,8 @@ filter expressions with context-aware autocomplete, and row-scope
 - `ROADMAP.md` — milestone-by-milestone plan; checkboxes reflect the
   actual repository state.
 - `ARCHITECTURE.md` — current technical architecture.
+- [docs/ui-design.md](docs/ui-design.md) — Kit workspace design conventions
+  and native acceptance checklist.
 - `AGENTS.md` — operating manual for coding agents working in this
   repository.
 - `docs/adr/` — architectural decision records.
@@ -367,10 +416,9 @@ filter expressions with context-aware autocomplete, and row-scope
 
 ## Status
 
-Milestones 1-3 are implemented, with a few conveniences still open:
-go-to-row, tab reordering, recently-closed tabs, saved filters, and
-letting the inspector scan the filtered view instead of the whole
-document. Milestone 4 (diagnostics and data quality) is complete apart
+Milestones 1-3 are implemented, with conveniences such as tab reordering,
+recently-closed tabs and saved filters still open. Go-to-row and
+current-view inspector scans are implemented. Milestone 4 (diagnostics and data quality) is complete apart
 from click-to-navigate for header-level warnings. Milestone 5
 (performance and UX hardening) and Milestone 6 (natural-language Ask,
 opt-in) are in progress. `ROADMAP.md` holds the authoritative list, with

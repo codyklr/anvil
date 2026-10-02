@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
-    canvas, div, prelude::*, px, rgb, uniform_list, AnyElement, Bounds, Context, ExternalPaths,
+use gpui_kit::{
+    canvas, div, prelude::*, px, uniform_list, AnyElement, Bounds, Context, ExternalPaths,
     FocusHandle, KeyDownEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render,
     ScrollDelta, ScrollHandle, ScrollStrategy, ScrollWheelEvent, Task, UniformListScrollHandle,
     Window,
@@ -42,8 +42,11 @@ use super::commands::{self, Action};
 use super::grid::{self, GridModel};
 use super::input;
 use super::text_edit::TextEdit;
-use super::theme;
+use super::{texture, theme};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme, Sizable};
 
+mod archive_dialog;
 mod ask;
 mod cell_detail;
 mod diagnostics;
@@ -52,9 +55,12 @@ mod filter;
 mod goto;
 mod grid_area;
 mod inspector;
+mod panel;
 mod search;
+mod shell;
 mod sort;
 mod tab_strip;
+mod workspace;
 
 /// How long the green "copied" flash stays over the selection before it
 /// fades back to the normal selection colour.
@@ -397,6 +403,7 @@ pub struct MainView {
     /// Whether the file-manager side panel is visible. Toggled with
     /// Cmd/Ctrl+B and the toolbar button; defaults to open.
     file_panel_open: bool,
+    workspace: workspace::Workspace,
     /// Horizontal scroll handle for the tab strip. With many tabs the
     /// strip overflows the window; this lets it scroll instead of
     /// crushing every tab.
@@ -408,6 +415,7 @@ pub struct MainView {
     archive: Option<Arc<ArchiveSource>>,
     selected_entry: Option<String>,
     show_picker: bool,
+    archive_dialog_open: bool,
 
     scroll_x: f32,
     viewport_w: f32,
@@ -450,7 +458,7 @@ pub struct MainView {
     clipboard: ClipboardWriter,
 
     /// Normalized rectangle of the most recent successful copy, painted
-    /// with `theme::BG_COPIED` until the flash timer clears it. `None`
+    /// with `colors.copied` until the flash timer clears it. `None`
     /// when no flash is active.
     copy_flash_rect: Option<(CellPos, CellPos)>,
     /// Bumped on every copy. A flash timer only clears the rectangle if
@@ -717,6 +725,7 @@ impl MainView {
             active: None,
             next_doc_id: 0,
             file_panel_open: true,
+            workspace: workspace::Workspace::default(),
             tab_scroll: ScrollHandle::new(),
             generation: 0,
             model: None,
@@ -724,6 +733,7 @@ impl MainView {
             archive: None,
             selected_entry: None,
             show_picker: false,
+            archive_dialog_open: false,
             scroll_x: 0.0,
             viewport_w: 1600.0,
             v_scroll: UniformListScrollHandle::new(),
@@ -1083,7 +1093,8 @@ impl MainView {
 
     /// A small progress bar: determinate when the total is known, an
     /// indeterminate stub otherwise. `None` when nothing is loading.
-    fn render_progress_bar(&self) -> Option<AnyElement> {
+    fn render_progress_bar(&self, cx: &gpui_kit::App) -> Option<AnyElement> {
+        let colors = theme::palette(cx);
         const BAR_WIDTH: f32 = 280.0;
         const BAR_HEIGHT: f32 = 6.0;
         let progress = self.progress_snapshot?;
@@ -1092,21 +1103,21 @@ impl MainView {
             .w(px(BAR_WIDTH))
             .h(px(BAR_HEIGHT))
             .rounded_sm()
-            .bg(theme::BORDER_STRONG);
+            .bg(colors.border_strong);
         bar = match progress.fraction() {
             Some(fraction) => bar.child(
                 div()
                     .w(px(BAR_WIDTH * fraction))
                     .h(px(BAR_HEIGHT))
                     .rounded_sm()
-                    .bg(theme::ACCENT),
+                    .bg(colors.primary),
             ),
             None => bar.child(
                 div()
                     .w(px(72.0))
                     .h(px(BAR_HEIGHT))
                     .rounded_sm()
-                    .bg(theme::ACCENT),
+                    .bg(colors.primary),
             ),
         };
         Some(
@@ -1115,7 +1126,12 @@ impl MainView {
                 .flex_col()
                 .items_center()
                 .gap_1()
-                .child(div().text_xs().text_color(theme::TEXT_DIM).child(label))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted_foreground)
+                        .child(label),
+                )
                 .child(bar)
                 .into_any_element(),
         )
@@ -1389,163 +1405,31 @@ impl MainView {
 
     // ---- rendering -------------------------------------------------------
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let label = match &self.model {
-            Some(model) => model.doc.opened.display_label(),
-            None => "No file open".to_string(),
-        };
-        let subtitle = self
-            .archive
-            .as_ref()
-            .map(|a| format!("archive: {}", a.archive_name()));
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(theme::TOOLBAR_HEIGHT)
-            .w_full()
-            .px_3()
-            .bg(theme::BG_TOOLBAR)
-            .border_b_1()
-            .border_color(theme::BORDER)
-            .child(
-                div()
-                    .id("open-button")
-                    .flex_shrink_0()
-                    .px_3()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme::ACCENT)
-                    .text_color(theme::TEXT_STRONG)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(0x1177bb)))
-                    .on_click(cx.listener(|this, _, _, cx| this.pick_file(cx)))
-                    .child("Open…"),
-            )
-            // Toggle the file-manager panel. Disabled-looking while
-            // there are no documents to list.
-            .child(
-                div()
-                    .id("toggle-files")
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(theme::BORDER_STRONG)
-                    .cursor_pointer()
-                    .text_color(if self.file_panel_open {
-                        theme::TEXT_STRONG
-                    } else {
-                        theme::TEXT_DIM
-                    })
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.file_panel_open = !this.file_panel_open;
-                        cx.notify();
-                    }))
-                    .child("Files"),
-            )
-            // Toggle the column-inspector panel.
-            .child(
-                div()
-                    .id("toggle-inspector")
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(theme::BORDER_STRONG)
-                    .cursor_pointer()
-                    .text_color(if self.inspector_open {
-                        theme::TEXT_STRONG
-                    } else {
-                        theme::TEXT_DIM
-                    })
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
-                    .child("Inspector"),
-            )
-            // Toggle the diagnostics panel.
-            .child(
-                div()
-                    .id("toggle-diagnostics")
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(theme::BORDER_STRONG)
-                    .cursor_pointer()
-                    .text_color(if self.diagnostics_open {
-                        theme::TEXT_STRONG
-                    } else {
-                        theme::TEXT_DIM
-                    })
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_diagnostics(cx)))
-                    .child("Diagnostics"),
-            )
-            // Cycle the first-row interpretation (Auto / Header / No header).
-            .child(
-                div()
-                    .id("toggle-header")
-                    .flex_shrink_0()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(theme::BORDER_STRONG)
-                    .cursor_pointer()
-                    .text_color(if self.header_mode == HeaderMode::Auto {
-                        theme::TEXT_DIM
-                    } else {
-                        theme::TEXT_STRONG
-                    })
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    .on_click(cx.listener(|this, _, _, cx| this.cycle_header_mode(cx)))
-                    .child(header_mode_label(self.header_mode)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(div().text_color(theme::TEXT_STRONG).truncate().child(label))
-                    .when_some(subtitle, |this, sub| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::TEXT_DIM)
-                                .truncate()
-                                .child(sub),
-                        )
-                    }),
-            )
-            .when(self.archive.is_some(), |this| {
-                this.child(
-                    div()
-                        .id("archive-browser")
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(theme::BORDER_STRONG)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_picker = true;
-                            cx.notify();
-                        }))
-                        .child("Archive…"),
-                )
-            })
-    }
-
-    fn render_status(&self) -> impl IntoElement {
+    fn render_status(&self, cx: &gpui_kit::App) -> impl IntoElement {
+        let colors = theme::palette(cx);
+        if self.model.is_none() {
+            let note: String = match &self.state {
+                ViewState::Empty => "Nothing open".into(),
+                ViewState::Loading(_) => self.progress_text().unwrap_or_else(|| "Opening…".into()),
+                ViewState::Error(_) => "Open failed".into(),
+                ViewState::Ready => "No document selected".into(),
+            };
+            return div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .h(theme::STATUS_HEIGHT)
+                .w_full()
+                .px_3()
+                .bg(colors.chrome)
+                .border_t_1()
+                .border_color(colors.border)
+                .text_xs()
+                .text_color(colors.muted_foreground)
+                .child(note)
+                .child(div().flex_1())
+                .child("CSV · TSV · ZIP");
+        }
         let (rows, cols, size) = match &self.model {
             Some(model) => (
                 model.row_count(),
@@ -1574,8 +1458,13 @@ impl MainView {
         let delimiter = self
             .model
             .as_ref()
-            .map(|m| super::describe_delimiter(m.doc.meta.delimiter))
-            .unwrap_or("-");
+            .map(|m| {
+                format!(
+                    "{} delimited",
+                    super::describe_delimiter(m.doc.meta.delimiter)
+                )
+            })
+            .unwrap_or_default();
         let warnings = self
             .model
             .as_ref()
@@ -1586,26 +1475,37 @@ impl MainView {
             .flex()
             .flex_row()
             .items_center()
-            .gap_4()
+            .gap_3()
             .h(theme::STATUS_HEIGHT)
             .w_full()
             .px_3()
-            .bg(theme::BG_STATUS)
+            .bg(colors.chrome)
             .border_t_1()
-            .border_color(theme::BORDER)
+            .border_color(colors.border)
             .text_xs()
-            .text_color(theme::TEXT_DIM)
-            .child(rows_label)
+            .text_color(colors.muted_foreground)
+            // Row count carries the most weight: it is the number a user
+            // checks first, so it leads and is the only emphasised item.
+            .child(
+                div()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(colors.foreground)
+                    .child(rows_label),
+            )
+            .when_some(self.filter_rows.as_ref().map(|r| r.len()), |this, _| {
+                this.child(div().text_color(colors.primary).child("filtered"))
+            })
+            .child(div().w(px(1.)).h(px(10.)).bg(colors.border))
             .child(format!("{cols} cols"))
-            .child(format!("delim {}", delimiter))
+            .child(delimiter)
             .child(archive_picker::format_size(size))
             .when_some(sort_label, |this, label| {
-                this.child(div().text_color(theme::ACCENT).child(label))
+                this.child(div().text_color(colors.primary).child(label))
             })
             .when(warnings > 0, |this| {
                 this.child(
                     div()
-                        .text_color(theme::WARN)
+                        .text_color(colors.warning)
                         .child(format!("{warnings} warnings")),
                 )
             })
@@ -1617,41 +1517,20 @@ impl MainView {
                 this.child(
                     div()
                         .text_color(if is_failure {
-                            gpui::red()
+                            colors.danger
                         } else {
-                            theme::ACCENT.into()
+                            colors.primary
                         })
                         .child(msg),
                 )
             })
-            .child(state)
+            .when(state != "ready", |this| this.child(div().child(state)))
     }
 
-    /// Width of the columns area, computed synchronously from the window
-    /// width minus every panel that shares the grid's flex row. All
-    /// panels are `flex_shrink_0` with a fixed `theme` width, so this
-    /// matches the measured layout exactly - but unlike the previous
-    /// frame's `grid_bounds` it is correct on the same frame a panel is
-    /// toggled, so closing the inspector / diagnostics / file panel no
-    /// longer leaves a one- to two-frame blank gap before the table
-    /// reflows into the freed space. `grid_bounds` is still recorded for
-    /// drag auto-scroll, which needs the real on-screen rectangle.
-    fn grid_viewport_width(&self, window: &Window) -> f32 {
-        let mut width =
-            f32::from(window.viewport_size().width) - f32::from(theme::ROW_NUMBER_WIDTH);
-        if self.file_panel_open && !self.documents.is_empty() {
-            width -= f32::from(theme::FILE_PANEL_WIDTH);
-        }
-        if self.inspector_open && self.model.is_some() {
-            width -= f32::from(theme::INSPECTOR_WIDTH);
-        }
-        if self.diagnostics_open && self.model.is_some() {
-            width -= f32::from(theme::DIAGNOSTICS_WIDTH);
-        }
-        if self.cell_detail_open && self.model.is_some() {
-            width -= f32::from(theme::CELL_DETAIL_WIDTH);
-        }
-        width.max(0.0)
+    /// Use the workspace's current clamped pane widths on this frame,
+    /// not the previous frame's measured grid bounds (kept for auto-scroll).
+    fn grid_viewport_width(&mut self, window: &Window) -> f32 {
+        self.workspace_grid_viewport_width(window)
     }
 
     /// Display position (0-based row in the rendered list) of a record
@@ -1807,6 +1686,8 @@ impl MainView {
     fn toggle_diagnostics(&mut self, cx: &mut Context<Self>) {
         self.diagnostics_open = !self.diagnostics_open;
         if self.diagnostics_open {
+            self.inspector_open = false;
+            self.close_cell_detail(cx);
             self.kick_encoding(cx);
         }
         cx.notify();
@@ -2173,9 +2054,6 @@ impl MainView {
         // active-match row stays fully visible). Only the modal
         // archive picker is overlaid here.
         let mut out = Vec::new();
-        if let Some(archive_picker) = self.render_archive_picker(cx) {
-            out.push(archive_picker);
-        }
         // The filter autocomplete popup is an overlay so it paints above
         // the grid rather than being covered by the next sibling.
         if let Some(suggestions) = self.render_filter_suggestions(cx) {
@@ -2184,148 +2062,8 @@ impl MainView {
         out
     }
 
-    fn render_archive_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let archive = self.archive.clone()?;
-        if !self.show_picker {
-            return None;
-        }
-        let (usable, _rejected) = archive_picker::partition(&archive.candidates);
-
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for (ix, candidate) in usable.iter().enumerate() {
-            let name = candidate.entry_name.clone();
-            let on_click_name = name.clone();
-            rows.push(
-                div()
-                    .id(("archive-entry", ix))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .py_2()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme::BG_ROW_HOVER))
-                    .child(div().text_color(theme::TEXT_STRONG).truncate().child(name))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme::TEXT_DIM)
-                            .child(archive_picker::format_size(candidate.uncompressed_size)),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.switch_to_entry(&on_click_name, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-
-        let usable_count = usable.len();
-        let mut children: Vec<AnyElement> = vec![
-            div()
-                .text_color(theme::TEXT_STRONG)
-                .text_lg()
-                .child(format!("{usable_count} files in archive"))
-                .into_any_element(),
-            div()
-                .text_xs()
-                .text_color(theme::TEXT_DIM)
-                .child(format!(
-                    "{}: every usable file already has a tab",
-                    archive.archive_name()
-                ))
-                .into_any_element(),
-        ];
-        children.extend(rows);
-
-        let skipped = archive_picker::skipped_entries(&archive.candidates);
-        if !skipped.is_empty() {
-            // The list can be long (e.g. every file carries __MACOSX
-            // metadata); show the first few and summarise the rest so the
-            // panel stays responsive and readable.
-            const MAX_SKIPPED_SHOWN: usize = 40;
-            children.push(
-                div()
-                    .mt_2()
-                    .text_xs()
-                    .text_color(theme::TEXT_DIM)
-                    .child(format!("{} skipped entries", skipped.len()))
-                    .into_any_element(),
-            );
-            for (ix, entry) in skipped.iter().take(MAX_SKIPPED_SHOWN).enumerate() {
-                let name = entry.name.clone();
-                let reason = entry.reason.clone();
-                children.push(
-                    div()
-                        .id(("archive-skipped", ix))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_3()
-                        .py_1()
-                        .rounded_sm()
-                        .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .text_color(theme::TEXT_DIM)
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(theme::WARN)
-                                .child(reason),
-                        )
-                        .into_any_element(),
-                );
-            }
-            if skipped.len() > MAX_SKIPPED_SHOWN {
-                children.push(
-                    div()
-                        .text_xs()
-                        .text_color(theme::TEXT_DIM)
-                        .child(format!("…and {} more", skipped.len() - MAX_SKIPPED_SHOWN))
-                        .into_any_element(),
-                );
-            }
-        }
-
-        Some(
-            div()
-                .absolute()
-                .top(px(0.))
-                .left(px(0.))
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::rgba(0x000000aa))
-                .child(
-                    div()
-                        .id("archive-picker-panel")
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .w(px(560.))
-                        .max_h(px(500.))
-                        .overflow_y_scroll()
-                        .p_4()
-                        .rounded_lg()
-                        .bg(theme::BG_PANEL)
-                        .border_1()
-                        .border_color(theme::BORDER_STRONG)
-                        .children(children),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn render_center(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::palette(cx);
         // In a multi-document world, the active document always wins
         // when it is set. The Empty / Loading / Error states only
         // take over when no document is open yet; once the user has
@@ -2338,71 +2076,80 @@ impl MainView {
             // working, not blank.
             return match self.model.is_some() {
                 true => self.render_grid(window, cx),
-                false => div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .bg(theme::BG)
-                    .child(div().text_color(theme::TEXT_STRONG).child("Loading…"))
-                    .child(
-                        div()
-                            .text_color(theme::TEXT_DIM)
-                            .child(self.selected_entry.clone().unwrap_or_default()),
+                false => self
+                    .render_placeholder(
+                        cx,
+                        "Opening",
+                        &self.selected_entry.clone().unwrap_or_default(),
                     )
-                    .children(self.render_progress_bar())
                     .into_any_element(),
             };
         }
         match &self.state {
-            ViewState::Empty => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .bg(theme::BG)
-                .child(
-                    div()
-                        .text_xl()
-                        .text_color(theme::TEXT_STRONG)
-                        .child("Anvil"),
-                )
-                .child(
-                    div()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Drop a CSV, TSV, or ZIP anywhere, or click Open."),
-                )
-                .into_any_element(),
-            ViewState::Loading(note) => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .bg(theme::BG)
-                .child(div().text_color(theme::TEXT_STRONG).child("Loading…"))
-                .child(div().text_color(theme::TEXT_DIM).child(note.clone()))
-                .children(self.render_progress_bar())
+            ViewState::Empty => self.render_welcome(cx),
+            ViewState::Loading(note) => self
+                .render_placeholder(cx, "Opening", note)
                 .into_any_element(),
             ViewState::Error(message) => div()
+                .relative()
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_w_0()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .bg(theme::BG)
-                .child(div().text_color(gpui::red()).child("Could not open file"))
+                .gap_5()
+                .px_8()
+                .bg(colors.canvas)
+                // The same quiet grain the welcome surface carries,
+                // so a failed open still reads as the product.
+                .child(texture::grain(2., 0.05, colors.foreground))
                 .child(
                     div()
-                        .max_w(px(700.))
-                        .text_color(theme::TEXT_DIM)
-                        .child(message.clone()),
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_3()
+                        .w_full()
+                        .max_w(px(420.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(40.))
+                                .rounded(cx.theme().radius_tokens().md)
+                                .bg(colors.danger.alpha(0.14))
+                                .child(
+                                    gpui_kit::component::Icon::new(
+                                        gpui_kit::assets::IconName::TriangleAlert,
+                                    )
+                                    .size_5()
+                                    .text_color(colors.danger),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_base()
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .text_color(colors.strong_foreground)
+                                .child("Could not open this file"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_center()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(colors.danger)
+                                .child(message.clone()),
+                        ),
+                )
+                .child(
+                    Button::new("error-open")
+                        .small()
+                        .label("Choose another file")
+                        .icon(gpui_kit::assets::IconName::FolderOpen)
+                        .on_click(cx.listener(|this, _, _, cx| this.pick_file(cx))),
                 )
                 .into_any_element(),
             ViewState::Ready => match self.model.is_some() {
@@ -2410,6 +2157,61 @@ impl MainView {
                 false => div().flex_1().into_any_element(),
             },
         }
+    }
+
+    /// Shared layout for the transient "working" states (opening a file,
+    /// extracting an archive entry). Same scaffold as the empty state so a
+    /// load reads as a change of the workspace's contents, not as a
+    /// different screen appearing.
+    fn render_placeholder(
+        &self,
+        cx: &mut Context<Self>,
+        title: &str,
+        detail: &str,
+    ) -> gpui_kit::Div {
+        let colors = theme::palette(cx);
+        let title = title.to_string();
+        let detail = detail.to_string();
+        div()
+            .relative()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_8()
+            .bg(colors.canvas)
+            // Same material as the welcome surface: a load is a
+            // change of the workspace's contents, not a different
+            // window. Grain only - the progress bar is the focus.
+            .child(texture::grain(2., 0.05, colors.foreground))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(colors.foreground)
+                            .child(title),
+                    )
+                    .when(!detail.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_center()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(colors.muted_foreground)
+                                .child(detail.clone()),
+                        )
+                    }),
+            )
+            .children(self.render_progress_bar(cx))
     }
 
     fn on_file_drop(
@@ -2434,6 +2236,7 @@ impl MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::palette(cx);
         // Search bar deferred focus: when the user opens the bar via
         // Cmd/Ctrl+F we set `focus_search_on_next_frame`; the very
         // next render schedules a deferred `window.focus` onto the
@@ -2441,8 +2244,8 @@ impl Render for MainView {
         if self.focus_search_on_next_frame {
             self.focus_search_on_next_frame = false;
             let focus_handle = self.search_focus_handle.clone();
-            cx.defer_in(window, move |_view, window, _cx| {
-                window.focus(&focus_handle);
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&focus_handle, cx);
             });
         }
         // Same deferred-focus dance for the filter bar, so opening it
@@ -2450,27 +2253,28 @@ impl Render for MainView {
         if self.focus_filter_on_next_frame {
             self.focus_filter_on_next_frame = false;
             let focus_handle = self.filter_focus_handle.clone();
-            cx.defer_in(window, move |_view, window, _cx| {
-                window.focus(&focus_handle);
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&focus_handle, cx);
             });
         }
         // Deferred focus for the natural-language Ask bar.
         if self.focus_ask_on_next_frame {
             self.focus_ask_on_next_frame = false;
             let focus_handle = self.ask_focus_handle.clone();
-            cx.defer_in(window, move |_view, window, _cx| {
-                window.focus(&focus_handle);
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&focus_handle, cx);
             });
         }
         // Deferred focus for the go-to-row bar.
         if self.focus_goto_on_next_frame {
             self.focus_goto_on_next_frame = false;
             let focus_handle = self.goto_focus_handle.clone();
-            cx.defer_in(window, move |_view, window, _cx| {
-                window.focus(&focus_handle);
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&focus_handle, cx);
             });
         }
 
+        self.sync_archive_dialog(window, cx);
         let center = self.render_center(window, cx);
         let search_bar = self.render_search_bar(window, cx);
         let filter_bar = self.render_filter_bar(window, cx);
@@ -2517,32 +2321,49 @@ impl Render for MainView {
             None
         };
 
+        let workspace = self.render_workspace(
+            workspace::WorkspaceContents {
+                body: body.into_any_element(),
+                panel,
+                inspector,
+                diagnostics,
+                cell_detail,
+            },
+            window,
+            cx,
+        );
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme::BG)
             .text_sm()
-            .text_color(theme::TEXT)
+            .text_color(colors.foreground)
             .on_drop(cx.listener(Self::on_file_drop))
-            .child(self.render_toolbar(cx))
-            // Tab strip below the toolbar so users can see and
-            // switch between all open documents. Empty (zero-height)
-            // when no documents are open.
+            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                style.border_1().border_color(colors.primary)
+            })
+            .when(self.model.is_none(), |this| {
+                this.track_focus(&self.focus_handle)
+            })
+            .capture_key_down(cx.listener(Self::on_shell_key_down))
+            // The window is one composed surface: an opaque canvas, a soft
+            // light wash across the top, then the layers above it. The wash
+            // is a single gradient background - one quad - and it only tints
+            // the upper band, so the translucent chrome has something to read
+            // through without the window ever becoming see-through itself.
+            .bg(texture::wash(
+                180.,
+                (
+                    (0., theme::blend(colors.canvas, colors.primary, 0.07)),
+                    (0.38, colors.canvas),
+                ),
+            ))
+            .child(self.render_titlebar(cx))
+            .child(self.render_command_bar(cx))
             .child(self.render_tab_bar(cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .overflow_hidden()
-                    .when_some(panel, |this, panel| this.child(panel))
-                    .child(body)
-                    .when_some(diagnostics, |this, diagnostics| this.child(diagnostics))
-                    .when_some(inspector, |this, inspector| this.child(inspector))
-                    .when_some(cell_detail, |this, panel| this.child(panel)),
-            )
-            .child(self.render_status())
+            .child(workspace)
+            .child(self.render_status(cx))
     }
 }
 
@@ -2631,3 +2452,6 @@ fn auto_scroll_direction(pointer_y: Pixels, bounds: Bounds<Pixels>) -> Option<Au
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod shell_tests;

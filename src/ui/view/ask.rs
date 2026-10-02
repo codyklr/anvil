@@ -8,6 +8,11 @@
 
 use std::cell::RefCell;
 
+use gpui_kit::component::{
+    button::{Button, ButtonVariants},
+    Disableable, IconName, Sizable,
+};
+
 use super::*;
 
 impl MainView {
@@ -355,20 +360,21 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let colors = theme::palette(cx);
         if !self.ask_open {
             return None;
         }
-        let input_text = self.ask_input.text().to_string();
-        let selection = self.ask_input.selection();
-        let (status, status_color) = self.ask_status_text();
+        let (status, status_color) = self.ask_status_text(cx);
 
         let text_area = input::editable_text_area(
             window,
-            &input_text,
-            selection,
-            self.ask_input.caret(),
-            "type a question, e.g. country is US and amount over 100",
-            "anvil-ask-input",
+            cx,
+            input::InputPresentation {
+                edit: &self.ask_input,
+                focus: &self.ask_focus_handle,
+                placeholder: "type a question, e.g. country is US and amount over 100",
+                debug_id: "anvil-ask-input",
+            },
             {
                 let entity = cx.entity();
                 move |bounds, app_cx| {
@@ -378,53 +384,90 @@ impl MainView {
                 }
             },
         )
-        .on_mouse_down(gpui::MouseButton::Left, cx.listener(Self::ask_mouse_down))
+        .on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(Self::ask_mouse_down),
+        )
         .on_mouse_move(cx.listener(Self::ask_mouse_move))
         .on_mouse_up(
-            gpui::MouseButton::Left,
+            gpui_kit::MouseButton::Left,
             cx.listener(|this, _ev: &MouseUpEvent, _window, cx| this.ask_mouse_up(cx)),
         );
 
         Some(
-            div()
-                .h(px(f32::from(theme::STATUS_HEIGHT) * 1.5))
-                .flex_shrink_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .bg(theme::BG_PANEL)
-                .border_b_1()
-                .border_color(theme::BORDER_STRONG)
+            input::query_bar(colors)
+                .min_w_0()
                 .key_context("Ask")
-                .track_focus(&self.ask_focus_handle)
-                .on_key_down(cx.listener(Self::on_ask_key_down))
+                .track_focus(&self.ask_focus_handle.clone().tab_stop(true))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if this.ask_focus_handle.is_focused(window) || event.keystroke.key == "escape" {
+                        this.on_ask_key_down(event, window, cx);
+                    }
+                }))
+                .child(input::query_label("Ask", cx))
+                .child(input::query_field(
+                    text_area,
+                    &self.ask_focus_handle,
+                    self.ask_model_error.is_some(),
+                    window,
+                    cx,
+                ))
+                .child(input::query_feedback(
+                    if self
+                        .ask_result
+                        .as_ref()
+                        .is_some_and(|result| result.clean && result.expr.is_some())
+                        && !self.ask_loading
+                        && self.ask_model_error.is_none()
+                    {
+                        format!("Preview: {status}")
+                    } else {
+                        status
+                    },
+                    status_color,
+                ))
+                .child(input::query_rule(colors))
+                .when(self.ask_interpreter.is_some(), |row| {
+                    row.child(
+                        Button::new("ask-interpret")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Bot)
+                            .label("Interpret")
+                            .tooltip("Use the local model · Ctrl/Cmd+Enter")
+                            .loading(self.ask_loading)
+                            .disabled(
+                                self.ask_input.is_empty()
+                                    || self.ask_result.as_ref().is_some_and(|result| result.clean),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.kick_ask_embedded(cx))),
+                    )
+                })
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(theme::TEXT_DIM)
-                        .child("Ask:"),
+                    Button::new("ask-accept")
+                        .small()
+                        .primary()
+                        .icon(IconName::Check)
+                        .label("Apply filter")
+                        .tooltip("Apply the previewed filter · Enter")
+                        .disabled(
+                            self.ask_loading
+                                || !self
+                                    .ask_result
+                                    .as_ref()
+                                    .is_some_and(|result| result.clean && result.expr.is_some()),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.accept_ask(cx))),
                 )
-                .child(text_area)
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(status_color)
-                        .child(status),
-                )
-                .child(
-                    div()
-                        .id("ask-close")
+                    Button::new("ask-close")
+                        .small()
+                        .ghost()
                         .debug_selector(|| "ask-close".to_string())
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .px_1()
-                        .text_color(theme::TEXT_DIM)
-                        .hover(|s| s.text_color(theme::WARN))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_ask(cx)))
-                        .child("×"),
+                        .icon(IconName::Close)
+                        .accessibility_label("Close Ask")
+                        .tooltip("Close Ask · Esc")
+                        .on_click(cx.listener(|this, _, _, cx| this.close_ask(cx))),
                 )
                 .into_any_element(),
         )
@@ -432,16 +475,17 @@ impl MainView {
 
     /// Preview/status for the Ask bar: the parsed expression, or the
     /// spans that could not be understood.
-    pub(super) fn ask_status_text(&self) -> (String, gpui::Rgba) {
-        const HINT: &str = "type a question, e.g. country is US and amount over 100";
+    pub(super) fn ask_status_text(&self, cx: &gpui_kit::App) -> (String, gpui_kit::Hsla) {
+        let colors = theme::palette(cx);
+        const HINT: &str = "Describe the rows you want, e.g. country is US";
         if self.ask_loading {
             return (
-                "interpreting with the local model...".to_string(),
-                theme::TEXT_DIM,
+                "Interpreting with the local model".to_string(),
+                colors.muted_foreground,
             );
         }
         if let Some(error) = &self.ask_model_error {
-            return (format!("model: {error}"), theme::WARN);
+            return (format!("Model: {error}"), colors.danger);
         }
         match &self.ask_result {
             Some(result) => {
@@ -456,35 +500,25 @@ impl MainView {
                         if result.from_model {
                             text = format!("{text}  (local model)");
                         }
-                        (text, theme::TEXT_DIM)
+                        (text, colors.foreground)
                     } else {
                         let note = if result.unmatched.is_empty() {
                             "check the phrase".to_string()
                         } else {
                             format!("unrecognised: {}", result.unmatched.join(", "))
                         };
-                        let hint = if self.ask_interpreter.is_some() {
-                            "  (Ctrl/Cmd+Enter to interpret)"
-                        } else {
-                            ""
-                        };
-                        (format!("{text}  ({note}){hint}"), theme::WARN)
+                        (format!("{text}  ({note})"), colors.warning)
                     }
                 } else if !result.unmatched.is_empty() {
-                    let hint = if self.ask_interpreter.is_some() {
-                        "  (Ctrl/Cmd+Enter to interpret)"
-                    } else {
-                        ""
-                    };
                     (
-                        format!("couldn't parse: {}{hint}", result.unmatched.join(", ")),
-                        theme::WARN,
+                        format!("couldn't parse: {}", result.unmatched.join(", ")),
+                        colors.warning,
                     )
                 } else {
-                    (HINT.to_string(), theme::TEXT_DIM)
+                    (HINT.to_string(), colors.muted_foreground)
                 }
             }
-            None => (HINT.to_string(), theme::TEXT_DIM),
+            None => (HINT.to_string(), colors.muted_foreground),
         }
     }
 }

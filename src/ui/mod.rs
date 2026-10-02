@@ -10,7 +10,8 @@
 //!  - `input`: shared editable-text rendering / hit-testing helpers
 //!  - `text_edit`: GPUI-free single-line edit buffer
 //!  - `archive_picker`: in-archive file selector helpers
-//!  - `theme`: small collection of colours / metrics
+//!  - `theme`: semantic surface/colour tokens and physical metrics
+//!  - `texture`: procedural dither / stipple fields and gradient washes
 
 pub mod app;
 pub mod archive_picker;
@@ -18,6 +19,7 @@ mod commands;
 pub mod grid;
 mod input;
 mod text_edit;
+pub(crate) mod texture;
 pub mod theme;
 pub mod view;
 
