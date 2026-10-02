@@ -298,12 +298,10 @@ impl MainView {
         }
 
         if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
-            if let Some(ch) = &event.keystroke.key_char {
-                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
-                    self.ask_input.insert(ch);
-                    self.refresh_ask();
-                    cx.notify();
-                }
+            if let Some(ch) = super::super::input::printable_key_text(&event.keystroke) {
+                self.ask_input.insert(ch);
+                self.refresh_ask();
+                cx.notify();
             }
         }
     }

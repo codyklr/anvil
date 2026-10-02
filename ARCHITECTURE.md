@@ -795,6 +795,12 @@ Both the filter and search inputs use `TextEdit`. The same
 differs only in that any text change re-runs the live background
 search (`kick_search`), while the filter applies on Enter.
 
+Ask, filter, and search share ui::input::printable_key_text to resolve
+printable keystrokes. GPUI on Windows emits the named space key without
+key_char, so the helper supplies a literal space only when key_char is
+absent. Supplied printable text is preserved, control characters are
+rejected, and existing modifier guards prevent shortcuts inserting text.
+
 There is no caret blink and no horizontal scroll when the text is
 wider than the field; both are follow-ups.
 

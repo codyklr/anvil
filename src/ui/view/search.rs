@@ -337,12 +337,10 @@ impl MainView {
         // Cmd+F (already handled by the grid binding), Option+E (an
         // accented character), etc.
         if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
-            if let Some(ch) = &event.keystroke.key_char {
-                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
-                    self.search_query.insert(ch);
-                    self.kick_search(cx);
-                    cx.notify();
-                }
+            if let Some(ch) = super::super::input::printable_key_text(&event.keystroke) {
+                self.search_query.insert(ch);
+                self.kick_search(cx);
+                cx.notify();
             }
         }
     }

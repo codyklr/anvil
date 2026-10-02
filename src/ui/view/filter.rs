@@ -328,13 +328,11 @@ impl MainView {
         }
 
         if !modifiers.control && !modifiers.alt && !modifiers.function && !modifiers.secondary() {
-            if let Some(ch) = &event.keystroke.key_char {
-                if !ch.is_empty() && ch.chars().all(|c| !c.is_control()) {
-                    self.filter_input.insert(ch);
-                    self.refresh_filter_suggestions();
-                    self.filter_popup_open = !self.filter_suggestions.is_empty();
-                    cx.notify();
-                }
+            if let Some(ch) = super::super::input::printable_key_text(&event.keystroke) {
+                self.filter_input.insert(ch);
+                self.refresh_filter_suggestions();
+                self.filter_popup_open = !self.filter_suggestions.is_empty();
+                cx.notify();
             }
         }
     }
