@@ -390,36 +390,50 @@ impl<'a> Iterator for Cells<'a> {
                 self.done = true;
                 return Some(decoded);
             }
-            let b = self.record[self.i];
             if in_quotes {
-                if b == self.quote {
-                    if self.i + 1 < self.record.len() && self.record[self.i + 1] == self.quote {
-                        // Escaped quote inside quoted field.
-                        self.i += 2;
+                // Jump to the next quote. A doubled quote is an escape and
+                // stays inside the field; a single quote closes it.
+                match memchr::memchr(self.quote, &self.record[self.i..]) {
+                    None => {
+                        self.i = self.record.len();
+                    }
+                    Some(rel) => {
+                        let i = self.i + rel;
+                        if i + 1 < self.record.len() && self.record[i + 1] == self.quote {
+                            self.i = i + 2;
+                            continue;
+                        }
+                        in_quotes = false;
+                        self.i = i + 1;
+                    }
+                }
+                continue;
+            }
+            // Unquoted span: the next structural byte is a delimiter or a
+            // quote. Everything before it is literal payload.
+            match memchr::memchr2(self.delimiter, self.quote, &self.record[self.i..]) {
+                None => {
+                    self.i = self.record.len();
+                }
+                Some(rel) => {
+                    let i = self.i + rel;
+                    let b = self.record[i];
+                    if b == self.delimiter {
+                        let start = self.cell_start;
+                        let raw = &self.record[start..i];
+                        let decoded = unquote_cell(raw, self.quote);
+                        self.i = i + 1;
+                        self.cell_start = self.i;
+                        return Some(decoded);
+                    }
+                    if i == self.cell_start {
+                        in_quotes = true;
+                        self.i = i + 1;
                         continue;
                     }
-                    // End of quoted field.
-                    in_quotes = false;
-                    self.i += 1;
-                    continue;
+                    // A quote after the field has started is a literal byte.
+                    self.i = i + 1;
                 }
-                self.i += 1;
-            } else {
-                if b == self.delimiter {
-                    let cell_end = self.i;
-                    let start = self.cell_start;
-                    let raw = &self.record[start..cell_end];
-                    let decoded = unquote_cell(raw, self.quote);
-                    self.i = cell_end + 1;
-                    self.cell_start = self.i;
-                    return Some(decoded);
-                }
-                if b == self.quote && self.i == self.cell_start {
-                    in_quotes = true;
-                    self.i += 1;
-                    continue;
-                }
-                self.i += 1;
             }
         }
     }
