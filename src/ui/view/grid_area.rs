@@ -3,6 +3,7 @@
 //! Extracted verbatim from `view.rs` (behaviour-neutral split).
 
 use super::*;
+use gpui_kit::base::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::ActiveTheme;
 
 /// Width of the soft fade painted at a horizontal scroll boundary.
@@ -320,7 +321,8 @@ impl MainView {
                                 .w(px(EDGE_FADE_WIDTH))
                                 .bg(edge),
                         )
-                    }),
+                    })
+                    .child(Scrollbar::vertical(&self.v_scroll).mode(ScrollbarMode::Always)),
             )
             .child(self.render_h_scrollbar(cx))
             .when(self.focus_handle.is_focused(window), |grid| {

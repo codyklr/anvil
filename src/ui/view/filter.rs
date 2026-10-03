@@ -487,7 +487,13 @@ impl MainView {
         Some(
             input::query_bar(colors)
                 .min_w_0()
-                .key_context("Filter")
+                .key_context(
+                    if self.filter_popup_open && !self.filter_suggestions.is_empty() {
+                        "Filter FilterAutocomplete"
+                    } else {
+                        "Filter"
+                    },
+                )
                 .track_focus(&self.filter_focus_handle.clone().tab_stop(true))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if this.filter_focus_handle.is_focused(window)

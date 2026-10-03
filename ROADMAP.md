@@ -803,6 +803,13 @@ existing Kit migration, not a second UI/component stack.
       correct Warm gutter blend and translucent modal scrim.
 - [x] D5: release format/build/tests/clippy and CSV/multi-ZIP probes;
       Windows normal/minimum Home and grid captures, query/panel/help exercise.
+- [x] Fix query-field line-height/wrapping overflow, contain two-line Files
+      rows and long document tabs, and attach an always-visible vertical Kit
+      scrollbar to the virtualized grid. Release tests/build/Clippy pass;
+      native visual confirmation remains open.
+- [x] Let Tab accept the highlighted filter autocomplete candidate before
+      Kit Root focus traversal; real Root dispatch regression tests also verify
+      normal Tab without candidates and Shift+Tab traversal remain intact.
 - [ ] D6: native external drag/drop/abort, archive opening recovery, divider
       resizing, accessibility/scaling and GPU frame-time acceptance.
 - [ ] D7: bounded persisted recent-source history through `paths`, then

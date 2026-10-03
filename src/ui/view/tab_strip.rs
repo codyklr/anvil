@@ -95,6 +95,9 @@ impl MainView {
 
             div()
                 .id(("doc-tab-surface", id))
+                .max_w(px(240.))
+                .min_w_0()
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .flex_shrink_0()
@@ -122,6 +125,8 @@ impl MainView {
                         .small()
                         .custom(style)
                         .toggled(active)
+                        .flex_1()
+                        .min_w_0()
                         .accessibility_label(tooltip.clone())
                         .tooltip(tooltip)
                         .child(
@@ -129,19 +134,23 @@ impl MainView {
                                 .flex()
                                 .items_center()
                                 .gap_2()
+                                .flex_1()
                                 .min_w_0()
+                                .overflow_hidden()
                                 .h_full()
                                 .child(snap.navigation_icon(colors))
                                 .child(
                                     div()
                                         .max_w_48()
+                                        .flex_1()
+                                        .min_w_0()
                                         .truncate()
                                         .font_weight(if active {
                                             gpui_kit::FontWeight::MEDIUM
                                         } else {
                                             gpui_kit::FontWeight::NORMAL
                                         })
-                                        .child(snap.tab_label()),
+                                        .child(snap.navigation_label()),
                                 ),
                         )
                         .on_click(cx.listener(move |view, _, _, cx| {
