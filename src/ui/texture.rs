@@ -178,11 +178,20 @@ const HOME_HEIGHT: f32 = 420.;
 const HOME_PITCH: f32 = 6.;
 const HOME_DOT_SIZE: f32 = 2.5;
 const BAYER_4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-static HOME_DOTS: OnceLock<Vec<(f32, f32)>> = OnceLock::new();
+static HOME_HEAD: OnceLock<Vec<(f32, f32)>> = OnceLock::new();
+static HOME_BODY: OnceLock<Vec<(f32, f32)>> = OnceLock::new();
+
+/// Face tones of the striking block (top, front, right). The waist and
+/// base use every other tone in [`ANVIL_FACES`].
+fn is_head_tone(tone: f32) -> bool {
+    tone == 0.92 || tone == 0.66 || tone == 0.44
+}
 
 /// Convex faces, back to front: plinth, narrow waist, broad striking block.
-/// Separate screen densities give the reference's blocky isometric form depth
-/// without images, gradients, lighting tasks or changing the copper palette.
+/// The first five faces are the waist and base; the last three are the lit
+/// head. Separate screen densities give the isometric form depth without
+/// images, gradients or lighting tasks. The head and the body are cached
+/// apart so each mass can take its own ink.
 const ANVIL_FACES: [([(f32, f32); 4], f32); 8] = [
     (
         [(102., 300.), (294., 222.), (418., 284.), (226., 362.)],
@@ -228,14 +237,18 @@ fn anvil_tone(x: f32, y: f32) -> f32 {
         .map_or(0., |(_, tone)| *tone)
 }
 
-/// Fixed anvil silhouette. Tone is encoded by ordered occupancy, not alpha.
-fn home_dots() -> Vec<(f32, f32)> {
+/// Ordered-dither dots for one mass. `head` selects the striking block;
+/// otherwise the waist and base. Tone is occupancy, not alpha.
+fn home_mass(head: bool) -> Vec<(f32, f32)> {
     let mut dots = Vec::new();
     for row in 0..(HOME_HEIGHT / HOME_PITCH) as usize {
         for col in 0..(HOME_WIDTH / HOME_PITCH) as usize {
             let x = col as f32 * HOME_PITCH;
             let y = row as f32 * HOME_PITCH;
             let tone = anvil_tone(x + HOME_DOT_SIZE * 0.5, y + HOME_DOT_SIZE * 0.5);
+            if is_head_tone(tone) != head {
+                continue;
+            }
             let threshold = (BAYER_4[row % 4][col % 4] as f32 + 0.5) / 16.;
             if tone > threshold {
                 dots.push((x, y));
@@ -245,13 +258,66 @@ fn home_dots() -> Vec<(f32, f32)> {
     dots
 }
 
+fn home_head() -> Vec<(f32, f32)> {
+    home_mass(true)
+}
+
+fn home_body() -> Vec<(f32, f32)> {
+    home_mass(false)
+}
+
+/// Both masses in lattice order, for geometry checks. Not a third cache.
+#[cfg(test)]
+fn home_dots() -> Vec<(f32, f32)> {
+    let mut dots = home_body();
+    dots.extend(home_head());
+    dots
+}
+
+fn paint_dots(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    dots: &[(f32, f32)],
+    color: Hsla,
+    left: f32,
+    top: f32,
+    scale: f32,
+    width: f32,
+    height: f32,
+) {
+    let size = HOME_DOT_SIZE * scale;
+    for &(x, y) in dots {
+        let x = left + x * scale;
+        let y = top + y * scale;
+        let right = (x + size).min(width);
+        let bottom = (y + size).min(height);
+        let x = x.max(0.);
+        let y = y.max(0.);
+        if right <= x || bottom <= y {
+            continue;
+        }
+        window.paint_quad(PaintQuad {
+            bounds: Bounds::new(
+                Point::new(bounds.origin.x + px(x), bounds.origin.y + px(y)),
+                Size::new(px(right - x), px(bottom - y)),
+            ),
+            corner_radii: Corners::default(),
+            background: color.into(),
+            border_widths: Edges::all(px(0.)),
+            border_color: Hsla::transparent_black(),
+            border_style: BorderStyle::Solid,
+        });
+    }
+}
+
 /// Static ordered-dither anvil art, centred at (68%, 50%) of its
-/// parent. The 520 × 420 field only scales down; edge dots are cropped to
-/// the canvas. A 6 px Bayer lattice replaces the radial proposal for home
-/// art without changing existing stipple/grain consumers. No timers or
-/// full-window enumeration; the fixed dot geometry is cached once.
-pub(super) fn home_field(color: Hsla) -> impl IntoElement {
-    let dots = HOME_DOTS.get_or_init(home_dots);
+/// parent. The head is `head` (copper) and the waist and base are `body`
+/// (muted). The 520 × 420 field only scales down; edge dots are cropped to
+/// the canvas. Both masses are cached once and submitted from this single
+/// canvas. No timers, no regen, no full-window enumeration.
+pub(super) fn home_field(head: Hsla, body: Hsla) -> impl IntoElement {
+    let head_dots = HOME_HEAD.get_or_init(home_head);
+    let body_dots = HOME_BODY.get_or_init(home_body);
     canvas(
         move |_bounds, _window, _cx| (),
         move |bounds, (), window: &mut Window, _cx: &mut App| {
@@ -263,29 +329,12 @@ pub(super) fn home_field(color: Hsla) -> impl IntoElement {
             }
             let left = width * 0.68 - HOME_WIDTH * scale * 0.5;
             let top = height * 0.5 - HOME_HEIGHT * scale * 0.5;
-            let size = HOME_DOT_SIZE * scale;
-            for &(x, y) in dots {
-                let x = left + x * scale;
-                let y = top + y * scale;
-                let right = (x + size).min(width);
-                let bottom = (y + size).min(height);
-                let x = x.max(0.);
-                let y = y.max(0.);
-                if right <= x || bottom <= y {
-                    continue;
-                }
-                window.paint_quad(PaintQuad {
-                    bounds: Bounds::new(
-                        Point::new(bounds.origin.x + px(x), bounds.origin.y + px(y)),
-                        Size::new(px(right - x), px(bottom - y)),
-                    ),
-                    corner_radii: Corners::default(),
-                    background: color.into(),
-                    border_widths: Edges::all(px(0.)),
-                    border_color: Hsla::transparent_black(),
-                    border_style: BorderStyle::Solid,
-                });
-            }
+            paint_dots(
+                window, bounds, body_dots, body, left, top, scale, width, height,
+            );
+            paint_dots(
+                window, bounds, head_dots, head, left, top, scale, width, height,
+            );
         },
     )
     .absolute()
@@ -372,11 +421,21 @@ mod tests {
 
     #[test]
     fn home_geometry_is_deterministic_and_cached() {
-        let dots = home_dots();
-        assert_eq!(dots, home_dots());
-        let cached = HOME_DOTS.get_or_init(home_dots);
-        assert_eq!(&dots, cached);
-        assert!(std::ptr::eq(cached, HOME_DOTS.get_or_init(home_dots)));
+        let head = home_head();
+        let body = home_body();
+        assert_eq!(head, home_head());
+        assert_eq!(body, home_body());
+        assert!(!head.is_empty() && !body.is_empty());
+        let cached_head = HOME_HEAD.get_or_init(home_head);
+        let cached_body = HOME_BODY.get_or_init(home_body);
+        assert_eq!(&head, cached_head);
+        assert_eq!(&body, cached_body);
+        assert!(std::ptr::eq(cached_head, HOME_HEAD.get_or_init(home_head)));
+        assert!(std::ptr::eq(cached_body, HOME_BODY.get_or_init(home_body)));
+        // The two caches partition the silhouette; nothing is drawn twice.
+        for dot in &head {
+            assert!(!body.contains(dot));
+        }
     }
 
     #[test]
@@ -388,6 +447,7 @@ mod tests {
             "{} quads exceeds preferred budget",
             dots.len()
         );
+        assert_eq!(dots.len(), home_head().len() + home_body().len());
         for (x, y) in dots {
             assert_eq!(x % HOME_PITCH, 0.);
             assert_eq!(y % HOME_PITCH, 0.);

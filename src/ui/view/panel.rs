@@ -29,27 +29,40 @@ pub(super) fn header(
     label: &'static str,
     close: Button,
 ) -> Div {
+    // The open panel is the one on screen. A 2 px copper edge uses the
+    // border, not a shadow. The hairline under the label stays the
+    // structural rule. GPUI has one border color per element, so the edge
+    // and the rule sit on nested divs.
     div()
         .flex()
-        .flex_row()
-        .items_center()
-        .gap_2()
+        .flex_col()
         .flex_shrink_0()
         .h(theme::PANEL_HEADER_HEIGHT)
-        .pl(px(BODY_PAD_X))
-        .pr(px(6.))
-        .border_b_1()
-        .border_color(colors.border)
-        .child(Icon::new(icon).small().text_color(colors.faint_foreground))
+        .border_l_2()
+        .border_color(colors.primary)
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
                 .flex_1()
-                .text_xs()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .text_color(colors.muted_foreground)
-                .child(label.to_uppercase()),
+                .min_h_0()
+                .pl(px(BODY_PAD_X))
+                .pr(px(6.))
+                .border_b_1()
+                .border_color(colors.border)
+                .child(Icon::new(icon).small().text_color(colors.faint_foreground))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(colors.muted_foreground)
+                        .child(label.to_uppercase()),
+                )
+                .child(close),
         )
-        .child(close)
 }
 
 /// The panel body container: scrolls, and owns the vertical rhythm.
