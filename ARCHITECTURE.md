@@ -477,6 +477,12 @@ consistent at the point render observes it.
 Both are cheap to clone, so the uniform-list row renderer can capture
 the model without aliasing `MainView` mutably.
 
+Filter autocomplete adds a `FilterAutocomplete` key context only while
+its popup has candidates. A context-scoped Tab `NoAction` binding prevents
+Kit Root's focus-navigation action from intercepting the key before the
+existing raw filter handler can accept the highlighted suggestion. Without
+candidates, Tab retains normal focus traversal; Shift+Tab is unchanged.
+
 ### Event flow
 
 1. User clicks **Open…** in the toolbar, or drops a path on the

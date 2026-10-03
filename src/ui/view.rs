@@ -720,6 +720,13 @@ struct FilterSuggestion {
 
 impl MainView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // Kit Root handles Tab before raw key events. Let the filter's
+        // existing key handler own it only while autocomplete can accept it.
+        cx.bind_keys([gpui_kit::KeyBinding::new(
+            "tab",
+            gpui_kit::NoAction,
+            Some("FilterAutocomplete"),
+        )]);
         Self {
             documents: Vec::new(),
             active: None,

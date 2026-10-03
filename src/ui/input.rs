@@ -78,7 +78,7 @@ pub(super) fn query_field(
     div()
         .flex_1()
         .min_w_0()
-        .h_6()
+        .h(px(24.))
         .flex()
         .items_center()
         .px_2()
@@ -233,6 +233,11 @@ pub(super) fn editable_text_area(
         // Keep this in sync with `input_font_size`, which shapes the
         // caret and hit-tests pointer clicks.
         .text_sm()
+        // Kit's text_sm sets only font size. Do not inherit shell line
+        // height or wrap: shaping and hit testing both describe one line.
+        .h(px(18.))
+        .line_height(px(18.))
+        .whitespace_nowrap()
         .text_color(colors.strong_foreground)
         .debug_selector(move || debug_id.to_string())
         .child(text_content)
@@ -290,9 +295,60 @@ mod field_tests {
             );
             div()
                 .p_3()
+                .w(px(220.))
+                .line_height(px(48.))
                 .text_sm()
                 .track_focus(&self.focus)
-                .child(query_field(editor, &self.focus, false, window, cx))
+                .child(
+                    query_field(editor, &self.focus, false, window, cx)
+                        .debug_selector(|| "query-frame".to_string()),
+                )
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn query_geometry_contains_text_and_caret_without_wrapping(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            gpui_kit::init(cx);
+            EditorHarness {
+                focus: cx.focus_handle().tab_stop(true),
+                edit: TextEdit::default(),
+                bounds: None,
+            }
+        });
+        for (text, selected) in [
+            (String::new(), false),
+            ("héllo".to_string(), false),
+            ("a long query with spaces ".repeat(20), false),
+            ("a long selected query with spaces ".repeat(20), true),
+        ] {
+            cx.update_window_entity(&view, |view, window, cx| {
+                view.edit = TextEdit::from(text.as_str());
+                if selected {
+                    view.edit.select_all();
+                }
+                // Keep the caret visible while testing horizontal overflow.
+                view.edit.set_caret(0, selected);
+                window.focus(&view.focus, cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let frame = cx.debug_bounds("query-frame").expect("field frame");
+            let inner = cx.debug_bounds("query-inner").expect("text area");
+            let caret = cx.debug_bounds("query-inner-caret").expect("caret");
+            assert_eq!(frame.size.height, px(24.));
+            assert_eq!(inner.size.height, px(18.));
+            assert_eq!(inner.center().y, frame.center().y);
+            assert!(inner.origin.x > frame.origin.x);
+            assert!(inner.right() < frame.right());
+            assert!(inner.origin.y > frame.origin.y);
+            assert!(inner.bottom() < frame.bottom());
+            assert_eq!(caret.origin.y, inner.origin.y);
+            assert_eq!(caret.size.height, inner.size.height);
+            cx.update_window_entity(&view, |view, _, _| {
+                assert_eq!(view.bounds, Some(inner));
+                assert_eq!(view.edit.text(), text.as_str());
+            });
         }
     }
 

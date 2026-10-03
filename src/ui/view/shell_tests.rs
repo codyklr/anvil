@@ -143,6 +143,76 @@ fn csv_fixture() -> (tempfile::TempDir, Box<LoadedDocument>) {
     (dir, loaded)
 }
 
+#[gpui_kit::test]
+async fn filter_tab_accepts_selected_suggestion_before_root_focus_traversal(
+    cx: &mut TestAppContext,
+) {
+    let (_fixture, loaded) = csv_fixture();
+    let (handle, view) = open_shell(cx, loaded);
+    wait_for_grid(cx, handle, &view).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("filter", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), WAIT, |window, cx| {
+        view.read(cx).filter_focus_handle.is_focused(window)
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.input("name ", cx);
+        window.press("down", cx);
+        let state = view.read(cx);
+        assert!(state.filter_popup_open);
+        assert!(state.filter_suggestion_selected > 0);
+        let selected = state.filter_suggestions[state.filter_suggestion_selected]
+            .text
+            .clone();
+        let expected = format!("name {selected} ");
+        window.press("tab", cx);
+        let state = view.read(cx);
+        assert_eq!(state.filter_input.text(), expected);
+        assert!(!state.filter_popup_open);
+        assert!(state.filter_focus_handle.is_focused(window));
+        assert!(state.filter_applied.is_none());
+        // Once autocomplete closes, Tab must resume Kit's normal traversal.
+        window.press("tab", cx);
+        let state = view.read(cx);
+        assert_eq!(state.filter_input.text(), expected);
+        assert!(!state.filter_focus_handle.is_focused(window));
+        assert!(state.filter_applied.is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn filter_tab_without_candidates_and_shift_tab_keep_root_focus_traversal(
+    cx: &mut TestAppContext,
+) {
+    for (text, key, has_candidates) in [("zzzz", "tab", false), ("name ", "shift-tab", true)] {
+        let (_fixture, loaded) = csv_fixture();
+        let (handle, view) = open_shell(cx, loaded);
+        wait_for_grid(cx, handle, &view).await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("filter", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), WAIT, |window, cx| {
+            view.read(cx).filter_focus_handle.is_focused(window)
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.input(text, cx);
+            assert_eq!(!view.read(cx).filter_suggestions.is_empty(), has_candidates);
+            window.press(key, cx);
+            let state = view.read(cx);
+            assert_eq!(state.filter_input.text(), text);
+            assert!(!state.filter_focus_handle.is_focused(window));
+            assert!(state.filter_applied.is_none());
+        })
+        .unwrap();
+    }
+}
+
 fn archive_fixture() -> (tempfile::TempDir, Box<LoadedDocument>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("shell.zip");

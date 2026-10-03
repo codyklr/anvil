@@ -86,6 +86,8 @@ impl MainView {
                 rows.push(
                     div()
                         .id(("file-row-surface", id))
+                        .min_w_0()
+                        .overflow_hidden()
                         .flex()
                         .items_center()
                         .gap_1()
@@ -98,6 +100,8 @@ impl MainView {
                                 .small()
                                 .custom(style)
                                 .toggled(active)
+                                // Kit's small button is one line high; this row has two.
+                                .h(px(40.))
                                 .flex_1()
                                 .min_w_0()
                                 .justify_start()
@@ -109,12 +113,14 @@ impl MainView {
                                         .items_center()
                                         .flex_1()
                                         .min_w_0()
+                                        .overflow_hidden()
                                         .gap_2()
                                         .child(snap.navigation_icon(colors))
                                         .child(
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
+                                                .overflow_hidden()
                                                 .flex()
                                                 .flex_col()
                                                 .items_start()
@@ -166,6 +172,8 @@ impl MainView {
             .flex()
             .flex_col()
             .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .h_full()
             .min_h_0()
             .flex_shrink_0()
@@ -211,8 +219,18 @@ impl MainView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
+                    .overflow_x_hidden()
                     .overflow_y_scroll()
-                    .child(div().flex().flex_col().gap(px(1.)).p(px(6.)).children(rows)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(px(1.))
+                            .p(px(6.))
+                            .children(rows),
+                    ),
             )
     }
 }

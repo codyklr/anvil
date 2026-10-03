@@ -8024,3 +8024,72 @@ in dev builds. The menu chrome itself had no texture at all.
 - Submit the coherent redesign through a conventional feature branch into
   `master`; wait for the three-platform CI matrix, then merge and fast-forward
   local `master`. Native acceptance gaps must remain explicit in the PR.
+
+## 2026-10-02 - Iteration 25: contain workspace text and restore vertical scrollbar
+
+### Implemented
+
+- Attached Kit's always-visible vertical scrollbar to the existing uniform-list
+  handle; retained virtualization and horizontal scrolling.
+- Fixed query fields at 24 px with centered 18 px single-line editors rather
+  than allowing inherited line height and wrapping to exceed their frames.
+- Sized two-line Files buttons at 40 px, constrained metadata/name overflow,
+  and bounded document tabs to 240 px with width-based ellipsis and tooltips.
+
+### Verified
+
+- `cargo fmt`, full `cargo test --release`, `cargo build --release`, and
+  `cargo clippy --release --all-targets` passed.
+- Five targeted input tests and seven navigation tests passed.
+- Native visual/scrollbar drag inspection was not performed; normal/minimum
+  sizes in both themes remain a required follow-up. No probe was run because
+  this slice does not change loading or the data path.
+
+### Tests added/changed
+
+- Added input geometry coverage for placeholders, UTF-8, long and selected
+  queries with oversized inherited line height, caret and hit-test bounds.
+
+### Roadmap / architecture changes
+
+- Recorded the implemented overflow/scrollbar fixes under Milestone 5 without
+  promoting native visual acceptance. No state ownership/data architecture change.
+
+### Issues / next recommended task
+
+- Visually exercise long filenames, all query bars and vertical thumb dragging
+  at normal/minimum window sizes in Slate/Warm.
+- No branch, commit or PR created; changes remain local for user review.
+
+## 2026-10-02 - Iteration 26: filter Tab autocomplete dispatch
+
+### Implemented
+
+- Added a candidate-popup-specific FilterAutocomplete context and Tab NoAction
+  binding so Kit Root focus traversal cannot preempt the existing completion
+  handler. Tab accepts the highlighted candidate without applying the filter.
+- Normal Tab traversal resumes after completion or without candidates;
+  Shift+Tab retains backward traversal.
+
+### Verified
+
+- Reproduced the failure with real Kit Root key dispatch before the fix.
+- All 130 view tests, full `cargo test --release`, release binary build,
+  `cargo clippy --release --all-targets`, format and diff checks passed.
+- Native GUI manual exercise was not performed; no data-path probe needed.
+
+### Tests added/changed
+
+- Added shell regressions for a non-first selected candidate, retained input
+  focus, no premature filter application, subsequent Tab traversal, Tab with
+  no candidates and Shift+Tab with candidates.
+
+### Roadmap / architecture changes
+
+- Recorded the filter dispatch fix under Milestone 5 and documented the
+  conditional key context in ARCHITECTURE.md.
+
+### Issues / next recommended task
+
+- Exercise completion alongside the preceding layout fixes in the native GUI.
+- Prior local work preserved; no branch, commit or PR created.
