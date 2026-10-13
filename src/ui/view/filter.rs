@@ -462,7 +462,7 @@ impl MainView {
             input::InputPresentation {
                 edit: &self.filter_input,
                 focus: &self.filter_focus_handle,
-                placeholder: "column op value, e.g. country == US AND amount > 100",
+                placeholder: "Role == \"Parent\"",
                 debug_id: "anvil-filter-input",
             },
             {

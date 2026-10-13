@@ -883,6 +883,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn placeholder_example_parses_with_and_without_quoted_column() {
+        let doc = parse_csv("Role,name\nParent,a\nChild,b\n");
+        let hits = |q: &str| apply_expr(&doc, &expr(q, &doc));
+        assert_eq!(hits("Role == \"Parent\""), vec![0]);
+        assert_eq!(hits("\"Role\" == \"Parent\""), vec![0]);
+    }
+
     // ---- compound predicates (AND / OR / parentheses) ----------------
 
     fn expr(input: &str, doc: &ParsedDocument) -> FilterExpr {
