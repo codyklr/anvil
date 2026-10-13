@@ -17,7 +17,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenuItem},
-    ActiveTheme, Disableable, Icon, Selectable, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
+    ActiveTheme, Disableable, Selectable, Sizable, Theme, ThemeMode, TitleBar, WindowExt,
 };
 use gpui_kit::Div;
 
@@ -98,7 +98,7 @@ impl MainView {
             // The halftone layer of the menu chrome. It is a GPU
             // pattern, so it repaints for free; it carries no
             // handlers and never intercepts a click or a drag.
-            .child(texture::chrome_dither(colors.foreground.alpha(0.025)))
+            .child(texture::chrome_dither(colors.primary.alpha(0.04)))
             .child(
                 div()
                     .flex()
@@ -106,6 +106,13 @@ impl MainView {
                     .gap_2()
                     .flex_1()
                     .min_w_0()
+                    .child(
+                        div()
+                            .w(px(2.))
+                            .h(px(10.))
+                            .flex_shrink_0()
+                            .bg(colors.primary),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -168,7 +175,7 @@ impl MainView {
             // The halftone layer of the menu chrome. A GPU pattern,
             // so it repaints for free; no handlers, so it never
             // intercepts a click.
-            .child(texture::chrome_dither(colors.foreground.alpha(0.025)))
+            .child(texture::chrome_dither(colors.primary.alpha(0.04)))
             .child(
                 Button::new("open-button")
                     .small()
@@ -424,7 +431,7 @@ impl MainView {
             .bg(colors.canvas)
             // Keep the entrance quiet; the bounded ordered field carries
             // the material identity without texturing the whole workspace.
-            .child(texture::home_field(colors.primary))
+            .child(texture::home_field(colors.primary, colors.muted_foreground))
             .child(
                 div()
                     .relative()
@@ -451,31 +458,14 @@ impl MainView {
                                     .border_color(colors.primary)
                             })
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_start()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .size(px(32.))
-                                            .child(
-                                                Icon::new(IconName::Table)
-                                                    .size_6()
-                                                    .text_color(colors.muted_foreground),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(24.))
-                                            .line_height(px(30.))
-                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                            .text_color(colors.strong_foreground)
-                                            .child("Open a data file"),
-                                    ),
+                                div().flex().flex_col().items_start().gap_3().child(
+                                    div()
+                                        .text_size(px(24.))
+                                        .line_height(px(30.))
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                        .text_color(colors.strong_foreground)
+                                        .child("Open a data file"),
+                                ),
                             )
                             .child(
                                 div()

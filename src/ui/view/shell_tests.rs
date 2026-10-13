@@ -348,10 +348,10 @@ async fn appearance_button_round_trips_registered_palettes_without_copying_data(
         let original = view.read(cx).model.as_ref().unwrap().doc.clone();
         let dark = theme::palette(cx);
         assert_eq!(cx.theme().mode, ThemeMode::Dark);
-        assert_eq!(cx.theme().dark_theme.name.as_ref(), "Anvil Slate");
+        assert_eq!(cx.theme().dark_theme.name.as_ref(), "Anvil Ink");
         window.click("appearance", cx);
         assert_eq!(cx.theme().mode, ThemeMode::Light);
-        assert_eq!(cx.theme().light_theme.name.as_ref(), "Anvil Warm");
+        assert_eq!(cx.theme().light_theme.name.as_ref(), "Anvil Vellum");
         let light = theme::palette(cx);
         assert_ne!(dark.canvas, light.canvas);
         assert_ne!(dark.foreground, light.foreground);

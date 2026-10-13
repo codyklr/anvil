@@ -17,8 +17,8 @@
 //!     └─ surface   fully opaque; the grid is the working surface
 //! ```
 //!
-//! Every value is derived from the active Kit theme so Anvil Slate (dark) and
-//! Anvil Warm (light) stay in step automatically.
+//! Every value is derived from the active Kit theme so Anvil Ink (dark) and
+//! Anvil Vellum (light) stay in step automatically.
 
 use gpui_kit::component::{ActiveTheme, Colorize, Theme, ThemeConfig, ThemeMode};
 use gpui_kit::{px, App, Hsla, Pixels};
@@ -192,7 +192,7 @@ pub fn init(cx: &mut App) {
 }
 
 fn config(mut theme: ThemeConfig, dark: bool) -> ThemeConfig {
-    theme.name = if dark { "Anvil Slate" } else { "Anvil Warm" }.into();
+    theme.name = if dark { "Anvil Ink" } else { "Anvil Vellum" }.into();
     theme.mode = if dark {
         ThemeMode::Dark
     } else {
@@ -205,39 +205,42 @@ fn config(mut theme: ThemeConfig, dark: bool) -> ThemeConfig {
         };
     }
     // Surfaces, from the window backdrop outward.
-    color!(background, "#0D131C", "#EFEDE7");
-    color!(sidebar, "#141C28", "#F7F5F1");
-    color!(group_box, "#1B2634", "#FFFFFF");
-    color!(popover, "#1A2432", "#FFFDFA");
-    color!(muted, "#1D2836", "#E3DFD7");
+    // Ink is a deeper blue-black; Vellum is warm paper. Selection and info
+    // stay the existing cool blues.
+    color!(background, "#090E14", "#F3EFE6");
+    color!(sidebar, "#101820", "#F7F3EA");
+    color!(group_box, "#161F2C", "#FFFCF8");
+    color!(popover, "#121A24", "#FBF7F0");
+    color!(muted, "#182230", "#E6DFD2");
     // Text.
-    color!(foreground, "#DDE5EF", "#2A2C31");
-    color!(muted_foreground, "#8797AB", "#62656C");
-    color!(sidebar_foreground, "#DDE5EF", "#2A2C31");
-    color!(group_box_foreground, "#DDE5EF", "#2A2C31");
-    color!(popover_foreground, "#DDE5EF", "#2A2C31");
+    color!(foreground, "#E4E2D6", "#241F1A");
+    color!(muted_foreground, "#8E8A80", "#62656C");
+    color!(sidebar_foreground, "#E4E2D6", "#241F1A");
+    color!(group_box_foreground, "#E4E2D6", "#241F1A");
+    color!(popover_foreground, "#E4E2D6", "#241F1A");
     // Structure.
-    color!(accent, "#212D3D", "#E6E2DA");
-    color!(accent_foreground, "#DDE5EF", "#2A2C31");
-    color!(border, "#222E3D", "#DCD8D0");
-    color!(input, "#33445A", "#C6C2B9");
-    color!(title_bar, "#1B2634", "#FFFFFF");
-    color!(title_bar_border, "#222E3D", "#DCD8D0");
-    color!(status_bar, "#141C28", "#F1EEE8");
-    color!(status_bar_border, "#222E3D", "#DCD8D0");
-    color!(overlay, "#0A0F1699", "#23201966");
-    // Accents.
-    color!(primary, "#C58B68", "#8A4E2F");
-    color!(primary_hover, "#D59B78", "#754025");
-    color!(primary_active, "#AC7353", "#63351F");
-    color!(primary_foreground, "#17120F", "#FFFFFF");
+    color!(accent, "#1C2836", "#E4DCCE");
+    color!(accent_foreground, "#E4E2D6", "#241F1A");
+    color!(border, "#1E2834", "#DDD4C6");
+    color!(input, "#2A3848", "#C9C0B0");
+    color!(title_bar, "#101820", "#F7F3EA");
+    color!(title_bar_border, "#1E2834", "#DDD4C6");
+    color!(status_bar, "#0C121A", "#EFE9DE");
+    color!(status_bar_border, "#1E2834", "#DDD4C6");
+    color!(overlay, "#070B1299", "#241F1A66");
+    // Accents. Copper is pushed slightly toward rose-gold. Light hover and
+    // pressed keep the previous steps.
+    color!(primary, "#D4A07A", "#7A4328");
+    color!(primary_hover, "#E0B08C", "#754025");
+    color!(primary_active, "#B88462", "#63351F");
+    color!(primary_foreground, "#14110E", "#FFFFFF");
     // Set component overrides too: an inherited config may already define them.
     colors.button_primary = colors.primary.clone();
     colors.button_primary_hover = colors.primary_hover.clone();
     colors.button_primary_active = colors.primary_active.clone();
     colors.button_primary_foreground = colors.primary_foreground.clone();
     color!(selection, "#5B9BF0", "#2A63C8");
-    color!(ring, "#C58B68", "#8A4E2F");
+    color!(ring, "#D4A07A", "#7A4328");
     color!(info, "#74ACF2", "#2A63C8");
     color!(success, "#6FBB95", "#2A7348");
     color!(warning, "#D9B56F", "#8A6218");
@@ -318,10 +321,10 @@ mod tests {
                 dark.search_match.a, 1.0,
                 "a search match is an opaque row fill, not a translucent overlay"
             );
-            assert_eq!(cx.theme().theme_name().as_ref(), "Anvil Slate");
+            assert_eq!(cx.theme().theme_name().as_ref(), "Anvil Ink");
             Theme::change(ThemeMode::Light, None, cx);
             let light = palette(cx);
-            assert_eq!(cx.theme().theme_name().as_ref(), "Anvil Warm");
+            assert_eq!(cx.theme().theme_name().as_ref(), "Anvil Vellum");
             assert_ne!(dark.canvas, light.canvas);
             assert_ne!(dark.foreground, light.foreground);
             assert_ne!(dark.selection, light.selection);
