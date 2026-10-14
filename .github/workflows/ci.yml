@@ -24,8 +24,8 @@ jobs:
             rustflags: "-C link-arg=-fuse-ld=mold"
           - os: macos-latest
             linker_setup: |
-              brew install mold
-            rustflags: "-C link-arg=-fuse-ld=mold"
+              echo "Using system linker on macOS"
+            rustflags: ""
           - os: windows-latest
             linker_setup: |
               echo "Using lld"
@@ -58,6 +58,7 @@ jobs:
             clang
 
       - name: Install faster linker
+        if: matrix.linker_setup != ''
         shell: bash
         run: ${{ matrix.linker_setup }}
 
