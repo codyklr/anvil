@@ -1,0 +1,122 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (for example: v0.1.0)'
+        required: true
+        type: string
+      draft:
+        description: 'Create the GitHub Release as a draft'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --release
+
+  package:
+    name: Package ${{ matrix.artifact_name }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: linux-x86_64
+            archive_name: anvil-linux-x86_64.tar.gz
+            archive_cmd: |
+              mkdir -p dist
+              cp target/release/anvil dist/anvil
+              tar -czf dist/anvil-linux-x86_64.tar.gz -C dist anvil
+          - os: macos-latest
+            artifact_name: macos-x86_64
+            archive_name: anvil-macos-x86_64.tar.gz
+            archive_cmd: |
+              mkdir -p dist
+              cp target/release/anvil dist/anvil
+              tar -czf dist/anvil-macos-x86_64.tar.gz -C dist anvil
+          - os: windows-latest
+            artifact_name: windows-x86_64
+            archive_name: anvil-windows-x86_64.zip
+            archive_cmd: |
+              New-Item -ItemType Directory -Force -Path dist | Out-Null
+              Copy-Item target/release/anvil.exe dist/anvil.exe
+              Compress-Archive -Path dist/anvil.exe -DestinationPath dist/anvil-windows-x86_64.zip -Force
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package release artifact
+        shell: bash
+        run: ${{ matrix.archive_cmd }}
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: false
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Anvil ${{ github.event.inputs.version }}
+          draft: ${{ github.event.inputs.draft }}
+          generate_release_notes: true
+          files: |
+            release-assets/linux-x86_64/*
+            release-assets/macos-x86_64/*
+            release-assets/windows-x86_64/*
