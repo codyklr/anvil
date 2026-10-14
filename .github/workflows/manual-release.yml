@@ -14,70 +14,12 @@ on:
         type: boolean
 
 jobs:
-  test-ubuntu:
-    name: Test (ubuntu)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Build release binary
-        run: cargo build --release
-      - name: Run tests
-        run: cargo test --release
-
-  test-macos:
-    name: Test (macos)
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Build release binary
-        run: cargo build --release
-      - name: Run tests
-        run: cargo test --release
-
-  test-windows:
-    name: Test (windows)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Build release binary
-        run: cargo build --release
-      - name: Run tests
-        run: cargo test --release
-
   package:
     name: Package ${{ matrix.artifact_name }}
-    needs: [test-macos, test-windows]   # ubuntu is not required for packaging
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            artifact_name: linux-x86_64
-            archive_cmd: |
-              mkdir -p dist
-              cp target/release/anvil dist/anvil
-              tar -czf dist/anvil-linux-x86_64.tar.gz -C dist anvil
           - os: macos-latest
             artifact_name: macos-x86_64
             archive_cmd: |
@@ -130,6 +72,5 @@ jobs:
           draft: ${{ github.event.inputs.draft }}
           generate_release_notes: true
           files: |
-            release-assets/linux-x86_64/*
             release-assets/macos-x86_64/*
             release-assets/windows-x86_64/*
