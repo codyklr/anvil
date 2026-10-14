@@ -20,31 +20,68 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15-intel
             artifact_name: macos-x86_64
+            linker_setup: |
+              brew install mold
+            rustflags: "-C link-arg=-fuse-ld=mold"
             archive_cmd: |
               mkdir -p dist
               cp target/release/anvil dist/anvil
               tar -czf dist/anvil-macos-x86_64.tar.gz -C dist anvil
+
+          - os: macos-latest
+            artifact_name: macos-aarch64
+            linker_setup: |
+              brew install mold
+            rustflags: "-C link-arg=-fuse-ld=mold"
+            archive_cmd: |
+              mkdir -p dist
+              cp target/release/anvil dist/anvil
+              tar -czf dist/anvil-macos-aarch64.tar.gz -C dist anvil
+
           - os: windows-latest
             artifact_name: windows-x86_64
+            linker_setup: |
+              echo "Using rust-lld"
+            rustflags: "-C link-arg=-fuse-ld=lld"
             archive_cmd: |
               New-Item -ItemType Directory -Force -Path dist | Out-Null
               Copy-Item target/release/anvil.exe dist/anvil.exe
               Compress-Archive -Path dist/anvil.exe -DestinationPath dist/anvil-windows-x86_64.zip -Force
 
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTFLAGS: ${{ matrix.rustflags }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install faster linker
+        shell: bash
+        run: ${{ matrix.linker_setup }}
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
+
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --locked
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
       - name: Package release artifact
-        shell: bash
         run: ${{ matrix.archive_cmd }}
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
@@ -64,6 +101,7 @@ jobs:
         with:
           path: release-assets
           merge-multiple: false
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -73,4 +111,5 @@ jobs:
           generate_release_notes: true
           files: |
             release-assets/macos-x86_64/*
+            release-assets/macos-aarch64/*
             release-assets/windows-x86_64/*
