@@ -5,13 +5,17 @@
 //! display position through the permutation to a record index. The
 //! module is GPUI-free and testable in isolation.
 //!
-//! Empty values always sort to the end, for both ascending and
-//! descending order, so blank cells do not scatter through the result.
+//! A zero-byte cell sorts last, in both directions, so a blank does not
+//! scatter through the result. A whitespace-only cell is a value.
 //! Numeric columns compare numerically; everything else compares exact
 //! bytes (case-sensitive, padding preserved) so `Apple` and `apple`, or
-//! ` 42 ` and `42`, never compare equal. Ties fall back to the record
-//! index for a deterministic order.
+//! ` 42 ` and `42`, never compare equal. Short text keys are copied into
+//! one buffer so comparisons stay close together. A longer cell is
+//! borrowed from the mapped file, so a huge value is not duplicated for
+//! the sort. Ties fall back to the record index for a deterministic
+//! order.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use crate::parser::{ColumnIndex, ParsedDocument};
@@ -60,12 +64,23 @@ pub fn apply(doc: &ParsedDocument, rows: &[u64], spec: &SortSpec) -> Vec<u64> {
     // Decode each value once into a comparable key. `sort_by_cached_key`
     // would also work, but an explicit key vector lets empty-last apply
     // to both directions without reversing the empty ordering.
-    let keys: Vec<Key> = rows.iter().map(|&row| Key::new(doc, row, spec)).collect();
+    // Short text values share one buffer. Pointing every key at the
+    // mapped file was slower: a million comparisons then miss cache
+    // across the whole CSV. A cell above `PACK_LIMIT` stays borrowed
+    // so a multi-megabyte value is not copied.
+    let mut packed = Vec::new();
+    if spec.kind == SortKind::Text {
+        packed.reserve(rows.len().saturating_mul(16));
+    }
+    let keys: Vec<Key> = rows
+        .iter()
+        .map(|&row| Key::new(doc, row, spec, &mut packed))
+        .collect();
     let mut order: Vec<usize> = (0..rows.len()).collect();
     // Tie-break equal keys on the record index so the result is a total,
     // deterministic order even if the input `rows` order ever changes.
     order.sort_by(|&a, &b| {
-        compare(&keys[a], &keys[b], spec.order)
+        compare(&keys[a], &keys[b], &packed, spec.order)
             .then_with(|| {
                 // Equal numbers keep the file's spelling. "007" and "7"
                 // are the same f64, and the bytes are what still differs.
@@ -84,15 +99,28 @@ pub fn apply(doc: &ParsedDocument, rows: &[u64], spec: &SortSpec) -> Vec<u64> {
     order.into_iter().map(|index| rows[index]).collect()
 }
 
-enum Key {
+/// Text at least this long is compared in place. Shorter values are
+/// packed so the sort does not chase one allocation, or one record,
+/// per cell.
+const PACK_LIMIT: usize = 128;
+
+enum Key<'a> {
     /// Empty or (for a numeric sort) non-numeric: always sorted last.
     Missing,
     Number(f64),
-    Text(Vec<u8>),
+    /// `packed[start..end]`.
+    Packed {
+        start: usize,
+        end: usize,
+    },
+    /// A long cell, still sitting in the mapped file or in an unescape
+    /// buffer that the key owns.
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
 }
 
-impl Key {
-    fn new(doc: &ParsedDocument, row: u64, spec: &SortSpec) -> Self {
+impl<'a> Key<'a> {
+    fn new(doc: &'a ParsedDocument, row: u64, spec: &SortSpec, packed: &mut Vec<u8>) -> Self {
         let Some(cell) = doc.cell(row, ColumnIndex(spec.column)) else {
             return Key::Missing;
         };
@@ -113,24 +141,45 @@ impl Key {
                     .map(Key::Number)
                     .unwrap_or(Key::Missing)
             }
-            SortKind::Text => {
-                // Exact bytes: no case folding and no trimming, so values
-                // that differ only in padding or case are distinct keys.
-                let mut bytes: Vec<u8> = cell.as_bytes().to_vec();
-                bytes.shrink_to_fit();
-                Key::Text(bytes)
-            }
+            SortKind::Text => pack_text(cell.into_bytes(), packed),
         }
     }
 }
 
-fn cell_bytes(doc: &ParsedDocument, row: u64, column: usize) -> Vec<u8> {
-    doc.cell(row, ColumnIndex(column))
-        .map(|cell| cell.as_bytes().to_vec())
-        .unwrap_or_default()
+fn pack_text<'a>(bytes: Cow<'a, [u8]>, packed: &mut Vec<u8>) -> Key<'a> {
+    if bytes.len() > PACK_LIMIT {
+        return match bytes {
+            Cow::Borrowed(bytes) => Key::Borrowed(bytes),
+            Cow::Owned(bytes) => Key::Owned(bytes),
+        };
+    }
+    let start = packed.len();
+    packed.extend_from_slice(&bytes);
+    Key::Packed {
+        start,
+        end: packed.len(),
+    }
 }
 
-fn compare(a: &Key, b: &Key, order: SortOrder) -> Ordering {
+/// Decoded bytes for a numeric tiebreak. Borrowed unless the cell
+/// itself had to unescape a quote.
+fn cell_bytes(doc: &ParsedDocument, row: u64, column: usize) -> Cow<'_, [u8]> {
+    match doc.cell(row, ColumnIndex(column)) {
+        Some(cell) => cell.into_bytes(),
+        None => Cow::Borrowed(b""),
+    }
+}
+
+fn text_of<'a>(key: &'a Key<'_>, packed: &'a [u8]) -> &'a [u8] {
+    match key {
+        Key::Packed { start, end } => &packed[*start..*end],
+        Key::Borrowed(bytes) => bytes,
+        Key::Owned(bytes) => bytes,
+        Key::Missing | Key::Number(_) => b"",
+    }
+}
+
+fn compare(a: &Key, b: &Key, packed: &[u8], order: SortOrder) -> Ordering {
     match (a, b) {
         (Key::Missing, Key::Missing) => Ordering::Equal,
         // Empty / non-numeric always last, regardless of direction.
@@ -139,7 +188,10 @@ fn compare(a: &Key, b: &Key, order: SortOrder) -> Ordering {
         _ => {
             let base = match (a, b) {
                 (Key::Number(x), Key::Number(y)) => x.total_cmp(y),
-                (Key::Text(x), Key::Text(y)) => x.cmp(y),
+                (
+                    Key::Packed { .. } | Key::Borrowed(_) | Key::Owned(_),
+                    Key::Packed { .. } | Key::Borrowed(_) | Key::Owned(_),
+                ) => text_of(a, packed).cmp(text_of(b, packed)),
                 _ => Ordering::Equal,
             };
             match order {
@@ -209,6 +261,45 @@ mod tests {
         let sorted = apply(&doc, &rows, &spec(&doc, 0, SortOrder::Ascending));
         // Exact bytes: Apple (0x41) < banana (0x62) < cherry (0x63).
         assert_eq!(sorted, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn escaped_quotes_sort_by_the_unescaped_bytes() {
+        // The quoted cell is `a"b` after unescaping. That must sort as
+        // the decoded bytes, including when the key owns the unescape.
+        // One column of text, so the first line is a record too:
+        // "v", a"b, "a", "b".
+        let doc = doc_from(b"v\n\"a\"\"b\"\na\nb\n");
+        let rows = all_rows(&doc);
+        let spec = spec(&doc, 0, SortOrder::Ascending);
+        assert_eq!(spec.kind, SortKind::Text);
+        assert_eq!(
+            doc.cell(1, ColumnIndex(0)).expect("quoted cell").as_bytes(),
+            b"a\"b"
+        );
+        // "a" < "a\"b" < "b" < "v".
+        assert_eq!(apply(&doc, &rows, &spec), vec![2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn long_text_sorts_with_the_short_values() {
+        // Longer than `PACK_LIMIT`, so this cell is compared from the
+        // mapped file rather than the packed buffer.
+        let long = format!("m{}", "x".repeat(200));
+        let csv = format!("v,pad\n{long},a\na,a\nz,a\n");
+        let doc = doc_from(csv.as_bytes());
+        let rows = all_rows(&doc);
+        let spec = spec(&doc, 0, SortOrder::Ascending);
+        assert_eq!(spec.kind, SortKind::Text);
+        assert!(
+            doc.cell(0, ColumnIndex(0))
+                .expect("long cell")
+                .as_bytes()
+                .len()
+                > 128
+        );
+        // "a" < "mxxxx..." < "z".
+        assert_eq!(apply(&doc, &rows, &spec), vec![1, 0, 2]);
     }
 
     #[test]

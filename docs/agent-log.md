@@ -8189,3 +8189,40 @@ in dev builds. The menu chrome itself had no texture at all.
 
 - Issue #14, borrow text sort keys instead of copying the column.
 - Linux CI stays red until #22 (fontconfig dlopen) merges.
+
+## 2026-10-14 — Text sort packs short keys and borrows long ones
+
+### Implemented
+
+- A text sort no longer allocates one `Vec` per cell. Values up to 128
+  bytes are copied into one buffer. A longer cell is borrowed from the
+  map, or kept in its unescape buffer when the cell owned those bytes.
+  Numeric ties still compare the decoded bytes without copying an
+  unquoted cell. Fixes #14.
+- Pointing every key at the mapped file was slower, so that version
+  was not kept. The comparisons missed cache across the CSV.
+
+### Verified
+
+- `fixtures/large.csv`, 1,000,000 rows, five runs, same machine.
+  Copying each cell: `email` median 363 ms, `payload` median 483 ms.
+  Packed short keys: `email` median 279 ms, `payload` median 377 ms.
+- Sort unit tests, including escaped quotes and a cell over 128 bytes.
+- `cargo test --release` passed: lib 221, `anvil` 224 (1 ignored),
+  core 86 (7 ignored), style 1.
+
+### Tests added/changed
+
+- `escaped_quotes_sort_by_the_unescaped_bytes`
+- `long_text_sorts_with_the_short_values`
+- Ignored `measure_sort_text_large_fixture`
+
+### Roadmap / architecture changes
+
+- The sort paragraph in `ARCHITECTURE.md` describes the packed buffer
+  and the 128-byte borrow.
+
+### Issues / next recommended task
+
+- Issue #15, page the grid by the visible row count. That is pull
+  request #25.
