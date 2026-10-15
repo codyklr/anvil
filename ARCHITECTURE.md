@@ -194,8 +194,11 @@ anvil/
   columns compare with `f64::total_cmp`; text compares exact bytes
   (case-sensitive, padding-preserving); a zero-byte cell, and a
   non-numeric value in a numeric column, sort last in both directions.
-  A whitespace-only cell is a text value. Equal numbers tie-break on
-  the exact bytes, then every tie breaks on the record index.
+  A whitespace-only cell is a text value. Short text values are packed
+  into one buffer for the comparison; a cell longer than 128 bytes
+  stays in the mapped file (or in its unescape buffer) so the sort
+  does not duplicate it. Equal numbers tie-break on the exact bytes,
+  then every tie breaks on the record index.
   Sorting composes with filtering because the caller passes the
   filtered set (or every record) as `rows`.
 - `schema::infer` — samples up to 2048 rows per column and returns a

@@ -210,6 +210,12 @@ impl<'a> Cell<'a> {
         &self.inner
     }
 
+    /// The decoded bytes, borrowed from the source when the cell had no
+    /// escaped quote. Owned only when doubled quotes were unescaped.
+    pub fn into_bytes(self) -> Cow<'a, [u8]> {
+        self.inner
+    }
+
     /// The cell's bytes as exact, displayable text.
     ///
     /// Valid UTF-8 is returned verbatim. A cell that contains at least
