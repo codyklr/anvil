@@ -1022,8 +1022,13 @@ local model only when the rules cannot cleanly resolve the phrase. See
       lenient `filter scope` classification (`one column` / `any column` /
       `all columns`, each with a description) in the GLiNER backend. A
       negated `no column is empty` / `has no empty column` flips to
-      `all notempty`; a missing scope label stays single-column.
-- [ ] Verify the real model, validation, and UI regression tests.
+      `all notempty`. A missing scope label, or one under the confidence
+      gate, stays single-column.
+- [x] Real-model smoke test. `real_model_filter_smoke` passes against
+      the checkpoint from `--setup-ask-model` (Windows, 2026-10-15).
+      `--ask-probe fixtures/ask.csv "amount exceeds 100"` prints
+      `amount > 100`. `Which users are from Canada?` abstains.
+- [ ] Manual Ask in the window is still open.
 - [ ] Compound model extraction with AND/OR grouping (follow-up; existing
       deterministic compound parsing remains available).
 - [ ] Provide model download progress and cancellation for distribution.

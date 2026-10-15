@@ -390,12 +390,18 @@ fn decode(
         }
         String::new()
     };
-    // Scope is read leniently: a missing or unknown label means a normal
-    // single-column predicate, so existing behavior is unchanged.
-    let row_scope = match output["filter scope"]["label"].as_str() {
-        Some("any column") => Some(true),
-        Some("all columns") => Some(false),
-        _ => None,
+    // Scope is optional. A missing label, an unknown label, or a score
+    // under the confidence gate stays a single-column predicate. A weak
+    // "any column" must not override a confident column pick.
+    let scope_value = &output["filter scope"];
+    let row_scope = if confidence(scope_value).is_ok() {
+        match scope_value["label"].as_str() {
+            Some("any column") => Some(true),
+            Some("all columns") => Some(false),
+            _ => None,
+        }
+    } else {
+        None
     };
     let column = if row_scope.is_some() {
         // Row scope does not reference one column; `column` is an unused
@@ -630,6 +636,17 @@ mod tests {
                 value: "foo".into()
             })
         );
+    }
+
+    #[test]
+    fn a_low_confidence_row_scope_stays_a_single_column() {
+        let phrase = "country is Canada";
+        let mut output = prediction("country", "equals", "Canada", 11, 17);
+        output["filter scope"] = json!({ "label": "any column", "confidence": 0.37 });
+        assert!(matches!(
+            decode(phrase, &people(), &output, &|_| Vec::new()).unwrap(),
+            FilterExpr::Predicate(_)
+        ));
     }
 
     #[test]
