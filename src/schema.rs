@@ -108,10 +108,13 @@ where
             continue;
         }
         non_empty += 1;
-        if trimmed.parse::<i64>().is_ok() {
+        // `parse` accepts "007" as 7 and "1.10" as 1.1. A spelling that
+        // does not round-trip is text, so a zero-padded id is not sorted
+        // as the same number as its unpadded form.
+        if canonical_integer(trimmed) {
             integers += 1;
-        }
-        if trimmed.parse::<f64>().is_ok() {
+            numbers += 1;
+        } else if canonical_float(trimmed) {
             numbers += 1;
         }
         if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
@@ -145,6 +148,24 @@ where
         sampled_rows,
         non_empty,
         numeric_fraction,
+    }
+}
+
+/// `trimmed` is an integer whose decimal spelling is exactly `trimmed`.
+/// `"7"` and `"-3"` pass. `"007"`, `"+7"`, and `"7.0"` do not.
+fn canonical_integer(trimmed: &str) -> bool {
+    match trimmed.parse::<i64>() {
+        Ok(value) => value.to_string() == trimmed,
+        Err(_) => false,
+    }
+}
+
+/// `trimmed` is a finite float whose shortest spelling is exactly `trimmed`.
+/// `"1.5"` passes. `"1.10"` renders as `"1.1"` and does not.
+fn canonical_float(trimmed: &str) -> bool {
+    match trimmed.parse::<f64>() {
+        Ok(value) if value.is_finite() => format!("{value}") == trimmed,
+        _ => false,
     }
 }
 
@@ -183,6 +204,21 @@ mod tests {
         let profiles = infer(&doc);
         assert_eq!(profiles[0].column_type, ColumnType::Boolean);
         assert!(!profiles[0].column_type.is_numeric());
+    }
+
+    #[test]
+    fn zero_padded_and_trailing_zeros_stay_text() {
+        let padded = doc_from(b"id,pad\n007,a\n7,a\n010,a\n");
+        assert_eq!(infer(&padded)[0].column_type, ColumnType::Text);
+
+        let money = doc_from(b"amount,pad\n1.10,a\n1.1,a\n");
+        assert_eq!(infer(&money)[0].column_type, ColumnType::Text);
+    }
+
+    #[test]
+    fn canonical_decimals_are_floats() {
+        let doc = doc_from(b"amount,pad\n1.5,a\n2.25,a\n");
+        assert_eq!(infer(&doc)[0].column_type, ColumnType::Float);
     }
 
     #[test]

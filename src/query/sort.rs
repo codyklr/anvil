@@ -65,7 +65,21 @@ pub fn apply(doc: &ParsedDocument, rows: &[u64], spec: &SortSpec) -> Vec<u64> {
     // Tie-break equal keys on the record index so the result is a total,
     // deterministic order even if the input `rows` order ever changes.
     order.sort_by(|&a, &b| {
-        compare(&keys[a], &keys[b], spec.order).then_with(|| rows[a].cmp(&rows[b]))
+        compare(&keys[a], &keys[b], spec.order)
+            .then_with(|| {
+                // Equal numbers keep the file's spelling. "007" and "7"
+                // are the same f64, and the bytes are what still differs.
+                if matches!((&keys[a], &keys[b]), (Key::Number(_), Key::Number(_))) {
+                    cell_bytes(doc, rows[a], spec.column).cmp(&cell_bytes(
+                        doc,
+                        rows[b],
+                        spec.column,
+                    ))
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .then_with(|| rows[a].cmp(&rows[b]))
     });
     order.into_iter().map(|index| rows[index]).collect()
 }
@@ -100,6 +114,12 @@ impl Key {
             }
         }
     }
+}
+
+fn cell_bytes(doc: &ParsedDocument, row: u64, column: usize) -> Vec<u8> {
+    doc.cell(row, ColumnIndex(column))
+        .map(|cell| cell.as_bytes().to_vec())
+        .unwrap_or_default()
 }
 
 fn compare(a: &Key, b: &Key, order: SortOrder) -> Ordering {
@@ -239,6 +259,29 @@ mod tests {
         let filtered = vec![0u64, 2];
         let sorted = apply(&doc, &filtered, &spec);
         assert_eq!(sorted, vec![2, 0]);
+    }
+
+    #[test]
+    fn zero_padded_ids_sort_as_distinct_text() {
+        let doc = doc_from(b"id,pad\n10,a\n007,a\n7,a\n2,a\n");
+        let rows = all_rows(&doc);
+        let sorted = apply(&doc, &rows, &spec(&doc, 0, SortOrder::Ascending));
+        // Not a numeric column: exact bytes are 007, 10, 2, 7.
+        assert_eq!(sorted, vec![1, 0, 3, 2]);
+    }
+
+    #[test]
+    fn equal_numbers_break_ties_on_exact_bytes() {
+        let doc = doc_from(b"v,pad\n7,a\n\" 7\",a\n7,a\n");
+        let rows = all_rows(&doc);
+        let spec = SortSpec {
+            column: 0,
+            order: SortOrder::Ascending,
+            kind: SortKind::Numeric,
+        };
+        // Both spellings are 7. The padded one sorts first by its bytes,
+        // and the two exact "7" rows keep record order.
+        assert_eq!(apply(&doc, &rows, &spec), vec![1, 0, 2]);
     }
 
     #[test]
