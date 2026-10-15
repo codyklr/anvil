@@ -227,6 +227,105 @@ impl<'a> Cell<'a> {
     }
 }
 
+/// How the grid, cell panel, copy, and search present cell bytes.
+///
+/// `Utf8` is the file view: valid UTF-8 is unchanged and any other byte
+/// is a reversible `\xNN` escape. `Windows1252` is a view of those same
+/// bytes. It does not rewrite the mapped file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayEncoding {
+    #[default]
+    Utf8,
+    Windows1252,
+}
+
+impl DisplayEncoding {
+    /// Status-bar and diagnostics label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Utf8 => "UTF-8",
+            Self::Windows1252 => "windows-1252",
+        }
+    }
+}
+
+/// The one display decode. Callers that show a cell use this so the
+/// grid, the cell panel, copy, and the column inspector cannot disagree.
+pub fn display_string(bytes: &[u8], encoding: DisplayEncoding) -> Cow<'_, str> {
+    match encoding {
+        DisplayEncoding::Utf8 => exact_string(bytes),
+        DisplayEncoding::Windows1252 => decode_windows_1252(bytes),
+    }
+}
+
+/// One page of [`display_string`]. UTF-8 keeps the character-boundary
+/// rules of [`exact_string_window`]. Windows-1252 treats each source
+/// byte as one character, so the window is not realigned.
+pub fn display_window(
+    bytes: &[u8],
+    offset: usize,
+    max_bytes: usize,
+    encoding: DisplayEncoding,
+) -> ExactWindow<'_> {
+    match encoding {
+        DisplayEncoding::Utf8 => exact_string_window(bytes, offset, max_bytes),
+        DisplayEncoding::Windows1252 => windows_1252_window(bytes, offset, max_bytes),
+    }
+}
+
+/// WHATWG windows-1252 for bytes `0x80..=0x9F`. The five bytes that
+/// Windows left undefined map to the corresponding C1 controls.
+const WINDOWS_1252_C1: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+fn windows_1252_char(byte: u8) -> char {
+    match byte {
+        0x80..=0x9F => WINDOWS_1252_C1[(byte - 0x80) as usize],
+        _ => byte as char,
+    }
+}
+
+fn decode_windows_1252(bytes: &[u8]) -> Cow<'_, str> {
+    if bytes.is_ascii() {
+        // ASCII is identical in UTF-8 and windows-1252, so the common
+        // path still borrows the mapped bytes.
+        return Cow::Borrowed(std::str::from_utf8(bytes).unwrap());
+    }
+    let mut out = String::with_capacity(bytes.len());
+    for &byte in bytes {
+        out.push(windows_1252_char(byte));
+    }
+    Cow::Owned(out)
+}
+
+fn windows_1252_window(bytes: &[u8], offset: usize, max_bytes: usize) -> ExactWindow<'_> {
+    let len = bytes.len();
+    let offset = offset.min(len);
+    if max_bytes == 0 || offset == len {
+        return ExactWindow {
+            text: Cow::Borrowed(""),
+            start: offset,
+            end: offset,
+            more_before: offset > 0,
+            more_after: offset < len,
+            adjusted_boundary: false,
+        };
+    }
+    let end = (offset + max_bytes).min(len);
+    ExactWindow {
+        text: decode_windows_1252(&bytes[offset..end]),
+        start: offset,
+        end,
+        more_before: offset > 0,
+        more_after: end < len,
+        adjusted_boundary: false,
+    }
+}
+
 /// Render a cell's bytes as exact text without losing information.
 ///
 /// When the bytes are valid UTF-8 the string is returned borrowed and

@@ -81,6 +81,9 @@ pub struct StatsOptions {
     pub top_values: usize,
     /// How many samples to return.
     pub samples: usize,
+    /// Decoding used for the strings the inspector shows. The default
+    /// is the file's UTF-8 view.
+    pub encoding: crate::parser::DisplayEncoding,
 }
 
 impl Default for StatsOptions {
@@ -89,6 +92,7 @@ impl Default for StatsOptions {
             max_exact_distinct: 100_000,
             top_values: 10,
             samples: 8,
+            encoding: crate::parser::DisplayEncoding::Utf8,
         }
     }
 }
@@ -144,10 +148,11 @@ fn stats_scan(
         let Some(cell) = doc.cell(row, ColumnIndex(column)) else {
             continue;
         };
-        // `exact` is what the inspector displays: the value as it exists
-        // in the file, padding included. A cell is empty only when it has
-        // zero bytes; a whitespace-only cell is a value (ADR 0003).
-        let exact = cell.to_exact_string();
+        // `exact` is what the inspector displays. UTF-8 is the file
+        // spelling, padding included. A display encoding reinterprets
+        // those bytes without rewriting them. A cell is empty only when
+        // it has zero bytes; a whitespace-only cell is a value (ADR 0003).
+        let exact = crate::parser::display_string(cell.as_bytes(), options.encoding);
         if exact.is_empty() {
             empty += 1;
             continue;

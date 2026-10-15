@@ -96,6 +96,7 @@ impl MainView {
             case_sensitive: self.search_case_sensitive,
             column: self.search_column,
             max_matches: None,
+            encoding: self.display_encoding,
         }
     }
 
@@ -553,12 +554,16 @@ impl MainView {
     /// flight.
     pub(super) fn search_status_text(&self, cx: &gpui_kit::App) -> (String, gpui_kit::Hsla) {
         let colors = theme::palette(cx);
+        let basis = match self.display_encoding {
+            anvil_core::DisplayEncoding::Utf8 => "file bytes",
+            anvil_core::DisplayEncoding::Windows1252 => "decoded text",
+        };
         if self.search_query.is_empty() {
             return (
                 if self.search_column.is_some() {
-                    "scoped to one column".to_string()
+                    format!("scoped to one column, {basis}")
                 } else {
-                    "searching all columns".to_string()
+                    format!("searching {basis}")
                 },
                 colors.muted_foreground,
             );
@@ -568,9 +573,9 @@ impl MainView {
             // "no matches". We treat an in-flight search task (or a
             // generation mismatch) as "searching…".
             if self.search_task.is_some() {
-                return ("searching…".to_string(), colors.muted_foreground);
+                return (format!("searching {basis}…"), colors.muted_foreground);
             }
-            return ("no matches".to_string(), colors.warning);
+            return (format!("no matches in {basis}"), colors.warning);
         }
         let total = self.search_matches.len();
         let active = if self.search_active >= 0 {
@@ -578,7 +583,10 @@ impl MainView {
         } else {
             0
         };
-        (format!("{active} of {total}"), colors.muted_foreground)
+        (
+            format!("{active} of {total}, {basis}"),
+            colors.muted_foreground,
+        )
     }
 }
 

@@ -510,6 +510,10 @@ column-level metadata.
       on the background executor (generation-guarded; cached until the
       document changes) and lists the BOM notice and each column with
       non-UTF-8 cells.
+- [x] Per-tab display encoding. Diagnostics chooses UTF-8 or
+      windows-1252. The grid, cell panel, copy, column inspector, and
+      search use `display_string`. The file bytes are not rewritten.
+      The status bar shows `windows-1252` while that view is active.
 - [x] (Optional) Detect BOM and report encoding. `encoding::scan`
       reports `bom`, `--probe` prints it, and the diagnostics panel shows
       a `UTF-8 BOM present` notice. Iteration 8c: the parser now strips a

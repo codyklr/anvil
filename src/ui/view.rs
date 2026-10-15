@@ -32,9 +32,10 @@ use anvil_core::{
     apply_filter_expr, column_stats, column_stats_rows, describe_nl, find_ranges, infer_schema,
     parse_filter_expr, parse_nl, reindex, sample_distinct, scan_encoding, search_records,
     sort_rows, suggest_candidates, suggest_context, ArchiveSource, CellPos, ColumnIndex,
-    ColumnStats, DistinctCount, EncodingReport, FilterExpr, HeaderMode, IndexOptions, LoadPhase,
-    LoadProgress, LoadResult, LoadedDocument, NlColumn, NlResult, NlSchema, ParsedDocument,
-    SearchOptions, Selection, Slot, SortKind, SortOrder, SortSpec, StatsOptions,
+    ColumnStats, DisplayEncoding, DistinctCount, EncodingReport, FilterExpr, HeaderMode,
+    IndexOptions, LoadPhase, LoadProgress, LoadResult, LoadedDocument, NlColumn, NlResult,
+    NlSchema, ParsedDocument, SearchOptions, Selection, Slot, SortKind, SortOrder, SortSpec,
+    StatsOptions,
 };
 
 use super::archive_picker;
@@ -240,6 +241,9 @@ struct DocumentSnapshot {
     /// heuristic; `Header` / `Headerless` are explicit user overrides
     /// applied by re-indexing the same opened source.
     header_mode: HeaderMode,
+    /// How this tab shows cell bytes. `Utf8` is the file view.
+    /// `Windows1252` reinterprets the same bytes and does not reindex.
+    display_encoding: DisplayEncoding,
     /// Per-column widths after a manual header resize, or `None` for the
     /// automatic widths. Restored when the tab becomes active so widths
     /// survive tab switches.
@@ -281,6 +285,7 @@ impl DocumentSnapshot {
             search_case_sensitive: false,
             search_column: None,
             header_mode: HeaderMode::Auto,
+            display_encoding: DisplayEncoding::Utf8,
             column_widths: None,
         }
     }
@@ -316,6 +321,7 @@ impl DocumentSnapshot {
             search_case_sensitive: false,
             search_column: None,
             header_mode: HeaderMode::Auto,
+            display_encoding: DisplayEncoding::Utf8,
             column_widths: None,
         }
     }
@@ -450,6 +456,9 @@ pub struct MainView {
     /// How the active document's first row is interpreted. Mirrors
     /// `documents[active].header_mode`. (Mirror.)
     header_mode: HeaderMode,
+    /// How the active document's cells are shown. Mirrors
+    /// `documents[active].display_encoding`.
+    display_encoding: DisplayEncoding,
     /// True between a mouse-down on a grid cell and the matching
     /// mouse-up. Drag-select only extends the selection while this is
     /// set, so a drag that began outside the grid does not suddenly
@@ -771,6 +780,7 @@ impl MainView {
             column_drag: None,
             selection: Selection::empty(),
             header_mode: HeaderMode::Auto,
+            display_encoding: DisplayEncoding::Utf8,
             drag_selecting: false,
             task: None,
             status_message: None,
@@ -888,6 +898,7 @@ impl MainView {
         snap.sort_rows = self.sort_rows.clone();
         snap.sort_generation = self.sort_generation;
         snap.header_mode = self.header_mode;
+        snap.display_encoding = self.display_encoding;
         snap.archive = self.archive.clone();
         snap.entry_name = self.selected_entry.clone();
         snap.column_widths = self.model.as_ref().map(|model| model.layout.widths.clone());
@@ -920,6 +931,7 @@ impl MainView {
         self.sort_rows = None;
         self.sort_generation = 0;
         self.header_mode = HeaderMode::Auto;
+        self.display_encoding = DisplayEncoding::Utf8;
     }
 
     /// Copy `documents[new_active]` into the live per-document fields.
@@ -944,7 +956,11 @@ impl MainView {
         // A pending (not-yet-loaded) tab has no document yet; render
         // code shows a loading placeholder for it until the lazy load
         // completes.
-        self.model = snap.doc.clone().map(GridModel::new);
+        self.model = snap.doc.clone().map(|doc| {
+            let mut model = GridModel::new(doc);
+            model.set_display_encoding(snap.display_encoding);
+            model
+        });
         // Restore manually-resized column widths for this tab. The
         // length check guards a reindex that changed the column count.
         if let (Some(model), Some(widths)) = (self.model.as_mut(), snap.column_widths.as_ref()) {
@@ -974,6 +990,7 @@ impl MainView {
         self.sort_rows = snap.sort_rows;
         self.sort_generation = snap.sort_generation;
         self.header_mode = snap.header_mode;
+        self.display_encoding = snap.display_encoding;
     }
 
     /// Allocate the next unique `DocumentSnapshot` id.
@@ -1530,6 +1547,13 @@ impl MainView {
             .child(div().w(px(1.)).h(px(10.)).bg(colors.border))
             .child(format!("{cols} cols"))
             .child(delimiter)
+            .when(self.display_encoding != DisplayEncoding::Utf8, |this| {
+                this.child(
+                    div()
+                        .text_color(colors.primary)
+                        .child(self.display_encoding.label()),
+                )
+            })
             .child(archive_picker::format_size(size))
             .when_some(sort_label, |this, label| {
                 this.child(div().text_color(colors.primary).child(label))
@@ -1731,6 +1755,36 @@ impl MainView {
 
     /// Cycle the active document's header interpretation:
     /// Auto -> Header -> Headerless -> Auto.
+    /// Reinterpret the active document's bytes. The mapped file and the
+    /// index stay put. The grid cache, cell panel, inspector, and an
+    /// open search pick up the new decoding.
+    pub(super) fn apply_display_encoding(
+        &mut self,
+        encoding: DisplayEncoding,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.is_none() || self.display_encoding == encoding {
+            return;
+        }
+        self.display_encoding = encoding;
+        if let Some(model) = self.model.as_mut() {
+            model.set_display_encoding(encoding);
+        }
+        if let Some(active) = self.active {
+            if let Some(snap) = self.documents.get_mut(active) {
+                snap.display_encoding = encoding;
+            }
+        }
+        self.inspector_stats = None;
+        self.inspector_column = None;
+        self.kick_inspector(cx);
+        self.kick_cell_detail(cx);
+        if self.search_open {
+            self.kick_search(cx);
+        }
+        cx.notify();
+    }
+
     fn cycle_header_mode(&mut self, cx: &mut Context<Self>) {
         let next = match self.header_mode {
             HeaderMode::Auto => HeaderMode::Header,
@@ -1805,7 +1859,9 @@ impl MainView {
             cx.notify();
             return;
         }
-        self.model = Some(GridModel::new(doc));
+        let mut model = GridModel::new(doc);
+        model.set_display_encoding(self.display_encoding);
+        self.model = Some(model);
         self.invalidate_ask();
         self.filter_value_cache.clear();
         self.header_mode = mode;
@@ -1891,9 +1947,10 @@ impl MainView {
         };
         let doc = model.doc.clone();
         let selection = self.selection.clone();
-        let cell_at = |r: u64, c: usize| {
+        let encoding = self.display_encoding;
+        let cell_at = move |r: u64, c: usize| {
             doc.cell(r, anvil_core::ColumnIndex(c))
-                .map(|cell| cell.to_exact_string().into_owned())
+                .map(|cell| anvil_core::display_string(cell.as_bytes(), encoding).into_owned())
         };
         // Under an active filter/sort, copy only the rows the user can
         // actually see, in display order. Select-all relies on this so a

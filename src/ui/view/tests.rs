@@ -1358,6 +1358,64 @@ async fn sort_composes_with_filter(cx: &mut TestAppContext) {
     });
 }
 
+fn quote_document() -> anvil_core::ParsedDocument {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("quote.csv");
+    std::fs::write(&path, b"note\n\x93\nplain\n").expect("write fixture");
+    let opened = anvil_core::source::local::open_local(&path).expect("open local");
+    anvil_core::index_opened(opened)
+}
+
+/// `0x93` is a reversible escape until the tab opts into windows-1252.
+/// Copy and the tab snapshot follow that choice. A second tab stays UTF-8.
+#[gpui_kit::test]
+async fn windows_1252_display_is_per_document(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
+    let written = inject_doc(cx, &view, quote_document());
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        let row = {
+            let doc = &view.model.as_ref().unwrap().doc;
+            (0..doc.record_count())
+                .find(|record| {
+                    doc.cell(*record, anvil_core::ColumnIndex(0))
+                        .is_some_and(|cell| cell.as_bytes() == [0x93])
+                })
+                .expect("quote cell")
+        };
+        view.selection.set(CellPos::new(row, 0));
+        view.copy_selection_to_clipboard(cx);
+        assert_eq!(view.display_encoding, anvil_core::DisplayEncoding::Utf8);
+        view.apply_display_encoding(anvil_core::DisplayEncoding::Windows1252, cx);
+        assert_eq!(
+            view.display_encoding,
+            anvil_core::DisplayEncoding::Windows1252
+        );
+        assert_eq!(
+            view.documents[view.active.unwrap()].display_encoding,
+            anvil_core::DisplayEncoding::Windows1252
+        );
+        view.copy_selection_to_clipboard(cx);
+        push_loaded_tab(view, std::sync::Arc::new(sample_document()));
+        assert_eq!(view.display_encoding, anvil_core::DisplayEncoding::Utf8);
+        view.switch_to(0, cx);
+        assert_eq!(
+            view.display_encoding,
+            anvil_core::DisplayEncoding::Windows1252
+        );
+    });
+
+    let captured = written.lock().expect("clipboard recorder").clone();
+    assert_eq!(
+        captured,
+        vec![format!("\\x93{ending}"), format!("\u{201C}{ending}")]
+    );
+}
+
 /// `search_options()` is the single source of truth shared by the
 /// background search and the grid highlight pass.
 #[gpui_kit::test]
@@ -1377,6 +1435,7 @@ async fn search_options_reflect_toggles(cx: &mut TestAppContext) {
                 case_sensitive: true,
                 column: Some(2),
                 max_matches: None,
+                encoding: anvil_core::DisplayEncoding::Utf8,
             }
         );
     });

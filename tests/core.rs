@@ -8,10 +8,11 @@ use std::path::PathBuf;
 
 use anvil_core::source::local::open_local;
 use anvil_core::{
-    apply_filter, exact_string, infer_schema, open_path, parse_filter, parse_opened,
-    parse_opened_with, reindex, scan_encoding, search_records, sort_rows, ArchiveSource, CellPos,
-    Cells, ColumnIndex, HeaderMode, IndexOptions, LoadResult, OpenResult, OpenedSource,
-    ParsedDocument, SearchOptions, Selection, SortKind, SortOrder, SortSpec,
+    apply_filter, display_string, display_window, exact_string, infer_schema, open_path,
+    parse_filter, parse_opened, parse_opened_with, reindex, scan_encoding, search_records,
+    sort_rows, ArchiveSource, CellPos, Cells, ColumnIndex, DisplayEncoding, HeaderMode,
+    IndexOptions, LoadResult, OpenResult, OpenedSource, ParsedDocument, SearchOptions, Selection,
+    SortKind, SortOrder, SortSpec,
 };
 
 // ---- helpers ------------------------------------------------------------
@@ -1493,6 +1494,48 @@ fn search_returns_matches_in_record_order() {
     let opts = SearchOptions::default();
     let matches = search_records(&doc, "foo", &opts);
     assert_eq!(matches, vec![0, 1, 2]);
+}
+
+#[test]
+fn windows_1252_is_a_view_of_the_same_bytes() {
+    let bytes = [0x93u8];
+    assert_eq!(
+        display_string(&bytes, DisplayEncoding::Utf8).as_ref(),
+        "\\x93"
+    );
+    assert_eq!(
+        display_string(&bytes, DisplayEncoding::Windows1252).as_ref(),
+        "\u{201C}"
+    );
+    // ASCII still borrows the file spelling, including padding.
+    assert_eq!(
+        display_string(b" 007 ", DisplayEncoding::Windows1252).as_ref(),
+        " 007 "
+    );
+    let mixed = b"a\x93b";
+    assert_eq!(
+        display_string(mixed, DisplayEncoding::Windows1252).as_ref(),
+        "a\u{201C}b"
+    );
+    let window = display_window(mixed, 1, 1, DisplayEncoding::Windows1252);
+    assert_eq!(window.text.as_ref(), "\u{201C}");
+    assert_eq!((window.start, window.end), (1, 2));
+    assert!(!window.adjusted_boundary);
+
+    // Two columns so the first line is a header. A one-column file is
+    // headerless, which would shift these record indexes.
+    let (doc, _dir) = parse_bytes(b"note,kind\n\x93,quote\nplain,ok\n");
+    assert_eq!(doc.cell(0, ColumnIndex(0)).unwrap().as_bytes(), &[0x93]);
+    let quote = SearchOptions {
+        encoding: DisplayEncoding::Windows1252,
+        ..SearchOptions::default()
+    };
+    let raw = SearchOptions::default();
+    assert_eq!(search_records(&doc, "\u{201C}", &quote), vec![0]);
+    assert!(search_records(&doc, "\u{201C}", &raw).is_empty());
+    assert_eq!(search_records(&doc, "ok", &quote), vec![1]);
+    // The escape text is not in the file, so the file-byte search misses it.
+    assert!(search_records(&doc, "\\x93", &raw).is_empty());
 }
 
 #[test]

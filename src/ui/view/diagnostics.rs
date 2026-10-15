@@ -11,7 +11,7 @@
 use anvil_core::WarningKind;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, IconName, Selectable, Sizable};
 
 use super::*;
 
@@ -177,16 +177,23 @@ impl MainView {
             } else {
                 "No document to scan"
             };
-            return vec![panel::caption(colors, text).into_any_element()];
+            return vec![
+                self.display_encoding_controls(cx),
+                panel::caption(colors, text).into_any_element(),
+            ];
         };
 
-        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut rows: Vec<AnyElement> = vec![self.display_encoding_controls(cx)];
         if report.has_invalid_utf8() {
+            let shown = match self.display_encoding {
+                anvil_core::DisplayEncoding::Utf8 => "shown as reversible escapes",
+                anvil_core::DisplayEncoding::Windows1252 => "shown as windows-1252",
+            };
             rows.push(
                 panel::caption_owned(
                     colors,
                     format!(
-                        "{} invalid cells, shown as reversible escapes",
+                        "{} invalid cells, {shown}",
                         format_count(report.total_invalid_cells())
                     ),
                 )
@@ -210,12 +217,48 @@ impl MainView {
                 .into_any_element(),
             );
         }
-        if rows.is_empty() {
+        if !report.has_invalid_utf8() && !report.bom {
             rows.push(
                 panel::caption(colors, "All scanned values are valid UTF-8").into_any_element(),
             );
         }
         rows
+    }
+
+    /// UTF-8 is the file view. Windows-1252 rereads the same bytes.
+    fn display_encoding_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::palette(cx);
+        let current = self.display_encoding;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px(px(panel::BODY_PAD_X))
+            .py(px(4.))
+            .child(encoding_choice(
+                cx,
+                current,
+                anvil_core::DisplayEncoding::Utf8,
+                "display-encoding-utf-8",
+                "UTF-8",
+            ))
+            .child(encoding_choice(
+                cx,
+                current,
+                anvil_core::DisplayEncoding::Windows1252,
+                "display-encoding-windows-1252",
+                "windows-1252",
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(colors.faint_foreground)
+                    .child("view of the file bytes"),
+            )
+            .into_any_element()
     }
 
     /// Move the selection to the warning's row and scroll it into view.
@@ -265,6 +308,23 @@ impl MainView {
         self.status_message = None;
         cx.notify();
     }
+}
+
+fn encoding_choice(
+    cx: &mut Context<MainView>,
+    current: anvil_core::DisplayEncoding,
+    encoding: anvil_core::DisplayEncoding,
+    id: &'static str,
+    label: &'static str,
+) -> gpui_kit::component::button::Button {
+    let selected = current == encoding;
+    Button::new(id)
+        .xsmall()
+        .ghost()
+        .label(label)
+        .selected(selected)
+        .toggled(selected)
+        .on_click(cx.listener(move |view, _, _, cx| view.apply_display_encoding(encoding, cx)))
 }
 
 /// Short human label for a warning kind, as shown in the panel.
