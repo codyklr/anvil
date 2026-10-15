@@ -8328,3 +8328,48 @@ in dev builds. The menu chrome itself had no texture at all.
 
 - Issue #17 needs a manual pass on macOS and Linux. Issue #19 needs
   a real GLiNER run.
+
+## 2026-10-15 — GLiNER smoke test against the real checkpoint
+
+### Implemented
+
+- A row-scope label under the 0.65 confidence gate no longer overrides
+  the column. The checkpoint tags ordinary questions as "any column"
+  or "all columns" at about 0.4. Fixes #19.
+- `cargo test` harnesses in `target/<profile>/deps` reuse an existing
+  `../anvil-data`, so the ignored test sees the model `cargo run`
+  installed beside `anvil.exe`.
+
+### Verified
+
+- `--setup-ask-model` installed the checkpoint at
+  `target/release/anvil-data/models/gliner2.5-small-v1-7132dc4561c3f94563c6147e75ffa8ef34c4964a`.
+- `cargo test --release --features nl-gliner --lib real_model_filter_smoke -- --ignored --nocapture`
+  passed in 1.13s with no `ANVIL_DATA_DIR`. The three phrases decoded
+  to `Last Name starts with C`, `amount > 100`, and `Last Name ends
+  with son`. `Show rows where amount exceeds 100` abstained
+  (comparison confidence 0.48).
+- `--ask-probe fixtures/ask.csv "amount exceeds 100"` printed
+  `amount > 100` (668 ms including load).
+- `--ask-probe fixtures/ask.csv "Which users are from Canada?"`
+  printed `The model is uncertain. Name the column, comparison, and value explicitly.`
+  and exited 1. The file's country values are US, UK, and CA.
+- GLiNER unit tests: 14 passed, 1 ignored. Path tests: 5 passed.
+- The native window was not launched. `nl-model` was not run.
+
+### Tests added/changed
+
+- `a_low_confidence_row_scope_stays_a_single_column`
+- `a_deps_harness_reuses_an_existing_profile_cache`
+- `a_deps_harness_without_a_profile_cache_uses_its_own_dir`
+
+### Roadmap / architecture changes
+
+- The GLiNER scope note names the confidence gate. The real-model
+  smoke test is checked. Manual Ask in the window stays open.
+- On-disk layout describes the `deps` harness sharing the profile cache.
+
+### Issues / next recommended task
+
+- Issue #17 needs the same shell pass on macOS and Linux. This
+  session only has Windows.

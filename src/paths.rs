@@ -9,10 +9,14 @@
 //! Resolution order for [`anvil_data_dir`]:
 //!
 //! 1. `ANVIL_DATA_DIR`, for tests, development and unusual deployments.
-//! 2. `<folder of the canonical executable>/anvil-data`, when it can be
+//! 2. When the executable is inside a `deps` directory and
+//!    `../anvil-data` already exists, that directory. `cargo test`
+//!    harnesses live in `target/<profile>/deps`, while `cargo run`
+//!    installs models beside `anvil` in the profile directory.
+//! 3. `<folder of the canonical executable>/anvil-data`, when it can be
 //!    created and written to. `current_exe` is canonicalised first so a
 //!    symlink in a `bin` directory resolves to the real install folder.
-//! 3. The legacy per-user cache root (`%LOCALAPPDATA%\anvil`,
+//! 4. The legacy per-user cache root (`%LOCALAPPDATA%\anvil`,
 //!    `~/Library/Caches/anvil`, `$XDG_CACHE_HOME/anvil` or
 //!    `~/.cache/anvil`). This is a fallback for a read-only install
 //!    folder, and a one-time notice reports it so the location is never a
@@ -103,6 +107,18 @@ fn resolve(override_dir: Option<PathBuf>, exe: Option<&Path>) -> Result<PathBuf,
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf))
         {
+            // `cargo test` runs from target/<profile>/deps. A model
+            // installed by `cargo run --bin anvil` lives one directory
+            // up. Prefer that cache when it already exists so the
+            // harness does not create an empty sibling.
+            if parent.file_name().is_some_and(|name| name == "deps") {
+                if let Some(profile) = parent.parent() {
+                    let shared = profile.join(DATA_DIR_NAME);
+                    if shared.is_dir() {
+                        return Ok(shared);
+                    }
+                }
+            }
             let portable = parent.join(DATA_DIR_NAME);
             if create_and_probe(&portable).is_ok() {
                 return Ok(portable);
@@ -154,6 +170,34 @@ mod tests {
         let resolved = resolve(None, Some(&exe)).expect("resolve");
         assert_eq!(resolved, dir.join(DATA_DIR_NAME));
         assert!(resolved.is_dir());
+    }
+
+    #[test]
+    fn a_deps_harness_reuses_an_existing_profile_cache() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let profile = root.join("release");
+        let deps = profile.join("deps");
+        std::fs::create_dir_all(&deps).expect("deps");
+        let shared = profile.join(DATA_DIR_NAME);
+        std::fs::create_dir_all(&shared).expect("shared cache");
+        let exe = deps.join("anvil_core-test.exe");
+        std::fs::write(&exe, b"").expect("exe");
+        let resolved = resolve(None, Some(&exe)).expect("resolve");
+        assert_eq!(resolved, shared);
+        assert!(!deps.join(DATA_DIR_NAME).exists());
+    }
+
+    #[test]
+    fn a_deps_harness_without_a_profile_cache_uses_its_own_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().canonicalize().expect("canonicalize");
+        let deps = root.join("deps");
+        std::fs::create_dir_all(&deps).expect("deps");
+        let exe = deps.join("anvil_core-test.exe");
+        std::fs::write(&exe, b"").expect("exe");
+        let resolved = resolve(None, Some(&exe)).expect("resolve");
+        assert_eq!(resolved, deps.join(DATA_DIR_NAME));
     }
 
     #[test]

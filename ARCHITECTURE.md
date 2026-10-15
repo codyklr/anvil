@@ -1983,11 +1983,14 @@ the program and everything it created. `src/paths.rs` is the single
 source of truth:
 
 - `anvil_data_dir()` resolves, in order, the `ANVIL_DATA_DIR` override,
-  `<folder of the canonical executable>/anvil-data` (after a write
-  probe), and finally the legacy per-user cache root if the program
-  folder is not writable. That last case is a fallback for read-only
-  installs and prints a one-time notice; the operator's portability
-  guarantee then does not hold, so `ANVIL_DATA_DIR` is the escape hatch.
+  an existing `../anvil-data` when the executable is inside a `deps`
+  directory (`cargo test` harnesses share the cache `cargo run` wrote
+  beside `anvil`), `<folder of the canonical executable>/anvil-data`
+  (after a write probe), and finally the legacy per-user cache root if
+  the program folder is not writable. That last case is a fallback for
+  read-only installs and prints a one-time notice; the operator's
+  portability guarantee then does not hold, so `ANVIL_DATA_DIR` is the
+  escape hatch.
 - `model_root()` is `<data>/models`. Both optional Ask backends
   (`nl-gliner` model files, `nl-model` GGUF/tokenizer) download and read
   from there instead of the platform cache.
@@ -2102,6 +2105,8 @@ loading and inference run on the background executor. Concurrent requests
 report busy rather than accumulating inference jobs. The model classifies
 the column/operator and extracts a literal value. Confidence, spans, schema,
 numeric types, and filter-parser round-trip are checked before preview.
+A row-scope label uses that same confidence gate. Below the gate, the
+predicate stays on one column.
 Edits invalidate pending results; tab changes and header reindexing clear
 Ask state. Enter refuses partial interpretations or lossy preview syntax.
 
