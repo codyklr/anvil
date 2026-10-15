@@ -1192,6 +1192,51 @@ fn measure_sort_large_fixture() {
     assert!(elapsed.as_secs_f64() < 3.0, "sort took {elapsed:?}");
 }
 
+/// Text-sort throughput on the 1M-row fixture. `email` is unquoted, so
+/// a sort key can borrow the mapped bytes. `payload` is quoted and
+/// contains doubled quotes, so each key is an unescaped allocation.
+///
+/// Run with: cargo test --release --test core -- --ignored measure_sort_text
+#[test]
+#[ignore]
+fn measure_sort_text_large_fixture() {
+    let path = std::path::Path::new("fixtures/large.csv");
+    if !path.exists() {
+        eprintln!("fixtures/large.csv not present; run gen_fixture first");
+        return;
+    }
+    let opened = open_local(path).expect("open fixture");
+    let result = parse_opened(&opened);
+    let doc = ParsedDocument {
+        opened,
+        meta: result.meta,
+        record_offsets: result.record_offsets,
+    };
+    let rows: Vec<u64> = (0..doc.record_count()).collect();
+    for name in ["email", "payload"] {
+        let column = doc
+            .meta
+            .headers
+            .iter()
+            .position(|h| h == name)
+            .unwrap_or_else(|| panic!("missing {name} column"));
+        let spec = SortSpec {
+            column,
+            order: SortOrder::Ascending,
+            kind: SortKind::Text,
+        };
+        let started = std::time::Instant::now();
+        let sorted = sort_rows(&doc, &rows, &spec);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "sorted {} rows by `{name}` in {:.0?}",
+            doc.record_count(),
+            elapsed
+        );
+        assert_eq!(sorted.len(), 1_000_000);
+    }
+}
+
 #[test]
 fn archive_auto_opens_csv_over_readme_txt() {
     let (_d, path) = make_zip(
