@@ -119,21 +119,39 @@ impl ProgressTracker {
     }
 }
 
-/// How many bytes of a cell the full-value panel will escape and shape.
-/// A multi-MB cell is still bounded work; the panel reports the cap.
+/// How many source bytes one page of the full-value panel will escape
+/// and shape. A longer cell is paged; the panel never holds more than
+/// one page at a time.
 const CELL_DETAIL_CAP: usize = 32 * 1024;
 
-/// The full exact value of one cell, as shown in the cell detail panel.
+/// Which page of the open cell the panel should show.
+#[derive(Clone, Copy)]
+enum CellDetailPage {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+/// One page of a cell's exact value, as shown in the cell detail panel.
 struct CellDetail {
     record: u64,
     column: usize,
     /// Header name (or `colN` for a headerless document).
     label: String,
-    /// At most `CELL_DETAIL_CAP` bytes of escaped text.
+    /// The current page. At most `CELL_DETAIL_CAP` source bytes, plus at
+    /// most one character when a boundary had to move.
     text: String,
-    /// The cell's true byte length before capping.
+    /// The cell's true byte length.
     total_bytes: u64,
+    /// First source byte included in `text`.
+    start: u64,
+    /// First source byte after `text`.
+    end: u64,
+    /// Another page exists before or after this one.
     truncated: bool,
+    /// A cut landed inside a multibyte character and was moved.
+    adjusted_boundary: bool,
 }
 
 /// Per-document state captured when a tab is no longer active and
@@ -673,6 +691,11 @@ pub struct MainView {
     cell_detail_generation: u64,
     /// Outstanding background cell-read task.
     cell_detail_task: Option<Task<()>>,
+    /// Source-byte offset of the page the panel asked for.
+    cell_detail_offset: usize,
+    /// Record and column the open page belongs to. A cursor move that
+    /// changes this returns the panel to the first page.
+    cell_detail_anchor: Option<(u64, usize)>,
 }
 
 /// A Tier 2 interpreter: phrase + schema + value source to an expression.
@@ -829,6 +852,8 @@ impl MainView {
             cell_detail: None,
             cell_detail_generation: 0,
             cell_detail_task: None,
+            cell_detail_offset: 0,
+            cell_detail_anchor: None,
         }
     }
 

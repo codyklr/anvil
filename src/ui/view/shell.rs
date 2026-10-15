@@ -53,6 +53,31 @@ impl MainView {
             cx.stop_propagation();
             return;
         }
+        // Page the cell panel without taking Home, End, or the arrow
+        // keys the grid uses. These chords only apply while the panel
+        // is open, and a query bar keeps them for its own field.
+        if self.cell_detail_open
+            && event.keystroke.modifiers.alt
+            && !event.keystroke.modifiers.secondary()
+            && !event.keystroke.modifiers.shift
+            && !self.search_focus_handle.is_focused(window)
+            && !self.filter_focus_handle.is_focused(window)
+            && !self.ask_focus_handle.is_focused(window)
+            && !self.goto_focus_handle.is_focused(window)
+        {
+            let page = match event.keystroke.key.as_str() {
+                "left" => Some(CellDetailPage::Previous),
+                "right" => Some(CellDetailPage::Next),
+                "home" => Some(CellDetailPage::First),
+                "end" => Some(CellDetailPage::Last),
+                _ => None,
+            };
+            if let Some(page) = page {
+                self.page_cell_detail(page, cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
         let action = commands::action_for(&event.keystroke);
         if matches!(action, Some(Action::OpenFile)) {
             self.pick_file(cx);
@@ -326,6 +351,7 @@ impl MainView {
                         ("Files panel", "B"),
                         ("Go to row", "G"),
                         ("Reveal cell", "Enter"),
+                        ("Cell page", "Alt+Left / Right / Home / End"),
                     ],
                 ),
                 (

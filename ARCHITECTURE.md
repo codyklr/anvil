@@ -287,9 +287,10 @@ None`) are listed but not navigable. It also runs `encoding::scan` on
   GPUI-free
   single-line buffer and caret logic; `input` renders and hit-tests it.
 - Full-cell **Cell** panel (Cmd/Ctrl+Enter, `render_cell_detail` in
-  `ui::view`): reads the cursor cell on the background executor with
-  `exact_string_capped` (32 KiB render cap, generation-guarded) and
-  shows the exact value.
+  `ui::view`): reads one page of the cursor cell on the background
+  executor with `exact_string_window` (32 KiB per page, generation-guarded).
+  Previous/Next and Alt+Left/Right/Home/End move through a longer value.
+  Changing cells returns to the first page. Copy stays the full exact value.
 - `ui::view::ask` — the Ask bar: live preview of the parsed filter,
   `Ctrl/Cmd+Enter` escalation to a Tier 2 backend, and `Enter` to hand
   the expression to the filter bar, where it stays editable.
@@ -2293,10 +2294,12 @@ change architecture and update this file.
     inspector, the clipboard, `--probe` sample rows and the header row
     (`ParseMeta.headers` is built with `exact_string`). Grid ellipsis
     (`truncate()`) is a layout concern and never changes the underlying
-    value. The full-cell panel uses `exact_string_capped`, which returns
-    the same escaped form for at most the first 32 KiB so a multi-MB cell
-    cannot force the UI to shape megabytes of text; the panel reports the
-    cap. See ADR 0003; this invariant has regression tests in
+    value. The full-cell panel uses `exact_string_window`, which returns
+    the same escaped form for one 32 KiB page so a multi-MB cell cannot
+    force the UI to shape megabytes of text. The panel names the source
+    bytes on screen and can page the rest; a cut inside a UTF-8 character
+    is moved to a boundary and that adjustment is reported. Copy is not
+    paged. See ADR 0003; this invariant has regression tests in
     `tests/core.rs` and `schema::stats`.
 
 ## Planned Architectural Evolution

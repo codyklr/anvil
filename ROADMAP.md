@@ -853,8 +853,11 @@ Acceptance remains open wherever a workflow/platform was not exercised.
       has elided, so a user never needs to copy a truncated-looking cell to
       read it. Cmd/Ctrl+Enter toggles a right-hand **Cell** panel showing
       the cursor cell's exact (escaped) value. The read runs on the
-      background executor and is capped at 32 KiB, with the panel stating
-      how many bytes were shown when it caps; the panel follows the cursor.
+      background executor, one 32 KiB page at a time (`exact_string_window`).
+      Previous/Next and Alt+Left/Right/Home/End walk a longer cell, and the
+      caption names the bytes on screen. Copy stays the full value. The
+      panel follows the cursor and returns to the first page when the cell
+      changes.
 
 #### Diagnostics UI
 

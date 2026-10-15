@@ -1,12 +1,14 @@
 //! Full-cell detail panel (Cmd/Ctrl+Enter).
 //!
-//! Reads the cursor cell on the background executor and shows its exact
-//! value, capped so a multi-MB cell cannot block the UI. The panel state
-//! and `CellDetail` type live on `MainView` in `view.rs`; only the
-//! methods are split out here.
+//! Reads one page of the cursor cell on the background executor. A page
+//! is at most `CELL_DETAIL_CAP` source bytes, so a multi-MB cell cannot
+//! block the UI. Previous / Next and Alt+Left / Alt+Right / Alt+Home /
+//! Alt+End move through the rest. Copy stays the full exact value. The
+//! panel state and `CellDetail` type live on `MainView` in `view.rs`;
+//! only the methods are split out here.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable};
 
 use super::*;
 
@@ -37,13 +39,55 @@ impl MainView {
         self.cell_detail = None;
         self.cell_detail_generation = self.cell_detail_generation.wrapping_add(1);
         self.cell_detail_task = None;
+        self.cell_detail_offset = 0;
+        self.cell_detail_anchor = None;
         cx.notify();
     }
 
-    /// Read the cursor cell's exact value on the background executor.
+    /// Show another page of the cell the panel is already reading.
+    /// A cursor move resets the page in [`Self::kick_cell_detail`].
+    pub(super) fn page_cell_detail(&mut self, page: CellDetailPage, cx: &mut Context<Self>) {
+        if !self.cell_detail_open {
+            return;
+        }
+        let Some(detail) = self.cell_detail.clone() else {
+            if matches!(page, CellDetailPage::First) {
+                self.cell_detail_offset = 0;
+                self.kick_cell_detail(cx);
+            }
+            return;
+        };
+        let total = detail.total_bytes as usize;
+        let next = match page {
+            CellDetailPage::First => 0,
+            CellDetailPage::Last => total.saturating_sub(CELL_DETAIL_CAP),
+            CellDetailPage::Next => {
+                let end = detail.end as usize;
+                if end >= total {
+                    return;
+                }
+                end
+            }
+            CellDetailPage::Previous => {
+                let start = detail.start as usize;
+                if start == 0 {
+                    return;
+                }
+                start.saturating_sub(CELL_DETAIL_CAP)
+            }
+        };
+        if next == self.cell_detail_offset && detail.start as usize == next {
+            return;
+        }
+        self.cell_detail_offset = next;
+        self.kick_cell_detail(cx);
+    }
+
+    /// Read one page of the cursor cell on the background executor.
     /// The read is bounded to `CELL_DETAIL_CAP` bytes so a multi-MB cell
-    /// cannot block the UI thread; a newer cursor move bumps the
-    /// generation and discards an in-flight read.
+    /// cannot block the UI thread; a newer cursor move or page request
+    /// bumps the generation and discards an in-flight read. Changing
+    /// cells returns the offset to the first page.
     pub(super) fn kick_cell_detail(&mut self, cx: &mut Context<Self>) {
         if !self.cell_detail_open {
             return;
@@ -61,6 +105,12 @@ impl MainView {
             None => pos.row,
         };
         let column = pos.column_index;
+        let anchor = (record, column);
+        if self.cell_detail_anchor != Some(anchor) {
+            self.cell_detail_offset = 0;
+            self.cell_detail_anchor = Some(anchor);
+        }
+        let offset = self.cell_detail_offset;
         self.cell_detail_generation = self.cell_detail_generation.wrapping_add(1);
         let generation = self.cell_detail_generation;
         let doc = model.doc.clone();
@@ -73,14 +123,17 @@ impl MainView {
                         Some(cell) => cell.as_bytes(),
                         None => &[],
                     };
-                    let (text, truncated) = anvil_core::exact_string_capped(bytes, CELL_DETAIL_CAP);
+                    let window = anvil_core::exact_string_window(bytes, offset, CELL_DETAIL_CAP);
                     CellDetail {
                         record,
                         column,
                         label: doc.meta.column_label(column),
-                        text: text.into_owned(),
+                        text: window.text.into_owned(),
                         total_bytes: bytes.len() as u64,
-                        truncated,
+                        start: window.start as u64,
+                        end: window.end as u64,
+                        truncated: window.more_before || window.more_after,
+                        adjusted_boundary: window.adjusted_boundary,
                     }
                 })
                 .await;
@@ -128,20 +181,45 @@ impl MainView {
                         ),
                     )
                     .into_any_element(),
-                    panel::caption_owned(
-                        colors,
-                        if detail.truncated {
-                            format!(
-                                "Preview capped at {} of {} bytes",
-                                format_count(CELL_DETAIL_CAP as u64),
-                                format_count(detail.total_bytes)
-                            )
-                        } else {
-                            format!("{} bytes, exact value", format_count(detail.total_bytes))
-                        },
-                    )
-                    .into_any_element(),
+                    panel::caption_owned(colors, cell_detail_caption(detail)).into_any_element(),
                 ];
+                if detail.truncated {
+                    let at_start = detail.start == 0;
+                    let at_end = detail.end >= detail.total_bytes;
+                    out.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px(px(panel::BODY_PAD_X))
+                            .pt(px(4.))
+                            .child(
+                                Button::new("cell-detail-previous")
+                                    .xsmall()
+                                    .ghost()
+                                    .label("Previous")
+                                    .disabled(at_start)
+                                    .accessibility_label("Previous page")
+                                    .tooltip("Previous page · Alt+Left")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page_cell_detail(CellDetailPage::Previous, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("cell-detail-next")
+                                    .xsmall()
+                                    .ghost()
+                                    .label("Next")
+                                    .disabled(at_end)
+                                    .accessibility_label("Next page")
+                                    .tooltip("Next page · Alt+Right")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page_cell_detail(CellDetailPage::Next, cx)
+                                    })),
+                            )
+                            .into_any_element(),
+                    );
+                }
                 // The value itself: the whole point of the panel, so it gets
                 // the surface, the monospace face and the room.
                 out.push(
@@ -206,4 +284,22 @@ impl MainView {
             .child(panel::body("cell-detail-scroll", content))
             .into_any_element()
     }
+}
+
+/// Caption for the page on screen. A cell that fits in one page keeps
+/// the old wording. A longer cell names the source bytes actually shown.
+fn cell_detail_caption(detail: &CellDetail) -> String {
+    if !detail.truncated {
+        return format!("{} bytes, exact value", format_count(detail.total_bytes));
+    }
+    let mut text = format!(
+        "Bytes {}-{} of {}",
+        format_count(detail.start + 1),
+        format_count(detail.end),
+        format_count(detail.total_bytes)
+    );
+    if detail.adjusted_boundary {
+        text.push_str(". Cut moved to a character boundary");
+    }
+    text
 }
