@@ -15,8 +15,8 @@ use gpui_kit::{
 };
 
 use anvil_core::{
-    exact_string, find_ranges, CellPos, Cells, ParsedDocument, SearchOptions, Selection,
-    WarningKind,
+    display_string, find_ranges, CellPos, Cells, DisplayEncoding, ParsedDocument, SearchOptions,
+    Selection, WarningKind,
 };
 
 use super::theme;
@@ -184,8 +184,8 @@ fn rect_contains(rect: Option<(CellPos, CellPos)>, row: u64, column: usize) -> b
 /// `Arc<str>`, copying every visible cell twice per frame. The visible
 /// bytes are identical either way, including the escaped form used for
 /// invalid UTF-8.
-fn cell_shared_string(bytes: &[u8]) -> SharedString {
-    let text = exact_string(bytes);
+fn cell_shared_string(bytes: &[u8], encoding: DisplayEncoding) -> SharedString {
+    let text = display_string(bytes, encoding);
     SharedString::new(text.as_ref())
 }
 
@@ -207,6 +207,8 @@ pub struct GridModel {
     /// depends only on the document, so the cache is invalidated simply
     /// by building a new `GridModel` (which open / reindex already do).
     text_cache: Arc<Mutex<HashMap<(u64, usize), SharedString>>>,
+    /// Decoding for cached cell text. Changing it clears the cache.
+    display_encoding: DisplayEncoding,
 }
 
 impl GridModel {
@@ -218,7 +220,20 @@ impl GridModel {
             layout: Arc::new(layout),
             warnings,
             text_cache: Arc::new(Mutex::new(HashMap::new())),
+            display_encoding: DisplayEncoding::Utf8,
         }
+    }
+
+    /// Switch the text shown for every cell. The mapped file is unchanged.
+    pub fn set_display_encoding(&mut self, encoding: DisplayEncoding) {
+        if self.display_encoding == encoding {
+            return;
+        }
+        self.display_encoding = encoding;
+        self.text_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     pub fn row_count(&self) -> u64 {
@@ -236,7 +251,7 @@ impl GridModel {
         if let Some(existing) = cache.get(&(record, column)) {
             return existing.clone();
         }
-        let text = cell_shared_string(bytes);
+        let text = cell_shared_string(bytes, self.display_encoding);
         if cache.len() >= CELL_TEXT_CACHE_CAP {
             cache.clear();
         }
@@ -599,7 +614,15 @@ where
                     // inside the cell. `find_ranges` returns byte ranges;
                     // the cost is one case-folded copy per visible cell in
                     // a match row (~30 rows x ~6 columns).
-                    let ranges = find_ranges(bytes, needle, search_options.case_sensitive);
+                    // UTF-8 highlights the file bytes, which match the
+                    // displayed text when that text is valid UTF-8.
+                    // Windows-1252 highlights the decoded text the cell
+                    // is actually showing.
+                    let haystack = match model.display_encoding {
+                        DisplayEncoding::Utf8 => bytes,
+                        DisplayEncoding::Windows1252 => text.as_ref().as_bytes(),
+                    };
+                    let ranges = find_ranges(haystack, needle, search_options.case_sensitive);
                     if ranges.is_empty() {
                         // Row matched but this cell did not: render plain.
                         cell_div = cell_div.child(text);
@@ -742,7 +765,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anvil_core::SearchOptions;
+    use anvil_core::{exact_string, SearchOptions};
 
     #[test]
     fn rect_contains_respects_inclusive_bounds() {
@@ -768,15 +791,27 @@ mod tests {
     /// one-allocation change against any accidental re-encoding.
     #[test]
     fn cell_shared_string_is_byte_faithful() {
-        assert_eq!(cell_shared_string(b"hello").as_ref(), "hello");
-        assert_eq!(cell_shared_string(b"").as_ref(), "");
+        assert_eq!(
+            cell_shared_string(b"hello", DisplayEncoding::Utf8).as_ref(),
+            "hello"
+        );
+        assert_eq!(cell_shared_string(b"", DisplayEncoding::Utf8).as_ref(), "");
         // Padding and leading zeroes are preserved, not trimmed.
-        assert_eq!(cell_shared_string(b" 007 ").as_ref(), " 007 ");
+        assert_eq!(
+            cell_shared_string(b" 007 ", DisplayEncoding::Utf8).as_ref(),
+            " 007 "
+        );
         // Multi-byte UTF-8 survives in one piece.
         let multibyte = "h\u{e9}llo \u{2192} \u{65e5}\u{672c}\u{8a9e}";
-        assert_eq!(cell_shared_string(multibyte.as_bytes()).as_ref(), multibyte);
+        assert_eq!(
+            cell_shared_string(multibyte.as_bytes(), DisplayEncoding::Utf8).as_ref(),
+            multibyte
+        );
         // A valid cell containing a literal backslash keeps it as-is.
-        assert_eq!(cell_shared_string(br"back\slash").as_ref(), "back\\slash");
+        assert_eq!(
+            cell_shared_string(br"back\slash", DisplayEncoding::Utf8).as_ref(),
+            "back\\slash"
+        );
         // Invalid UTF-8 is escaped exactly like `exact_string`.
         for bytes in [
             &[0xffu8, 0xfe][..],
@@ -786,7 +821,7 @@ mod tests {
         ] {
             let expected = exact_string(bytes).into_owned();
             assert_eq!(
-                cell_shared_string(bytes).as_ref(),
+                cell_shared_string(bytes, DisplayEncoding::Utf8).as_ref(),
                 expected,
                 "escaped form must match exact_string for {bytes:?}"
             );
@@ -919,6 +954,21 @@ mod tests {
             len <= CELL_TEXT_CACHE_CAP,
             "cache grew to {len}, cap is {CELL_TEXT_CACHE_CAP}"
         );
+    }
+
+    #[test]
+    fn display_encoding_changes_cached_cell_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("quote.csv");
+        std::fs::write(&path, b"a\nx\n").expect("write");
+        let opened = anvil_core::source::local::open_local(&path).expect("open");
+        let doc = anvil_core::index_opened(opened);
+        let mut model = GridModel::new(std::sync::Arc::new(doc));
+        assert_eq!(model.cell_text(0, 0, &[0x93]).as_ref(), "\\x93");
+        model.set_display_encoding(DisplayEncoding::Windows1252);
+        assert_eq!(model.cell_text(0, 0, &[0x93]).as_ref(), "\u{201C}");
+        // The cache key is the cell, so the ASCII check uses another column.
+        assert_eq!(model.cell_text(0, 1, b"007").as_ref(), "007");
     }
 
     #[test]

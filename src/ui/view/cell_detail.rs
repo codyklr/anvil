@@ -111,6 +111,7 @@ impl MainView {
             self.cell_detail_anchor = Some(anchor);
         }
         let offset = self.cell_detail_offset;
+        let encoding = self.display_encoding;
         self.cell_detail_generation = self.cell_detail_generation.wrapping_add(1);
         let generation = self.cell_detail_generation;
         let doc = model.doc.clone();
@@ -123,7 +124,8 @@ impl MainView {
                         Some(cell) => cell.as_bytes(),
                         None => &[],
                     };
-                    let window = anvil_core::exact_string_window(bytes, offset, CELL_DETAIL_CAP);
+                    let window =
+                        anvil_core::display_window(bytes, offset, CELL_DETAIL_CAP, encoding);
                     CellDetail {
                         record,
                         column,
@@ -181,7 +183,11 @@ impl MainView {
                         ),
                     )
                     .into_any_element(),
-                    panel::caption_owned(colors, cell_detail_caption(detail)).into_any_element(),
+                    panel::caption_owned(
+                        colors,
+                        cell_detail_caption(detail, self.display_encoding),
+                    )
+                    .into_any_element(),
                 ];
                 if detail.truncated {
                     let at_start = detail.start == 0;
@@ -288,18 +294,24 @@ impl MainView {
 
 /// Caption for the page on screen. A cell that fits in one page keeps
 /// the old wording. A longer cell names the source bytes actually shown.
-fn cell_detail_caption(detail: &CellDetail) -> String {
-    if !detail.truncated {
-        return format!("{} bytes, exact value", format_count(detail.total_bytes));
-    }
-    let mut text = format!(
-        "Bytes {}-{} of {}",
-        format_count(detail.start + 1),
-        format_count(detail.end),
-        format_count(detail.total_bytes)
-    );
-    if detail.adjusted_boundary {
-        text.push_str(". Cut moved to a character boundary");
+fn cell_detail_caption(detail: &CellDetail, encoding: anvil_core::DisplayEncoding) -> String {
+    let mut text = if !detail.truncated {
+        format!("{} bytes, exact value", format_count(detail.total_bytes))
+    } else {
+        let mut text = format!(
+            "Bytes {}-{} of {}",
+            format_count(detail.start + 1),
+            format_count(detail.end),
+            format_count(detail.total_bytes)
+        );
+        if detail.adjusted_boundary {
+            text.push_str(". Cut moved to a character boundary");
+        }
+        text
+    };
+    if encoding != anvil_core::DisplayEncoding::Utf8 {
+        text.push_str(", ");
+        text.push_str(encoding.label());
     }
     text
 }

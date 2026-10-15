@@ -219,7 +219,9 @@ anvil/
   (still bounded to `INFER_SAMPLE_ROWS`), so the displayed type agrees
   with the stats beside it. Every
   displayed value is the
-  exact cell value, padding included, and values that differ only in
+  exact cell value under the tab's display encoding (UTF-8 by default,
+  so padding is included and a non-UTF-8 byte stays escaped), and values
+  that differ only in
   padding are counted as distinct (ADR 0003); `min`/`max` order text
   columns by exact bytes (case-sensitive, padding-preserving) and
   numeric columns numerically. A cell is empty only when it has zero
@@ -231,7 +233,10 @@ anvil/
   an invalid cell would silently render as empty (`as_str` falls back
   to `""`). The diagnostics panel runs `scan` on the background
   executor when it opens and lists the findings; `--probe` also prints
-  them.
+  them. A per-tab `DisplayEncoding` (UTF-8 or windows-1252) is applied
+  by `display_string` at the same point as `exact_string`. The mapped
+  file, the index, filters, and `--probe` stay on the file bytes.
+  Search uses the decoded text only while windows-1252 is selected.
 - `ui::view::diagnostics` — a warnings panel for the active document.
   It reads the immutable `ParseMeta.warnings` (no background task)
   and lists each warning's kind, row, and note, jumping the grid to the

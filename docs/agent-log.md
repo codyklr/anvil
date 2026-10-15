@@ -8258,3 +8258,39 @@ in dev builds. The menu chrome itself had no texture at all.
 ### Issues / next recommended task
 
 - Issue #16, Windows-1252 display.
+
+## 2026-10-15 — Windows-1252 is a per-document view
+
+### Implemented
+
+- A tab can show its bytes as windows-1252. UTF-8 stays the default:
+  `0x93` is `\x93` until the diagnostics panel selects windows-1252,
+  where the same byte is a curly quote. The mapped file is not
+  rewritten. Fixes #16.
+- The grid, cell panel, copy, and column inspector share
+  `display_string`. Search says whether it is scanning file bytes or
+  decoded text, and matches the decoded text only while the override
+  is on. Filters and `--probe` stay on the file bytes.
+
+### Verified
+
+- `cargo test --release` passed: lib 221, anvil 228 (1 ignored),
+  core 88 (7 ignored), style 1.
+- Native GUI was not launched. Latin-1, sorting by decoded text, and
+  non-ASCII case folding were not part of this slice.
+
+### Tests added/changed
+
+- `windows_1252_is_a_view_of_the_same_bytes`
+- `windows_1252_display_is_per_document`
+- `display_encoding_changes_cached_cell_text`
+
+### Roadmap / architecture changes
+
+- Milestone encoding checkbox and the encoding paragraph in
+  `ARCHITECTURE.md` describe the display override.
+
+### Issues / next recommended task
+
+- Issue #18, documentation drift. Issue #17 needs a manual pass on
+  macOS and Linux. Issue #19 needs a real GLiNER run.

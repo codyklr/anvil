@@ -113,6 +113,7 @@ impl MainView {
             return;
         };
         let view_rows = self.view_rows();
+        let encoding = self.display_encoding;
         self.inspector_column = Some(column);
         self.inspector_view_key = view_key;
         self.inspector_generation = self.inspector_generation.wrapping_add(1);
@@ -125,11 +126,13 @@ impl MainView {
                 .spawn(async move {
                     // A filtered/sorted view is scanned on its own; only
                     // the visible rows are counted, measured and sampled.
+                    let options = StatsOptions {
+                        encoding,
+                        ..StatsOptions::default()
+                    };
                     match &view_rows {
-                        Some(rows) => {
-                            column_stats_rows(&doc, column, rows, &StatsOptions::default())
-                        }
-                        None => column_stats(&doc, column, &StatsOptions::default()),
+                        Some(rows) => column_stats_rows(&doc, column, rows, &options),
+                        None => column_stats(&doc, column, &options),
                     }
                 })
                 .await;

@@ -22,7 +22,7 @@ pub mod nl;
 pub mod sort;
 pub mod suggest;
 
-use crate::parser::{Cells, ColumnIndex, ParsedDocument};
+use crate::parser::{display_string, Cells, ColumnIndex, DisplayEncoding, ParsedDocument};
 
 /// Per-call options for [`search`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +38,9 @@ pub struct SearchOptions {
     /// candidate set explodes; the UI still has *some* progress to
     /// render rather than waiting for the whole file.
     pub max_matches: Option<u64>,
+    /// `Utf8` searches the file bytes. `Windows1252` searches the same
+    /// decoding the grid shows.
+    pub encoding: DisplayEncoding,
 }
 
 /// Search `doc` for `needle`, returning the matching record indexes in
@@ -99,7 +102,13 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
                 Some(c) => c,
                 None => continue,
             };
-            if cell_matches(cell.as_bytes(), &finder, case_sensitive, &mut scratch) {
+            if cell_matches(
+                cell.as_bytes(),
+                options.encoding,
+                &finder,
+                case_sensitive,
+                &mut scratch,
+            ) {
                 out.push(row);
                 if out.len() as u64 >= cap {
                     return out;
@@ -115,7 +124,13 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
             };
             let iter = Cells::new(record_bytes, doc.meta.delimiter, doc.meta.quote);
             for cell in iter {
-                if cell_matches(cell.as_ref(), &finder, case_sensitive, &mut scratch) {
+                if cell_matches(
+                    cell.as_ref(),
+                    options.encoding,
+                    &finder,
+                    case_sensitive,
+                    &mut scratch,
+                ) {
                     out.push(row);
                     if out.len() as u64 >= cap {
                         return out;
@@ -138,6 +153,7 @@ pub fn search(doc: &ParsedDocument, needle: &str, options: &SearchOptions) -> Ve
 /// so the fold path does not allocate per cell.
 fn cell_matches(
     cell: &[u8],
+    encoding: DisplayEncoding,
     finder: &memchr::memmem::Finder<'_>,
     case_sensitive: bool,
     scratch: &mut Vec<u8>,
@@ -145,11 +161,26 @@ fn cell_matches(
     if cell.is_empty() {
         return false;
     }
-    if case_sensitive || !cell.iter().any(u8::is_ascii_uppercase) {
-        return finder.find(cell).is_some();
+    match encoding {
+        DisplayEncoding::Utf8 => bytes_match(cell, finder, case_sensitive, scratch),
+        DisplayEncoding::Windows1252 => {
+            let decoded = display_string(cell, encoding);
+            bytes_match(decoded.as_bytes(), finder, case_sensitive, scratch)
+        }
+    }
+}
+
+fn bytes_match(
+    haystack: &[u8],
+    finder: &memchr::memmem::Finder<'_>,
+    case_sensitive: bool,
+    scratch: &mut Vec<u8>,
+) -> bool {
+    if case_sensitive || !haystack.iter().any(u8::is_ascii_uppercase) {
+        return finder.find(haystack).is_some();
     }
     scratch.clear();
-    scratch.extend(cell.iter().map(|b| ascii_lower(*b)));
+    scratch.extend(haystack.iter().map(|b| ascii_lower(*b)));
     finder.find(scratch.as_slice()).is_some()
 }
 
