@@ -840,14 +840,15 @@ Acceptance remains open wherever a workflow/platform was not exercised.
       padding or case never compare as equal. Iteration 8a: text sort keys
       store the cell's exact bytes (no trim, no case folding) with a record
       index tiebreak; `schema::stats::compare_values` uses exact bytes for
-      a text column. Numeric sorting and numeric min/max are unchanged, and
-      empty / whitespace-only values still sort last.
+      a text column. Numeric sorting and numeric min/max are unchanged.
+      Only a zero-byte cell sorts last as empty. A whitespace-only cell
+      sorts by those bytes.
 - [x] Decide whether a whitespace-only cell is empty. Per ADR 0003 the
       byte-faithful answer is "no, it is a value". The filter `empty`
       operator already used `bytes.is_empty()`; the inspector was changed
       to match (`schema::stats` now counts only zero-byte cells as empty).
-      Recorded in `ARCHITECTURE.md` and ADR 0003. Text sorting still places
-      whitespace-only values last per the 8a "empty last" rule.
+      Recorded in `ARCHITECTURE.md` and ADR 0003. Text sorting follows the
+      same rule: a whitespace-only cell is a value, not a blank.
 - [x] Add an affordance to reveal the full value of a cell that the grid
       has elided, so a user never needs to copy a truncated-looking cell to
       read it. Cmd/Ctrl+Enter toggles a right-hand **Cell** panel showing

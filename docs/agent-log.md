@@ -8125,6 +8125,33 @@ in dev builds. The menu chrome itself had no texture at all.
 
 - Issue #12, whitespace-only cells sorting as blank.
 
+## 2026-10-14 — Whitespace-only cells sort as values
+
+### Implemented
+
+- A text sort treats only a zero-byte cell as missing. A cell of spaces
+  sorts by those bytes, matching the filter and the column panel
+  (ADR 0003). A numeric sort still rejects it at parse time, so it
+  sorts last with the other non-numbers. Fixes #12.
+
+### Verified
+
+- `whitespace_only_text_sorts_by_exact_bytes` and the existing empty-last
+  test passed. Full `cargo test --release` follows before the PR.
+
+### Tests added/changed
+
+- `query::sort::tests::whitespace_only_text_sorts_by_exact_bytes`
+
+### Roadmap / architecture changes
+
+- Milestone 3 notes no longer say whitespace sorts last as empty.
+- The sort paragraph in `ARCHITECTURE.md` says the same.
+
+### Issues / next recommended task
+
+- Issue #13, page the cell panel past 32 KiB.
+
 ## 2026-10-15 — Page keys follow the visible row count
 
 ### Implemented
@@ -8155,5 +8182,5 @@ in dev builds. The menu chrome itself had no texture at all.
 
 ### Issues / next recommended task
 
-- Merge the open sort and cell-panel pull requests, then issue #16
+- Merge the open cell-panel and text-sort pull requests, then issue #16
   (Windows-1252 display).
