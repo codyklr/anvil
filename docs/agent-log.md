@@ -8294,3 +8294,37 @@ in dev builds. The menu chrome itself had no texture at all.
 
 - Issue #18, documentation drift. Issue #17 needs a manual pass on
   macOS and Linux. Issue #19 needs a real GLiNER run.
+
+## 2026-10-15 — Docs match the help shortcut and the file panel
+
+### Implemented
+
+- `ARCHITECTURE.md` describes Cmd/Ctrl+? on `on_shell_key_down`, and
+  the keyboard table includes the shell chords that `commands.rs`
+  already binds. The old "commands module is not extracted" note is
+  gone. Fixes #18.
+- The roadmap splits the tooltip (done) from tab reordering (open),
+  and records the file panel as a resizable left pane. Moving it,
+  collapsing it, and a nested archive tree stay open.
+- `AGENTS.md` no longer quotes a test total. `cargo test --release`
+  is the number.
+
+### Verified
+
+- Compared the edited sentences with `shell.rs`, `commands.rs`,
+  `tab_strip.rs`, `file_panel.rs`, and the Milestone 5 resizable-pane
+  checkbox. No Rust changed, so the suite was not re-run.
+
+### Tests added/changed
+
+- None.
+
+### Roadmap / architecture changes
+
+- Milestone 2 file-panel and tooltip checkboxes, Future Ideas, and
+  the keyboard sections of `ARCHITECTURE.md`.
+
+### Issues / next recommended task
+
+- Issue #17 needs a manual pass on macOS and Linux. Issue #19 needs
+  a real GLiNER run.

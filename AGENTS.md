@@ -453,7 +453,7 @@ cargo fmt
 # Lint
 cargo clippy --release
 
-# Tests (477 passing, 7 ignored)
+# Tests. The count is whatever this command prints.
 cargo test --release
 
 # Throughput test (needs fixtures/large.csv)
