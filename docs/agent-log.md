@@ -8093,3 +8093,34 @@ in dev builds. The menu chrome itself had no texture at all.
 
 - Exercise completion alongside the preceding layout fixes in the native GUI.
 - Prior local work preserved; no branch, commit or PR created.
+
+## 2026-10-14 — Numeric spellings that do not round-trip stay text
+
+### Implemented
+
+- `schema::infer` counts a value as numeric only when the trimmed
+  spelling round-trips through `i64` or `f64`. `"007"` and `"1.10"`
+  stay text. `"10"` and `"1.5"` do not.
+- Equal numeric sort keys break the tie on the exact cell bytes, then
+  the record index. Fixes #11.
+
+### Verified
+
+- `cargo test --release --lib -- schema:: query::sort::` (44 passed).
+- `cargo test --release` passed.
+
+### Tests added/changed
+
+- `zero_padded_and_trailing_zeros_stay_text`
+- `canonical_decimals_are_floats`
+- `zero_padded_ids_sort_as_distinct_text`
+- `equal_numbers_break_ties_on_exact_bytes`
+
+### Roadmap / architecture changes
+
+- `ARCHITECTURE.md` sort and infer notes mention the round-trip rule
+  and the byte tiebreak.
+
+### Issues / next recommended task
+
+- Issue #12, whitespace-only cells sorting as blank.

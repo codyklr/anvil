@@ -193,13 +193,16 @@ anvil/
   deterministic permutation of the supplied row indexes. Numeric
   columns compare with `f64::total_cmp`; text compares exact bytes
   (case-sensitive, padding-preserving); empty / non-numeric values sort
-  last in both directions; equal keys tie-break on the record index.
+  last in both directions; equal numbers tie-break on the exact bytes,
+  then every tie breaks on the record index.
   Sorting composes with filtering because the caller passes the
   filtered set (or every record) as `rows`.
 - `schema::infer` — samples up to 2048 rows per column and returns a
   `ColumnProfile` with an `Integer` / `Float` / `Boolean` / `Text` /
-  `Empty` type and a `numeric_fraction` confidence. The sorter uses
-  it to choose the comparison.
+  `Empty` type and a `numeric_fraction` confidence. A value counts as
+  numeric only when its trimmed spelling round-trips (`"007"` and
+  `"1.10"` stay text). The sorter uses the profile to choose the
+  comparison.
 - `schema::stats` — `stats(doc, column, &StatsOptions) -> ColumnStats`
   scans one column for the inspector: counts, an exact-then-HLL
   [`DistinctCount`], duplicate count, min/max, longest/shortest,
