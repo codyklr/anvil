@@ -8152,6 +8152,44 @@ in dev builds. The menu chrome itself had no texture at all.
 
 - Issue #13, page the cell panel past 32 KiB.
 
+## 2026-10-14 — Cell panel pages past 32 KiB
+
+### Implemented
+
+- `exact_string_window` returns one page of a cell from a byte offset.
+  Valid UTF-8 moves a cut off a continuation byte and reports that.
+  Invalid UTF-8 is escaped in place, with the offsets left where they
+  were asked.
+- The Cell panel shows that page. Previous/Next and
+  Alt+Left/Right/Home/End walk a longer value. A cursor move returns
+  to the first page. Copy is still the whole cell. Fixes #13.
+
+### Verified
+
+- `cargo test --release` passed: lib 219, `anvil` 225 (1 ignored),
+  core 87 (6 ignored), style 1.
+- `cargo clippy --release --all-targets` is clean aside from the
+  existing `too_many_arguments` lint in `ui/texture.rs`.
+- The native window was not launched. The view test drives the page
+  keys and checks the bytes on each page.
+
+### Tests added/changed
+
+- `exact_string_window_pages_without_splitting_characters`
+- `ui::view::tests::cell_detail_pages_a_value_longer_than_the_cap`
+- `cell_detail_caps_a_huge_value` still requires the first page of a
+  100,000-byte cell to be 32 KiB.
+
+### Roadmap / architecture changes
+
+- The Milestone 3 cell-panel note, ARCHITECTURE invariant 12, and the
+  UI design notes describe 32 KiB pages instead of a hard stop.
+
+### Issues / next recommended task
+
+- Issue #14, borrow text sort keys instead of copying the column.
+- Linux CI stays red until #22 (fontconfig dlopen) merges.
+
 ## 2026-10-14 — Text sort packs short keys and borrows long ones
 
 ### Implemented
@@ -8186,6 +8224,5 @@ in dev builds. The menu chrome itself had no texture at all.
 
 ### Issues / next recommended task
 
-- Issue #15, page the grid by the visible row count.
-- Issue #13 is pull request #23. Linux CI on the earlier pull requests
-  needed the fontconfig fix, which is merged as #22.
+- Issue #15, page the grid by the visible row count. That is pull
+  request #25.

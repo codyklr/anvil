@@ -278,6 +278,104 @@ pub fn exact_string_capped(bytes: &[u8], max_bytes: usize) -> (Cow<'_, str>, boo
     (Cow::Owned(escape_invalid_utf8(prefix)), true)
 }
 
+/// One page of a cell's exact text.
+///
+/// `start` and `end` are source-byte offsets into the original slice.
+/// `text` is the byte-faithful rendering of that range. `more_before` and
+/// `more_after` say whether another page exists on that side.
+/// `adjusted_boundary` is set when a cut that landed inside a UTF-8
+/// character was moved so the page shows whole characters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactWindow<'a> {
+    pub text: Cow<'a, str>,
+    pub start: usize,
+    pub end: usize,
+    pub more_before: bool,
+    pub more_after: bool,
+    pub adjusted_boundary: bool,
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
+}
+
+/// Byte-faithful text for the window of `bytes` that begins at `offset`
+/// and covers at most `max_bytes`.
+///
+/// Escaping matches [`exact_string`]. When the whole slice is valid
+/// UTF-8, a start that lands on a continuation byte walks backward (at
+/// most 3 bytes) and an end that splits a character walks backward the
+/// same way. A window that would otherwise be empty while bytes remain
+/// includes that one character. Invalid UTF-8 is not aligned: the raw
+/// range is escaped, as [`exact_string_capped`] does for a prefix.
+pub fn exact_string_window(bytes: &[u8], offset: usize, max_bytes: usize) -> ExactWindow<'_> {
+    let len = bytes.len();
+    let offset = offset.min(len);
+    if max_bytes == 0 || offset == len {
+        return ExactWindow {
+            text: Cow::Borrowed(""),
+            start: offset,
+            end: offset,
+            more_before: offset > 0,
+            more_after: offset < len,
+            adjusted_boundary: false,
+        };
+    }
+
+    if std::str::from_utf8(bytes).is_err() {
+        let end = (offset + max_bytes).min(len);
+        return ExactWindow {
+            text: exact_string(&bytes[offset..end]),
+            start: offset,
+            end,
+            more_before: offset > 0,
+            more_after: end < len,
+            adjusted_boundary: false,
+        };
+    }
+
+    let mut start = offset;
+    let mut adjusted = false;
+    let mut backed = 0;
+    while start > 0 && backed < 3 && is_utf8_continuation(bytes[start]) {
+        start -= 1;
+        backed += 1;
+        adjusted = true;
+    }
+
+    let mut end = (offset + max_bytes).min(len);
+    let mut backed_end = 0;
+    while end > start && end < len && is_utf8_continuation(bytes[end]) && backed_end < 3 {
+        end -= 1;
+        backed_end += 1;
+        adjusted = true;
+    }
+    // A cut in the middle of one character, with no earlier byte that
+    // fits, still has to show that character. Otherwise the next page
+    // would start where this one did and never advance.
+    if end == start && start < len {
+        end = start + 1;
+        while end < len && is_utf8_continuation(bytes[end]) && end - start < 4 {
+            end += 1;
+        }
+        adjusted = true;
+    }
+
+    let slice = &bytes[start..end];
+    let text = match std::str::from_utf8(slice) {
+        Ok(valid) => Cow::Borrowed(valid),
+        Err(_) => Cow::Owned(escape_invalid_utf8(slice)),
+    };
+    ExactWindow {
+        text,
+        start,
+        end,
+        more_before: start > 0,
+        more_after: end < len,
+        adjusted_boundary: adjusted,
+    }
+}
+
 /// Copy the valid parts of `text` into `out`, doubling literal
 /// backslashes so escaped output stays unambiguous.
 fn push_valid(out: &mut String, text: &str) {

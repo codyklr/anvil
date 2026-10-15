@@ -1722,6 +1722,68 @@ fn exact_string_capped_preserves_prefix_and_flags_truncation() {
     assert!(std::str::from_utf8(text.as_ref().as_bytes()).is_ok());
 }
 
+/// `exact_string_window` pages by source offset, keeps a multibyte
+/// character whole, and leaves an invalid slice unaligned.
+#[test]
+fn exact_string_window_pages_without_splitting_characters() {
+    let full = anvil_core::exact_string_window(b"hello", 0, 10);
+    assert_eq!(full.text.as_ref(), "hello");
+    assert_eq!((full.start, full.end), (0, 5));
+    assert!(!full.more_before && !full.more_after && !full.adjusted_boundary);
+
+    let bytes = b"abcdefghij";
+    let first = anvil_core::exact_string_window(bytes, 0, 4);
+    assert_eq!(first.text.as_ref(), "abcd");
+    assert!(first.more_after && !first.adjusted_boundary);
+    let second = anvil_core::exact_string_window(bytes, first.end, 4);
+    assert_eq!(second.text.as_ref(), "efgh");
+    assert!(second.more_before);
+    let third = anvil_core::exact_string_window(bytes, second.end, 4);
+    assert_eq!(third.text.as_ref(), "ij");
+    assert!(third.more_before && !third.more_after);
+
+    // A cut inside U+1F600 backs the end off to the character before it.
+    let emoji = "a\u{1F600}b";
+    let cut = anvil_core::exact_string_window(emoji.as_bytes(), 0, 2);
+    assert_eq!(cut.text.as_ref(), "a");
+    assert_eq!((cut.start, cut.end), (0, 1));
+    assert!(cut.adjusted_boundary && cut.more_after);
+    let next = anvil_core::exact_string_window(emoji.as_bytes(), cut.end, 4);
+    assert_eq!(next.text.as_ref(), "\u{1F600}");
+    assert_eq!((next.start, next.end), (1, 5));
+
+    // An offset on a continuation byte backs the start off, so the
+    // character is shown whole and the previous page is not repeated
+    // as a hole.
+    let mid = anvil_core::exact_string_window(emoji.as_bytes(), 2, 8);
+    assert_eq!(mid.start, 1);
+    assert_eq!(mid.text.as_ref(), "\u{1F600}b");
+    assert!(mid.adjusted_boundary && !mid.more_after);
+
+    // A window that would otherwise be empty still includes the one
+    // character the offset landed in.
+    let tiny = anvil_core::exact_string_window(emoji.as_bytes(), 2, 1);
+    assert_eq!(tiny.text.as_ref(), "\u{1F600}");
+    assert!(tiny.adjusted_boundary);
+    assert!(tiny.end > 2);
+
+    // Invalid UTF-8 is escaped in place. The offsets stay where asked.
+    let raw = [b'a', 0xff, b'b', b'c'];
+    let invalid = anvil_core::exact_string_window(&raw, 1, 2);
+    assert_eq!((invalid.start, invalid.end), (1, 3));
+    assert!(!invalid.adjusted_boundary);
+    assert!(invalid.more_before && invalid.more_after);
+    assert_eq!(
+        invalid.text.as_ref(),
+        anvil_core::exact_string(&raw[1..3]).as_ref()
+    );
+
+    let past = anvil_core::exact_string_window(b"ab", 10, 4);
+    assert_eq!((past.start, past.end), (2, 2));
+    assert!(past.text.is_empty());
+    assert!(past.more_before && !past.more_after);
+}
+
 // ---- UTF-8 BOM ----------------------------------------------------------
 
 /// A UTF-8 BOM must never appear inside the first header's name, but it

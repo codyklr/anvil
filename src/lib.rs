@@ -26,8 +26,9 @@ pub use parser::indexing::{
     IndexOptions, IndexResult, DEFAULT_MAX_RECORD_BYTES,
 };
 pub use parser::{
-    bom_len, column_label, exact_string, exact_string_capped, strip_utf8_bom, Cell, Cells,
-    ColumnIndex, HeaderMode, ParseMeta, ParseWarning, ParsedDocument, WarningKind,
+    bom_len, column_label, exact_string, exact_string_capped, exact_string_window, strip_utf8_bom,
+    Cell, Cells, ColumnIndex, ExactWindow, HeaderMode, ParseMeta, ParseWarning, ParsedDocument,
+    WarningKind,
 };
 pub use paths::{anvil_data_dir, legacy_data_dir, model_root, PathsError};
 pub use progress::{LoadPhase, LoadProgress, ProgressSink};
