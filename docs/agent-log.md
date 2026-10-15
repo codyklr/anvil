@@ -8124,3 +8124,36 @@ in dev builds. The menu chrome itself had no texture at all.
 ### Issues / next recommended task
 
 - Issue #12, whitespace-only cells sorting as blank.
+
+## 2026-10-15 — Page keys follow the visible row count
+
+### Implemented
+
+- Page Up / Page Down are `Action::Page`. The view steps by the
+  measured row count minus one, so one row stays on screen. Before
+  the grid has bounds the jump stays 20 rows.
+- Drag auto-scroll uses the same height-to-rows function. Fixes #15.
+
+### Verified
+
+- `cargo test --release` passed: lib 218, anvil 225 (1 ignored),
+  core 86 (6 ignored), style 1.
+- `cargo clippy --release --bin anvil -- -D warnings` fails only on
+  the existing `paint_dots` argument-count lint in `texture.rs`.
+- Native GUI was not launched.
+
+### Tests added/changed
+
+- `page_keys_map_to_a_page_action` (replaces the fixed-step binding test)
+- `page_keys_follow_the_visible_row_count`
+
+### Roadmap / architecture changes
+
+- Milestone 1 keyboard checkbox and the keyboard table now describe a
+  one-screen page with one row of overlap.
+- README shortcut row matches.
+
+### Issues / next recommended task
+
+- Merge the open sort and cell-panel pull requests, then issue #16
+  (Windows-1252 display).

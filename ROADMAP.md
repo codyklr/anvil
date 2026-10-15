@@ -140,7 +140,8 @@ this may freeze the UI.
 #### Keyboard navigation
 
 - [x] Arrow keys move the selection (Up/Down/Left/Right).
-- [x] Page Up / Page Down step the selection by `PAGE_STEP` rows.
+- [x] Page Up / Page Down step the selection by one screen, keeping
+      one row of overlap. Before the grid is measured the jump is 20 rows.
 - [x] Home / End jump the column cursor to the first / last column.
 - [x] Cmd/Ctrl+Home/End jump to first / last row. Plain Home / End
       jump to the first / last column. Implemented via

@@ -152,7 +152,7 @@ apply). See [Optional natural-language backends](#optional-natural-language-back
 | `F3` / `Shift+F3`                | Next / previous search match                          |
 | `Cmd/Ctrl+Home` / `Cmd/Ctrl+End` | First / last row                                      |
 | `Home` / `End`                   | First / last column                                   |
-| `PageUp` / `PageDown`            | Move 20 rows                                          |
+| `PageUp` / `PageDown`            | Move one screen, keeping one row on screen            |
 | Arrows                           | Move the selection; hold `Shift` to extend it         |
 | `Tab` / `Shift+Tab`              | Next / previous cell, wrapping across rows            |
 | `Escape`                         | Clear the selection, or close the open overlay        |
