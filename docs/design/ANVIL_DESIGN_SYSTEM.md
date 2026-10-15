@@ -212,7 +212,7 @@ See the companion spec for geometry and behaviors. One primary Open action, prec
 
 ## 18. Tables and query tools
 
-Opaque continuous data sheet; subtle row alternation and gutter separation, not cards. Preserve 26 px sticky headers, 22 px rows, 12 px mono, 58 px gutter, resize alignment and custom horizontal scrolling. Diagnostic gutter markers and empty markers must not be confused with literal source values. Reveal cell exposes exact content with its explicitly reported existing 32 KiB cap; copy remains faithful beyond that presentation cap.
+Opaque continuous data sheet; subtle row alternation and gutter separation, not cards. Preserve 26 px sticky headers, 22 px rows, 12 px mono, 58 px gutter, resize alignment and custom horizontal scrolling. Diagnostic gutter markers and empty markers must not be confused with literal source values. Reveal cell pages the exact value in 32 KiB windows and reports the byte range; copy remains the full value.
 
 Find is live; Filter applies explicitly; Ask previews before handing off; Go to row addresses display order. Shared label lanes, field frame, mono expression, inline feedback and Kit controls unify tools. Do not auto-apply ambiguous Ask output or present a decorative confidence badge as certainty. Restyling does not add data editing, query rebinding or IME support.
 

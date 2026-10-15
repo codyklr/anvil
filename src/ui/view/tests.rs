@@ -3671,6 +3671,110 @@ async fn cell_detail_caps_a_huge_value(cx: &mut TestAppContext) {
     });
 }
 
+/// A cell longer than one page can be read a page at a time. The second
+/// page is the following bytes, not a copy of the first, and moving to
+/// another cell returns to that cell's first page. Copy stays the whole
+/// value.
+#[gpui_kit::test]
+async fn cell_detail_pages_a_value_longer_than_the_cap(cx: &mut TestAppContext) {
+    let cap = 32 * 1024;
+    let page_a = "A".repeat(cap);
+    let page_b = "B".repeat(cap);
+    let value = format!("{page_a}{page_b}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("paged.csv");
+    std::fs::write(&path, format!("a,b\nbig,{value}\n")).expect("write");
+    let opened = anvil_core::source::local::open_local(&path).expect("open");
+    let doc = anvil_core::index_opened(opened);
+
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
+    let written = inject_doc(cx, &view, doc);
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.selection.set(CellPos::new(0, 1));
+        view.open_cell_detail(cx);
+    });
+    cx.run_until_parked();
+
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("cell detail");
+        assert_eq!(detail.text, page_a);
+        assert_eq!(detail.start, 0);
+        assert_eq!(detail.end, cap as u64);
+        assert!(detail.truncated);
+        assert!(!detail.adjusted_boundary);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 1)));
+    });
+
+    cx.simulate_keystrokes("alt-right");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("second page");
+        assert_eq!(
+            detail.text, page_b,
+            "the second page must not repeat the first"
+        );
+        assert_eq!(detail.start, cap as u64);
+        assert_eq!(detail.end, (cap * 2) as u64);
+        assert!(detail.truncated);
+        // Alt+Right pages the panel. It does not move the cursor.
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 1)));
+    });
+
+    cx.simulate_keystrokes("alt-left");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("first page again");
+        assert_eq!(detail.text, page_a);
+        assert_eq!(detail.start, 0);
+    });
+
+    cx.simulate_keystrokes("alt-end");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("last page");
+        assert_eq!(detail.text, page_b);
+        assert_eq!(detail.start, cap as u64);
+    });
+
+    cx.simulate_keystrokes("alt-home");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("first page");
+        assert_eq!(detail.start, 0);
+        assert_eq!(detail.text, page_a);
+    });
+
+    // A different cell starts at its own first page. Coming back does too.
+    cx.simulate_keystrokes("left");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("other cell");
+        assert_eq!(detail.text, "big");
+        assert!(!detail.truncated);
+        assert_eq!(detail.start, 0);
+    });
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+    cx.update_window_entity(&view, |view, _, _| {
+        let detail = view.cell_detail.as_ref().expect("returned cell");
+        assert_eq!(detail.text, page_a);
+        assert_eq!(detail.start, 0);
+    });
+
+    let copy = if cfg!(target_os = "macos") {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    };
+    cx.simulate_keystrokes(copy);
+    let ending = if cfg!(windows) { "\r\n" } else { "\n" };
+    let captured = written.lock().expect("clipboard recorder").clone();
+    assert_eq!(captured, vec![format!("{value}{ending}")]);
+}
+
 /// With a filter active, the column inspector scans only the visible
 /// rows and reports that view's metrics.
 #[gpui_kit::test]

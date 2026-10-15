@@ -166,9 +166,9 @@ spreadsheet table. Retain:
   scans and cell-detail reads, with generation guards for obsolete work.
 
 Eliding text to fit a column is presentation, never mutation of the value.
-Copy stays byte-faithful. The Cell panel's existing 32 KiB display cap is
-explicitly reported; redesigning chrome does not remove it or justify a
-large read on the UI thread.
+Copy stays byte-faithful. The Cell panel shows one 32 KiB page at a time
+and names those bytes; a longer cell is paged. Redesigning chrome does
+not raise that page size or justify a large read on the UI thread.
 
 ## Acceptance and evidence
 
