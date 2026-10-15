@@ -218,10 +218,15 @@ this may freeze the UI.
       **Files** button, and the panel's own × .
 - [x] Tab strip scrolls horizontally instead of crushing tabs when
       the list is long (`overflow_x_scroll` + `tab_scroll`).
-- [ ] Dockable / resizable / right-side panel, and a truly nested
-      tree (directories inside archives). The data model already
-      supports it; only the presentation is missing.
-- [ ] Tab reordering and a tooltip for truncated labels.
+- [x] The file panel is a Kit resizable pane on the left. Its width
+      is retained and the grid reflows from the same geometry.
+- [ ] Moving that panel to the right, collapsing it to an icon rail,
+      and a nested archive tree (directories inside archives) are
+      still open. `DocumentSnapshot` and `group_documents` already
+      support the data.
+- [x] Truncated tab and file-panel labels keep a full-name tooltip
+      (`navigation_tooltip` in `tab_strip.rs` and `file_panel.rs`).
+- [ ] Tab reordering.
 - [ ] Remember recently-closed tabs.
 
 #### Search
@@ -1055,11 +1060,10 @@ whether to elevate one.
 - **Additional archive formats** — `gz`, `tar.gz`, `7z`, `tar.zst`,
   `parquet` (parquet would require a new source path that bypasses
   the parser).
-- **Dockable / resizable side panel** — a left file panel landed in
-  Milestone 2 (see the Multi-document tabs section). Making it
-  resizable, movable to the right, or collapsible to an icon rail,
-  and growing it into a truly nested tree, can reuse
-  `DocumentSnapshot` and `group_documents` unchanged.
+- **Side panel** — a left file panel landed in Milestone 2 and is a
+  Kit resizable pane. Moving it to the right, collapsing it to an
+  icon rail, and growing it into a nested archive tree are still
+  open. Those can reuse `DocumentSnapshot` and `group_documents`.
 - **Dataset comparison** — diff two files by `(record_index, column)`
   with a side-by-side view.
 - **Configurable copy format** — give Cmd/Ctrl+C a chosen output

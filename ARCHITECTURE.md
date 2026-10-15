@@ -296,7 +296,7 @@ None`) are listed but not navigable. It also runs `encoding::scan` on
   single-line buffer and caret logic; `input` renders and hit-tests it.
 - Full-cell **Cell** panel (Cmd/Ctrl+Enter, `render_cell_detail` in
   `ui::view`): reads one page of the cursor cell on the background
-  executor with `exact_string_window` (32 KiB per page, generation-guarded).
+  executor with `display_window` (32 KiB per page, generation-guarded).
   Previous/Next and Alt+Left/Right/Home/End move through a longer value.
   Changing cells returns to the first page. Copy stays the full exact value.
 - `ui::view::ask` — the Ask bar: live preview of the parsed filter,
@@ -524,7 +524,9 @@ Keyboard bindings are now centralized in `src/ui/commands.rs`:
   keystroke-to-intent mapping. It handles arrow / Page / Home / End
   movement (including Shift extension), Cmd/Ctrl+Home/End row jumps,
   Tab / Shift-Tab, Cmd/Ctrl+C, Cmd/Ctrl+A (select the whole view),
-  Cmd/Ctrl+G (go-to-row), Cmd/Ctrl+O (open file), and Esc.
+  Cmd/Ctrl+F / Cmd/Ctrl+L / Cmd/Ctrl+Shift+L, Cmd/Ctrl+G (go-to-row),
+  Cmd/Ctrl+O (open file), Cmd/Ctrl+B / Cmd/Ctrl+I / Cmd/Ctrl+D,
+  Cmd/Ctrl+Enter (cell panel), F3 / Shift-F3, and Esc.
 - `Action` is a small UI-layer enum (`MoveCursor`, `Page`, `NextCell`, `Copy`,
   `Escape`, `OpenSearch`, `NextMatch`, `SelectAll`, `OpenGoToRow`,
   `OpenFile`, ...), not a GPUI `Action` type.
@@ -539,8 +541,9 @@ Keyboard bindings are now centralized in `src/ui/commands.rs`:
 This is the deliberately small extraction that makes new bindings
 (search, filter, go-to-row, select-all) easy to add and test. It does
 not yet provide user-rebindable shortcuts or typed-action menu integration.
-Kit supplies the document dropdown menu and toolbar-accessible shortcut
-cheatsheet, but Cmd/Ctrl+? is not implemented. A later GPUI-native layer (`actions!` +
+Help is not in that table. `MainView::on_shell_key_down` opens the
+shortcuts dialog on secondary+`?` and on secondary+Shift+`/`, with no
+Alt, before `action_for` runs. A later GPUI-native layer (`actions!` +
 `cx.bind_keys`) can consume the same intents; Shift-navigation will
 need distinct typed actions or a modifier-aware binding strategy.
 
@@ -670,8 +673,9 @@ The shell captures Cmd/Ctrl+O so Open works from welcome and focused Kit
 controls as well as the grid. It routes query/panel intents from shell
 controls only when none of the grid/query focus handles owns the event,
 leaving input editing to its existing handler. Kit supplies control focus
-and dialog/menu behavior. The shortcut cheatsheet is toolbar-accessible;
-there is no Cmd/Ctrl+? binding or user-rebinding implementation.
+and dialog/menu behavior. `on_shell_key_down` opens the shortcut
+cheatsheet on Cmd/Ctrl+? and on Cmd/Ctrl+Shift+/. There is no
+user-rebinding implementation.
 
 The grid div carries `key_context("Grid")`, `.track_focus(&self.focus_handle)`,
 and an `on_key_down` listener that delegates to
@@ -708,6 +712,15 @@ Recognised keys:
 | Cmd/Ctrl+F       | Open the search bar overlay; if the filter bar is open, switch to search (closing it first). No-op when search is already open.                                 |
 | Cmd/Ctrl+L       | Open the filter bar overlay; if the search bar is open, switch to filter (closing it first). No-op when filter is already open.                                 |
 | Cmd/Ctrl+Shift+L | Open the natural-language **Ask** bar; previews a Tier 1 parse and accepts it into the filter bar.                                                              |
+| Cmd/Ctrl+?       | Open the shortcuts dialog. `on_shell_key_down` also accepts Cmd/Ctrl+Shift+/. This chord is not in `commands::action_for`.                                        |
+| Cmd/Ctrl+A       | Select the whole view.                                                                                                                                          |
+| Cmd/Ctrl+G       | Open the go-to-row bar.                                                                                                                                         |
+| Cmd/Ctrl+O       | Open a file. The shell handles this chord from the welcome surface as well as the grid.                                                                         |
+| Cmd/Ctrl+B       | Show or hide the file panel.                                                                                                                                    |
+| Cmd/Ctrl+I       | Show or hide the column inspector.                                                                                                                              |
+| Cmd/Ctrl+D       | Show or hide diagnostics.                                                                                                                                       |
+| Cmd/Ctrl+Enter   | Open the cell panel on the cursor cell.                                                                                                                         |
+| Alt+Left/Right/Home/End | Page the open cell panel. Ignored while a query bar is focused.                                                                                            |
 
 `commands::action_for` maps each `Keystroke` to a logical
 `commands::Action`; `MainView::run_action` executes it. Shift held
@@ -834,9 +847,9 @@ altogether.
 - Drag auto-scroll only triggers when the pointer is fully outside the
   list's vertical bounds; there is no proximity margin, and the speed
   is a fixed one row per tick (no proportional acceleration).
-- The `commands` module that will own keybindings (search, filter,
-  copy) is not yet extracted. Today keybindings are inlined in
-  `view.rs::on_grid_key_down`.
+- Keybindings live in `src/ui/commands.rs`. Help is the exception:
+  `on_shell_key_down` opens the shortcuts dialog before `action_for`.
+  User-rebindable shortcuts are still not implemented.
 
 ## Editable text inputs
 
