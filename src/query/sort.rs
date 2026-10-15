@@ -96,15 +96,23 @@ impl Key {
         let Some(cell) = doc.cell(row, ColumnIndex(spec.column)) else {
             return Key::Missing;
         };
-        let trimmed = cell.as_str().trim();
-        if trimmed.is_empty() {
+        // Only a zero-byte cell is missing. A whitespace-only cell is a
+        // value (ADR 0003): text sorts it by those bytes, and a numeric
+        // sort rejects it at the parse below.
+        if cell.as_bytes().is_empty() {
             return Key::Missing;
         }
         match spec.kind {
-            SortKind::Numeric => trimmed
-                .parse::<f64>()
-                .map(Key::Number)
-                .unwrap_or(Key::Missing),
+            SortKind::Numeric => {
+                let trimmed = cell.as_str().trim();
+                if trimmed.is_empty() {
+                    return Key::Missing;
+                }
+                trimmed
+                    .parse::<f64>()
+                    .map(Key::Number)
+                    .unwrap_or(Key::Missing)
+            }
             SortKind::Text => {
                 // Exact bytes: no case folding and no trimming, so values
                 // that differ only in padding or case are distinct keys.
@@ -225,6 +233,22 @@ mod tests {
             apply(&padded, &rows, &spec(&padded, 0, SortOrder::Ascending)),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn whitespace_only_text_sorts_by_exact_bytes() {
+        let doc = doc_from(b"v,pad\n,a\n\" \",a\na,a\n");
+        let rows = all_rows(&doc);
+        let spec = spec(&doc, 0, SortOrder::Ascending);
+        assert_eq!(spec.kind, SortKind::Text);
+        // "" is missing and stays last. " " (0x20) sorts before "a".
+        assert_eq!(apply(&doc, &rows, &spec), vec![1, 2, 0]);
+        let desc = SortSpec {
+            column: 0,
+            order: SortOrder::Descending,
+            kind: SortKind::Text,
+        };
+        assert_eq!(apply(&doc, &rows, &desc), vec![2, 1, 0]);
     }
 
     #[test]
