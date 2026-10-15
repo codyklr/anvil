@@ -42,8 +42,11 @@ jobs:
       #   - freetype-sys probes `freetype2`
       #   - xkbcommon links `xkbcommon` / `xkbcommon-x11`
       #   - wayland-client probes `wayland-client`
-      # Fontconfig and Vulkan (ash) are dlopen'd, so their -dev packages are
-      # not required to build.
+      # Fontconfig is dlopen'd (yeslogic-fontconfig-sys and zed-font-kit
+      # both key off RUST_FONTCONFIG_DLOPEN). Without that variable the
+      # build script runs pkg-config and fails, because the runner does
+      # not ship fontconfig.pc. The runtime library is libfontconfig.so.1.
+      # Vulkan (ash) is also dlopen'd, so its -dev package is not required.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -53,9 +56,11 @@ jobs:
             libxkbcommon-x11-dev \
             libfreetype6-dev \
             libwayland-dev \
+            libfontconfig1 \
             pkg-config \
             cmake \
             clang
+          echo "RUST_FONTCONFIG_DLOPEN=1" >> "$GITHUB_ENV"
 
       - name: Install faster linker
         if: matrix.linker_setup != ''
