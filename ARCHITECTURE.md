@@ -520,11 +520,12 @@ Keyboard bindings are now centralized in `src/ui/commands.rs`:
   movement (including Shift extension), Cmd/Ctrl+Home/End row jumps,
   Tab / Shift-Tab, Cmd/Ctrl+C, Cmd/Ctrl+A (select the whole view),
   Cmd/Ctrl+G (go-to-row), Cmd/Ctrl+O (open file), and Esc.
-- `Action` is a small UI-layer enum (`MoveCursor`, `NextCell`, `Copy`,
+- `Action` is a small UI-layer enum (`MoveCursor`, `Page`, `NextCell`, `Copy`,
   `Escape`, `OpenSearch`, `NextMatch`, `SelectAll`, `OpenGoToRow`,
   `OpenFile`, ...), not a GPUI `Action` type.
-  `PAGE_STEP` lives alongside the binding table. The module has unit
-  tests that need no window.
+  Page Up / Page Down are `Action::Page`. The view measures the grid
+  and steps by `visible_rows - 1`, falling back to 20 rows before the
+  first layout. The module has unit tests that need no window.
 - `MainView::on_grid_key_down` delegates to `action_for`; its
   `run_action` method executes the intent against view state (selection,
   clipboard, overlay). This keeps `commands` independent of `MainView`
@@ -691,7 +692,7 @@ Recognised keys:
 | Key              | Action                                                                                                                                                          |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Arrow keys       | Move the selection by one cell.                                                                                                                                 |
-| Page Up/Down     | Move the selection by `commands::PAGE_STEP` rows.                                                                                                               |
+| Page Up/Down     | Move the selection by one screen, keeping one row of overlap. Before the grid is measured the jump is 20 rows.                                                  |
 | Home / End       | Jump the column cursor to the first / last column.                                                                                                              |
 | Cmd/Ctrl+Home    | Jump the row cursor to the first row (column preserved).                                                                                                        |
 | Cmd/Ctrl+End     | Jump the row cursor to the last row (column preserved).                                                                                                         |

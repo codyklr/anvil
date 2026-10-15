@@ -1602,6 +1602,10 @@ impl MainView {
                 column_delta,
                 extend,
             } => self.move_selection(row_delta, column_delta, extend, cx),
+            Action::Page { direction, extend } => {
+                let delta = self.page_row_delta(direction);
+                self.move_selection(delta, 0, extend, cx);
+            }
             Action::Copy => self.copy_selection_to_clipboard(cx),
             Action::NextCell { forward } => self.move_cell_selection(forward, cx),
             Action::Escape => {
@@ -2042,6 +2046,20 @@ impl MainView {
         self.auto_scroll_task = None;
     }
 
+    /// Page Up / Page Down step. A measured grid keeps one row on screen.
+    /// Before the first layout the jump is 20 rows, the old fixed page.
+    fn page_row_delta(&self, direction: commands::PageDirection) -> i64 {
+        const UNMEASURED_PAGE: u64 = 20;
+        let step = match self.grid_bounds {
+            Some(bounds) => visible_rows_for_height(bounds.size.height).saturating_sub(1),
+            None => UNMEASURED_PAGE,
+        } as i64;
+        match direction {
+            commands::PageDirection::Up => -step,
+            commands::PageDirection::Down => step,
+        }
+    }
+
     /// One auto-scroll step: if the pointer is outside the grid's top or
     /// bottom edge, scroll the list by one row and extend the selection
     /// to the row at that edge. A no-op otherwise.
@@ -2057,8 +2075,7 @@ impl MainView {
             return;
         };
 
-        let row_h = f32::from(theme::ROW_HEIGHT);
-        let visible_rows = (f32::from(bounds.size.height) / row_h).floor().max(1.0) as u64;
+        let visible_rows = visible_rows_for_height(bounds.size.height);
         let first_visible = self.v_scroll.0.borrow().base_handle.top_item() as u64;
         let last_visible = (first_visible + visible_rows - 1).min(row_count - 1);
         let cursor_col = self.selection.cursor().map(|c| c.column_index).unwrap_or(0);
@@ -2470,6 +2487,13 @@ enum AutoScrollDirection {
 /// Decide the auto-scroll direction from the pointer's window-space `y`
 /// and the grid's window-space bounds. `None` when the pointer is within
 /// (or on) the vertical bounds, so no scrolling is needed.
+/// Data rows that fit in a grid of this height. Page keys and drag
+/// auto-scroll both use it.
+fn visible_rows_for_height(height: Pixels) -> u64 {
+    let row_h = f32::from(theme::ROW_HEIGHT);
+    (f32::from(height) / row_h).floor().max(1.0) as u64
+}
+
 fn auto_scroll_direction(pointer_y: Pixels, bounds: Bounds<Pixels>) -> Option<AutoScrollDirection> {
     let top = bounds.origin.y;
     let bottom = bounds.origin.y + bounds.size.height;

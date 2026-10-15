@@ -230,6 +230,58 @@ async fn arrow_keys_move_selection_when_grid_focused(cx: &mut TestAppContext) {
     });
 }
 
+fn grid_bounds_for_rows(rows: u64) -> Bounds<Pixels> {
+    let height = f32::from(theme::ROW_HEIGHT) * rows as f32;
+    Bounds {
+        origin: gpui_kit::point(px(0.), px(0.)),
+        size: gpui_kit::size(px(400.), px(height)),
+    }
+}
+
+fn press_page(view: &mut MainView, chord: &str, cx: &mut Context<MainView>) {
+    let action =
+        commands::action_for(&gpui_kit::Keystroke::parse(chord).expect("page key")).unwrap();
+    view.run_action(action, cx);
+}
+
+/// Page Up / Page Down move by the measured viewport minus one row.
+/// Eight visible rows step by 7. Forty step by 39. No bounds yet
+/// falls back to 20. Shift extends from the anchor.
+#[gpui_kit::test]
+async fn page_keys_follow_the_visible_row_count(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        init_theme(cx);
+        MainView::new(cx)
+    });
+    inject_doc(cx, &view, large_document(80));
+
+    cx.update_window_entity(&view, |view, _, cx| {
+        view.grid_bounds = Some(grid_bounds_for_rows(8));
+        press_page(view, "pagedown", cx);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(7, 0)));
+
+        view.selection.set(CellPos::new(0, 0));
+        view.grid_bounds = Some(grid_bounds_for_rows(40));
+        press_page(view, "pagedown", cx);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(39, 0)));
+
+        view.selection.set(CellPos::new(0, 0));
+        view.grid_bounds = None;
+        press_page(view, "pagedown", cx);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(20, 0)));
+
+        view.selection.set(CellPos::new(0, 0));
+        view.grid_bounds = Some(grid_bounds_for_rows(8));
+        press_page(view, "shift-pagedown", cx);
+        assert_eq!(view.selection.anchor(), Some(CellPos::new(0, 0)));
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(7, 0)));
+
+        view.selection.set(CellPos::new(7, 0));
+        press_page(view, "pageup", cx);
+        assert_eq!(view.selection.cursor(), Some(CellPos::new(0, 0)));
+    });
+}
+
 /// Cmd/Ctrl+Home / Cmd/Ctrl+End jump to the first / last row while
 /// keeping the current column. Fails if the chord is bound to the
 /// plain column jump instead.

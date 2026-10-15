@@ -17,10 +17,14 @@
 
 use gpui_kit::Keystroke;
 
-/// How many rows a Page Up / Page Down jump moves the cursor. Tied to a
-/// conservative estimate of the visible row count so the grid does not
-/// have to be measured on every keypress.
-pub(super) const PAGE_STEP: i64 = 20;
+/// Which way a Page Up / Page Down key points. The view turns this
+/// into a row delta from the measured grid, so the binding table
+/// never has to know the window height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PageDirection {
+    Up,
+    Down,
+}
 
 /// A logical keyboard intent. The view executes these; they carry no
 /// GPUI types so the binding table stays testable.
@@ -32,6 +36,12 @@ pub(super) enum Action {
     MoveCursor {
         row_delta: i64,
         column_delta: i64,
+        extend: bool,
+    },
+    /// Page Up / Page Down. `run_action` measures the grid and keeps
+    /// one row of overlap. `extend` is Shift.
+    Page {
+        direction: PageDirection,
         extend: bool,
     },
     /// Move the cursor to the adjacent cell in row-major order,
@@ -149,13 +159,22 @@ pub(super) fn action_for(keystroke: &Keystroke) -> Option<Action> {
         return Some(Action::Escape);
     }
 
+    if key == "pageup" || key == "pagedown" {
+        return Some(Action::Page {
+            direction: if key == "pageup" {
+                PageDirection::Up
+            } else {
+                PageDirection::Down
+            },
+            extend: modifiers.shift,
+        });
+    }
+
     let (row_delta, column_delta) = match key {
         "up" => (-1, 0),
         "down" => (1, 0),
         "left" => (0, -1),
         "right" => (0, 1),
-        "pageup" => (-PAGE_STEP, 0),
-        "pagedown" => (PAGE_STEP, 0),
         "home" => (0, i64::MIN),
         "end" => (0, i64::MAX),
         "f3" => {
@@ -257,21 +276,26 @@ mod tests {
     }
 
     #[test]
-    fn page_keys_step_by_page_step() {
+    fn page_keys_map_to_a_page_action() {
         assert_eq!(
             act("pageup"),
-            Some(Action::MoveCursor {
-                row_delta: -PAGE_STEP,
-                column_delta: 0,
+            Some(Action::Page {
+                direction: PageDirection::Up,
                 extend: false,
             })
         );
         assert_eq!(
             act("pagedown"),
-            Some(Action::MoveCursor {
-                row_delta: PAGE_STEP,
-                column_delta: 0,
+            Some(Action::Page {
+                direction: PageDirection::Down,
                 extend: false,
+            })
+        );
+        assert_eq!(
+            act("shift-pagedown"),
+            Some(Action::Page {
+                direction: PageDirection::Down,
+                extend: true,
             })
         );
     }
